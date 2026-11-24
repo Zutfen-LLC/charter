@@ -1,0 +1,236 @@
+# ADR 0001: Governance and evidence contracts
+
+- Status: Proposed (for review under issue #1)
+- Scope: the pilot described in [docs/pilot.md](../pilot.md). Synthetic data only.
+- Companion documents: [role matrix](../contracts/role-matrix.md), [state machines](../contracts/state-machines.md), [versioning](../contracts/versioning.md)
+- Executable examples: `fixtures/contracts/` and `tests/contracts/`
+
+> Nothing here is a claim of legal compliance, legal sufficiency, or eDiscovery
+> readiness. These are technical contracts to be tested by the pilot drill.
+
+## 1. Context and decision
+
+Charter must enforce who may use which model and preserve the exact AI work done
+on a held matter, even after the ordinary workspace view changes. We decide that:
+
+1. The **workspace** (chats, projects, documents as users see them) is a mutable
+   working copy. **Evidence** is a separate, append-only, restricted record.
+   Evidence is never a second UI for reading work the reader could not otherwise see.
+2. Every model turn is described by an **ordered, hash-chained event log**.
+   Events are the only source of truth for what happened.
+3. A turn may disclose data to a provider only after a **write-ahead
+   disclosure intent** is durably acknowledged, and a response may be released to
+   the client only after the **output is durably acknowledged**.
+4. **Holds win over retention.** Disposal is two-phase and re-checks holds at the
+   moment of irreversible deletion.
+5. The **exact bytes sent** to the provider are stored. Context is never
+   reconstructed afterwards from the workspace.
+
+## 2. Trust boundaries
+
+| Zone | Contains | Trusted for | Not trusted for |
+| --- | --- | --- | --- |
+| Client (browser/test harness) | UI, user input | Nothing; all input is untrusted | Identity, policy, model choice, credentials |
+| Control plane (Charter service) | AuthN/Z, policy, routing, usage reservation, capture, hold, export | Enforcing policy; writing events | Availability of providers; its own durability without the evidence store ack |
+| Evidence store | Append-only events and immutable objects | Durability, immutability, restricted read | Policy decisions |
+| Workspace store | Mutable chats, projects, doc versions | Working copy only | Being a source of preservation |
+| Model provider / adapter | Receives sent context, returns output | Nothing; assume disclosure is irreversible once bytes leave | Reporting its own outcome accurately |
+| External source library (e.g. SharePoint, later) | Original documents | Origin of excerpts | Preservation (capturing an excerpt does not preserve the library) |
+| Operators / infrastructure | Hosts, backups, keys | Keeping the system running | Reading content, changing holds or evidence |
+
+Client-side model credentials are out of scope: the client never holds provider keys.
+
+## 3. Identity and keys
+
+All identifiers are opaque, immutable, lowercase UUIDs (or ULIDs) assigned by the
+control plane. Display names are never keys.
+
+| Key | Meaning |
+| --- | --- |
+| `tenant_id` | Customer-operated deployment boundary. Present on every record. |
+| `project_id` | Isolation boundary within a tenant. Policy, membership and routing attach here. |
+| `matter_id` | Legal/records grouping that holds attach to. A project maps to one or more matters; an event carries exactly one `matter_id` at capture time. |
+| `custodian_id` | The user whose work is preserved (the actor on the turn). Survives account deactivation. |
+| `turn_id` | One request/response exchange. |
+| `seq` | 0-based position of an event within a turn. |
+| `hold_id` | One hold. Holds are independent objects; evidence is *derived* held, never stamped. |
+
+Evidence is addressed by `(tenant_id, project_id, turn_id, seq)` and objects by
+`sha256`. Every query and storage path must include `tenant_id`; a request that
+omits it or mismatches the caller's tenant is refused (negative-path test required
+in #3). Moving a project between matters appends a new event; it never rewrites history.
+
+## 4. Records and custodians
+
+- A **record** is a turn's event log plus the objects the events reference
+  (user input, sealed source excerpts, sent request bytes, output).
+- A **custodian** is the `custodian_id` of the turn's actor. Revoking or deleting
+  a user changes workspace access only; custodian attribution on existing
+  evidence is permanent and holds scoped to that custodian continue to apply.
+- Deleting a chat or project, or editing/deleting a source, creates workspace
+  changes and does not alter evidence.
+
+## 5. Event and export schema (v1)
+
+Each event is a JSON object:
+
+```json
+{
+  "schema_version": "1.0.0",
+  "tenant_id": "...", "project_id": "...", "matter_id": "...",
+  "turn_id": "...", "seq": 0,
+  "type": "turn_received",
+  "recorded_at": "2026-01-15T10:00:00.000Z",
+  "actor": {"kind": "user|service", "id": "..."},
+  "payload": { },
+  "prev_hash": null,
+  "event_hash": "sha256:<hex>"
+}
+```
+
+Event types in v1: `turn_received`, `policy_decision`, `usage_reserved`,
+`context_sealed`, `disclosure_intent`, `evidence_ack`, `provider_accepted`,
+`output_recorded`, `response_released`, `usage_settled`, `turn_completed`,
+`turn_interrupted`, `outcome_resolved`. Payload contracts are shown in
+`fixtures/contracts/*.json`.
+
+An **export bundle** is a directory containing `manifest.json` (schema version,
+scope, creator, list of event logs with the head hash of each, list of objects
+with `sha256` and byte length), the event logs (one JSON object per line), and
+the objects named by their hash. A verifier needs only the bundle and this
+document. Verification fails on any missing object, changed byte, broken chain,
+or event-ordering rule violation (section 8).
+
+## 6. Canonical hashing
+
+- Algorithm: SHA-256, written `sha256:<64 lowercase hex>`.
+- Event hash: SHA-256 of the canonical JSON of the event **without** `event_hash`.
+- Canonical JSON: RFC 8785 (JCS) rules: UTF-8, object keys sorted, no insignificant
+  whitespace. **Floating point numbers are forbidden** in events (use integers,
+  decimal strings, or minor units for money); the reference model rejects them.
+  Timestamps are RFC 3339 UTC strings with millisecond precision, `Z` suffix.
+- Chain: `prev_hash` of event N is `event_hash` of event N-1; event 0 has `null`.
+  The chain head hash identifies the turn log.
+- Objects are hashed over their raw bytes and are immutable.
+- Anchoring heads externally (transparency log, WORM replication) is an
+  open gap for the pilot; the chain proves internal consistency, not that the
+  whole log was not replaced by someone with write access to the store.
+
+## 7. Hold, time and retention semantics
+
+**Scope.** A hold has `matter_id` (required), optional `custodian_ids` (empty = all
+custodians), and an optional time window `[window_start, window_end)` applied to
+the evidence's `recorded_at` (`window_end` null = open-ended, so future work on the
+matter is covered until release).
+
+**Held is derived.** An evidence item is *held* iff at least one **active** hold
+matches it. Releasing a hold removes only that hold's claim; the item stays held
+while any other active hold matches (tested: overlapping holds).
+
+**Ordering and time.** Hold placement and release are assigned a monotonically
+increasing `hold_epoch` by the control plane inside one serialized transaction.
+Decisions about disposal compare epochs, never wall clocks, so clock skew cannot
+reorder a hold behind an expiry. Wall-clock `placed_at` is informational.
+
+**Retention.** Each evidence item has `retention_expires_at`. Eligibility for
+disposal requires `now >= retention_expires_at` **and** not held.
+
+**Disposal is two-phase** (see state machines):
+1. *Sweep* marks eligible items `disposal_pending` and records the `hold_epoch` it observed.
+2. *Purge*, after the grace period, re-evaluates holds against the **current** epoch
+   and only then irreversibly deletes. A hold placed between the phases returns
+   the item to `active`/held. Placing a hold on an item already `disposed`
+   cannot recover it: the system records a `disposed_before_hold` gap in the
+   hold's report so the miss is visible rather than silent.
+3. Purge requires an approval by `records_officer` (not `tenant_admin` or `operator`).
+
+Retention is a technical timer here, not a statement of any legal retention period.
+
+## 8. Release rule and durable evidence acknowledgment
+
+Define `ack(N)`: an `evidence_ack` event whose payload names `acked_seq` and
+`acked_event_hash`, created only after the evidence store confirmed a durable write
+of event N and all earlier events (storage receipt: fsync/replication level set by
+deployment; the pilot must record the level actually tested).
+
+Mandatory ordering rules, enforced by the control plane and checked by the verifier:
+
+- **R1 (write-ahead disclosure):** no byte may be sent to a provider before
+  `ack(disclosure_intent)`. The intent carries the sha256 and length of the exact
+  request bytes (already stored as an object) and the provider/endpoint identity.
+- **R2 (release gate):** `response_released` is allowed only after `ack(output_recorded)`
+  for the output being released. A response that has not been durably
+  recorded is not delivered, so no successful response escapes without evidence.
+- **R3 (single terminal event):** every turn ends in exactly one of `turn_completed`
+  or `turn_interrupted`. `response_released` may occur only in a turn that ends in
+  `turn_completed`.
+- **R4 (policy first):** `policy_decision` (allow or deny) precedes any `context_sealed`;
+  a deny ends the turn with no disclosure.
+- If the evidence store is unavailable at any gate the turn fails closed
+  (nothing is sent or released) and the failure is returned to the client.
+  Fail-closed after R1 may waste a reservation but never causes unrecorded disclosure.
+
+Streaming: for the pilot the control plane buffers provider output and releases
+only after `ack(output_recorded)`. Streaming to the client in segments is allowed
+later only if each released segment is acknowledged first.
+
+## 9. Crashes and mid-stream provider failures
+
+Disclosure state is **derived from the log**, never stored separately:
+
+| Log contents | Disclosure |
+| --- | --- |
+| No acked `disclosure_intent` | `none` (R1 makes sending impossible) |
+| Acked intent, no `provider_accepted` | `unknown` (a send may have occurred) |
+| `provider_accepted` present | `disclosed` |
+
+- **Mid-stream provider failure:** the partial output is stored as an object, an
+  `output_recorded` event with `complete: false` is acknowledged, and the turn ends
+  in `turn_interrupted` (`reason: provider_stream_error`). Nothing is released.
+  The user may be told "failed"; the evidence says "disclosed, output partial".
+- **Crash:** on restart, recovery scans for non-terminal turns and appends
+  `turn_interrupted` (`reason: crash_recovery`) with the derived disclosure state.
+  The recovery actor is `service`, never the original user.
+- **Unknown outcome:** treated as **disclosed** for policy reporting, holds, export,
+  and billing (usage is settled at the reserved maximum, basis `reserved_max`). The
+  system never silently retries on another provider. A later reconciliation
+  (provider logs) appends `outcome_resolved`; history is never edited.
+
+## 10. Roles
+
+See [role matrix](../contracts/role-matrix.md). Summary: `tenant_admin`,
+`project_member`, `records_officer`, `export_reviewer` and `operator` are disjoint
+capability sets. No role may edit or delete evidence. Hold placement, export
+approval and purge approval require different people from the requestor.
+
+## 11. Failure, recovery, backup and restore
+
+- Evidence store is the system of record for evidence; the workspace store may be
+  restored independently and must never be used to repair evidence.
+- Backups of evidence are encrypted, restricted like the primary, and subject to the
+  same holds: **a backup copy must not be used to resurrect disposed evidence**, and
+  disposal records which backup generations still hold a copy (gap if unmanaged).
+- After a restore, run chain verification on every log and compare head hashes with
+  the last exported manifests; a mismatch or missing tail blocks release until
+  reviewed. Events lost after the last ack are by definition ones whose responses
+  were not released (R2); lost-but-disclosed intents are surfaced by R1 order.
+- Control-plane crash is safe by R1/R2; evidence-store outage fails closed;
+  provider outage yields `turn_interrupted` with disclosure state.
+- The pilot must test actual storage protection (immutability/permissions) and
+  record any mocked boundary as a gap, not a pass.
+
+## 12. Out of scope and assumptions
+
+Out of scope: legal compliance claims, desktop packaging, arbitrary tools, provider
+failover, client-side credentials, other document connectors, legal-platform ingestion,
+preserving external libraries. Assumptions: single trusted clock source on the control
+plane (informational only), customer operates infrastructure, synthetic data,
+identity provider is a test IdP in the pilot, and evidence-store administrators are
+a residual risk mitigated by the role matrix and anchoring (open gap, section 6).
+
+## 13. Consequences and open questions
+
+- Write-ahead plus buffering adds latency; accepted for the pilot.
+- Open: anchoring of chain heads; storage receipt level; grace-period length;
+  whether `disposed_before_hold` should be blocking for matters with pending
+  preservation notices (needs policy owner decision).
