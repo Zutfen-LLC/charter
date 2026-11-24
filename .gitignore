@@ -1,0 +1,14 @@
+# Local credentials and deployment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+compose.override.yml
+
+# Build outputs and disposable evidence
+/bin/
+/dist/
+/coverage/
+/.local/
+/evidence-out/
