@@ -17,8 +17,11 @@ class Golden(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             gen_fixtures.OUT = d
             gen_fixtures.main()
-            for n in os.listdir(d):
-                self.assertEqual(open(os.path.join(d, n)).read(), open(os.path.join(FX, n)).read(), n)
+            for root, _, files in os.walk(d):
+                for n in files:
+                    rel = os.path.relpath(os.path.join(root, n), d)
+                    with open(os.path.join(d, rel)) as a, open(os.path.join(FX, rel)) as b:
+                        self.assertEqual(a.read(), b.read(), rel)
         gen_fixtures.OUT = old
 
     def test_floats_rejected(self):
@@ -111,7 +114,7 @@ class Turns(unittest.TestCase):
         base = {k: f["events"][0][k] for k in ("tenant_id", "project_id", "matter_id", "turn_id")}
         errs = verify_turn(build_turn(base, steps))
         for t in ("context_sealed", "disclosure_intent", "provider_accepted", "response_released"):
-            self.assertTrue(any(f"R4 {t}" in e for e in errs), t)
+            self.assertTrue(any("[R4]" in e and t in e for e in errs), t)
 
     def test_provider_contact_before_intent_ack_rejected(self):
         f = load("complete-turn.json")
@@ -188,3 +191,52 @@ class Holds(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NegativeFixtures(unittest.TestCase):
+    """Correctly rehashed logs that each break exactly one rule. The Go verifier
+    runs the same files and must report the same code."""
+    def files(self):
+        d = os.path.join(FX, "negative")
+        return sorted(os.listdir(d))
+
+    def test_every_negative_fixture_is_rejected_with_its_code(self):
+        names = self.files()
+        self.assertGreaterEqual(len(names), 20)
+        for n in names:
+            f = load("negative/" + n)
+            errs = verify_turn(f["events"], objs(f))
+            self.assertTrue(any(f"[{f['expect_code']}]" in e for e in errs), (n, f["expect_code"], errs))
+
+    def test_negative_fixtures_are_otherwise_well_formed(self):
+        # the chain is valid, so the rejection comes from the semantic rule only
+        for n in self.files():
+            f = load("negative/" + n)
+            errs = verify_turn(f["events"], objs(f))
+            self.assertFalse([e for e in errs if "[CHAIN]" in e and "hash mismatch" in e], (n, errs))
+
+    def test_golden_fixtures_still_verify_structurally_and_fully(self):
+        for n in ("complete-turn.json", "interrupted-mid-stream.json", "unknown-disclosure.json", "crash-before-intent-ack.json"):
+            f = load(n)
+            self.assertEqual(verify_turn(f["events"]), [], n)
+            self.assertEqual(verify_turn(f["events"], objs(f)), [], n)
+
+    def test_strict_json_rejects_duplicate_keys_and_malformed(self):
+        from model import strict_loads
+        for bad in ('{"a":1,"a":2}', '{"a":1} x', '{"a":'):
+            with self.assertRaises(ValueError):
+                strict_loads(bad)
+
+    def test_malformed_events_do_not_crash_the_verifier(self):
+        f = load("complete-turn.json")
+        import random
+        rnd = random.Random(7)
+        for _ in range(300):
+            ev = copy.deepcopy(f["events"])
+            e = rnd.choice(ev)
+            k = rnd.choice(list(e) + ["payload"])
+            e[k] = rnd.choice([None, 1, "x", [], {}, [None], {"sha256": 1}, True])
+            try:
+                verify_turn(ev, objs(f))
+            except (KeyError, TypeError, AttributeError, IndexError):
+                self.fail(f"verifier crashed on mutation of {k}")

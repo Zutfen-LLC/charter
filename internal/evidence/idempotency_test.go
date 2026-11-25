@@ -31,7 +31,9 @@ func TestIdempotencyKeyBindsTheWholeRequest(t *testing.T) {
 		"source content": func(r *evidence.Request) { r.Sources[0].Bytes = []byte("first source, edited") },
 		"source version": func(r *evidence.Request) { r.Sources[0].Version = 3 },
 		"source order":   func(r *evidence.Request) { r.Sources[0], r.Sources[1] = r.Sources[1], r.Sources[0] },
-		"extra source":   func(r *evidence.Request) { r.Sources = append(r.Sources, evidence.Source{ID: "d3", Version: 1, Bytes: []byte("x")}) },
+		"extra source": func(r *evidence.Request) {
+			r.Sources = append(r.Sources, evidence.Source{ID: "d3", Version: 1, Bytes: []byte("x")})
+		},
 		"dropped source": func(r *evidence.Request) { r.Sources = r.Sources[:1] },
 		"matter":         func(r *evidence.Request) { r.MatterID = evidence.NewUUID() },
 		"input":          func(r *evidence.Request) { r.Input = []byte("a different input") },

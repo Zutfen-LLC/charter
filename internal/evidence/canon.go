@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"unicode/utf16"
@@ -170,25 +171,85 @@ func lessUTF16(a, b string) bool {
 	return len(ua) < len(ub)
 }
 
-// ParseJSON decodes one JSON document into generic values suitable for
-// Canonical. Numbers stay json.Number (so floats are detected, not rounded),
-// duplicate-free structure is the caller's concern, trailing data is an error,
-// and an unpaired \uD800-\uDFFF escape is rejected instead of silently becoming
-// U+FFFD (which would change the hash).
+// ParseJSON strictly decodes ONE JSON document into generic values suitable for
+// Canonical. It rejects (instead of normalizing) invalid UTF-8, unpaired
+// \uD800-\uDFFF escapes, duplicate object keys, malformed JSON and trailing
+// data: anything silently repaired here would change the hash. Numbers stay
+// json.Number so floats are detected rather than rounded.
 func ParseJSON(raw []byte) (any, error) {
+	if !utf8.Valid(raw) {
+		return nil, errors.New("invalid UTF-8 in JSON input")
+	}
 	if err := checkSurrogates(raw); err != nil {
 		return nil, err
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
-	var v any
-	if err := d.Decode(&v); err != nil {
+	v, err := parseValue(d, 0)
+	if err != nil {
 		return nil, err
 	}
-	if d.More() {
+	if _, err := d.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("trailing data after JSON document")
 	}
 	return v, nil
+}
+
+const maxDepth = 64
+
+func parseValue(d *json.Decoder, depth int) (any, error) {
+	if depth > maxDepth {
+		return nil, errors.New("JSON nesting too deep")
+	}
+	t, err := d.Token()
+	if err != nil {
+		return nil, err
+	}
+	switch x := t.(type) {
+	case json.Delim:
+		switch x {
+		case '{':
+			m := map[string]any{}
+			for d.More() {
+				kt, err := d.Token()
+				if err != nil {
+					return nil, err
+				}
+				k, ok := kt.(string)
+				if !ok {
+					return nil, errors.New("object key is not a string")
+				}
+				if _, dup := m[k]; dup {
+					return nil, fmt.Errorf("duplicate object key %q", k)
+				}
+				v, err := parseValue(d, depth+1)
+				if err != nil {
+					return nil, err
+				}
+				m[k] = v
+			}
+			if _, err := d.Token(); err != nil { // closing }
+				return nil, err
+			}
+			return m, nil
+		case '[':
+			a := []any{}
+			for d.More() {
+				v, err := parseValue(d, depth+1)
+				if err != nil {
+					return nil, err
+				}
+				a = append(a, v)
+			}
+			if _, err := d.Token(); err != nil { // closing ]
+				return nil, err
+			}
+			return a, nil
+		}
+		return nil, fmt.Errorf("unexpected delimiter %v", x)
+	default:
+		return t, nil // string, json.Number, bool, nil
+	}
 }
 
 func checkSurrogates(raw []byte) error {
@@ -287,4 +348,21 @@ func payload(e Event) map[string]any {
 		p = map[string]any{}
 	}
 	return p
+}
+
+// ParseEventLog parses an exported event log: one strictly parsed JSON object
+// per line (blank trailing lines ignored).
+func ParseEventLog(raw []byte) ([]Event, error) {
+	var out []Event
+	for i, line := range bytes.Split(raw, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		e, err := ParseEvent(line)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", i+1, err)
+		}
+		out = append(out, e)
+	}
+	return out, nil
 }
