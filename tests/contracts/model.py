@@ -148,6 +148,8 @@ def verify_turn(events, objects=None):
     acked, sealed, sealed_req, state = set(), None, None, "start"
     released = decided = denied = False
     declared = {}
+    reserved_units = None
+    policy_destination = intent_destination = None
     types = []
     for i, e in enumerate(events):
         if not isinstance(e, dict):
@@ -179,7 +181,8 @@ def verify_turn(events, objects=None):
             except ValueError:
                 add(i, "ENVELOPE", "recorded_at is not a valid time")
         a = e.get("actor")
-        if not isinstance(a, dict) or a.get("kind") not in ("user", "service") \
+        expected_actor = "user" if i == 0 else "service"
+        if not isinstance(a, dict) or a.get("kind") != expected_actor \
                 or not isinstance(a.get("id"), str) or not ID_RE.match(a["id"]):
             add(i, "ENVELOPE", "actor must be {kind: user|service, id: identifier}")
         if not isinstance(e.get("payload"), dict):
@@ -220,6 +223,8 @@ def verify_turn(events, objects=None):
         if i > 0 and typ == "turn_received":
             add(i, "LIFECYCLE", "turn_received may appear only once, at seq 0")
         if typ == "turn_received":
+            if isinstance(p.get("input_summary"), str) and "exact input" in p["input_summary"].lower():
+                add(i, "REFS", "legacy input_summary cannot claim exact input bytes")
             if "input" in p:
                 if not _ref(p["input"]):
                     add(i, "REFS", "input must be a {sha256, bytes} reference")
@@ -227,6 +232,8 @@ def verify_turn(events, objects=None):
                 add(i, "REFS", "turn_received needs an input reference (or a legacy input_summary)")
         elif typ == "policy_decision":
             d = p.get("decision")
+            if d == "allow" and isinstance(p.get("destination"), dict):
+                policy_destination = p["destination"]
             if d not in ("allow", "deny"):
                 add(i, "POLICY", "decision must be allow or deny")
             elif i != 1:
@@ -237,6 +244,8 @@ def verify_turn(events, objects=None):
         elif typ == "usage_reserved":
             if not _int(p.get("units")) or p["units"] < 0:
                 add(i, "REFS", "usage_reserved.units must be a non-negative integer")
+            else:
+                reserved_units = p["units"]
         elif typ == "context_sealed":
             objs = _refs(p.get("objects"))
             sealed = dict(objs) if objs else {}
@@ -259,6 +268,9 @@ def verify_turn(events, objects=None):
                 elif sx["sha256"] not in sealed:
                     add(i, "REFS", "source sha256 is not among the sealed objects")
         elif typ == "disclosure_intent":
+            intent_destination = {k: p[k] for k in ("provider", "endpoint_id", "model_id") if isinstance(p.get(k), str)}
+            if policy_destination is not None and any(policy_destination.get(k) != v for k, v in intent_destination.items()):
+                add(i, "REFS", "disclosure intent destination differs from policy destination")
             rq = _ref(p.get("request"))
             if not rq:
                 add(i, "REFS", "disclosure_intent.request must be a {sha256, bytes} reference")
@@ -272,6 +284,10 @@ def verify_turn(events, objects=None):
                 if not isinstance(p.get(k), str) or not p[k]:
                     add(i, "REFS", f"disclosure_intent.{k} is required")
         elif typ == "evidence_ack":
+            if not isinstance(p.get("receipt"), str) or not p["receipt"].strip():
+                add(i, "REFS", "evidence_ack.receipt is required and must be nonempty")
+            if "storage_level" in p and (not isinstance(p["storage_level"], str) or not p["storage_level"].strip()):
+                add(i, "REFS", "evidence_ack.storage_level must be nonempty when present")
             ak = p.get("acked_seq")
             if not _int(ak) or ak < 0 or ak >= i or events[ak].get("event_hash") != p.get("acked_event_hash") \
                     or not p.get("acked_event_hash"):
@@ -279,6 +295,9 @@ def verify_turn(events, objects=None):
             else:
                 acked.update(range(ak + 1))
         elif typ == "provider_accepted":
+            accepted_destination = {k: p[k] for k in ("provider", "endpoint_id", "model_id") if isinstance(p.get(k), str)}
+            if intent_destination is not None and any(intent_destination.get(k) != v for k, v in accepted_destination.items()):
+                add(i, "REFS", "provider acceptance destination differs from disclosure intent")
             idx = [j for j, x in enumerate(events[:i]) if isinstance(x, dict) and x.get("type") == "disclosure_intent"]
             if not idx or idx[-1] not in acked:
                 add(i, "R1", "provider contacted before acked disclosure_intent")
@@ -296,10 +315,14 @@ def verify_turn(events, objects=None):
         elif typ == "usage_settled":
             if not _int(p.get("units")) or p["units"] < 0:
                 add(i, "REFS", "usage_settled.units must be a non-negative integer")
+            elif reserved_units is not None and p.get("basis") == "reserved_max" and derive_disclosure(events[:i]) != "none" and p["units"] != reserved_units:
+                add(i, "REFS", "usage_settled reserved_max units must equal the full reservation")
             if not isinstance(p.get("basis"), str) or not p["basis"]:
                 add(i, "REFS", "usage_settled.basis is required")
         elif typ == "turn_completed":
             o = p.get("outcome")
+            if o == "completed" and not any(isinstance(x, dict) and x.get("type") == "usage_settled" for x in events[:i]):
+                add(i, "LIFECYCLE", "successful completion requires usage_settled")
             if o == "completed" and not released:
                 add(i, "LIFECYCLE", "turn_completed(completed) without a recorded release")
             elif o == "denied" and not denied:

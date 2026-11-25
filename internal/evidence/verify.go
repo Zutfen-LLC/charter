@@ -127,6 +127,9 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 	state := "start"
 	released, decided, denied := false, false, false
 	declared := map[string]int64{} // sha -> declared length, to catch contradictions
+	var reservedUnits int64
+	var hasReservation bool
+	var policyDestination, intentDestination map[string]any
 
 	for i, e := range events {
 		typ, _ := e["type"].(string)
@@ -145,6 +148,16 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 		}
 		if h, err := EventHash(e); err != nil || h != str(e, "event_hash") {
 			add(i, CodeChain, "hash mismatch")
+		}
+		if a, ok := asObj(e["actor"]); ok {
+			kind, _ := a["kind"].(string)
+			want := "service"
+			if i == 0 {
+				want = "user"
+			}
+			if kind != want {
+				add(i, CodeEnvelope, "actor.kind must be %s for this event", want)
+			}
 		}
 		p, pok := asObj(e["payload"])
 		if !pok {
@@ -167,6 +180,9 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 		}
 		switch typ {
 		case "turn_received":
+			if summary, ok := p["input_summary"].(string); ok && strings.Contains(strings.ToLower(summary), "exact input") {
+				add(i, CodeRefs, "legacy input_summary cannot claim exact input bytes")
+			}
 			if in, ok := p["input"]; ok {
 				if _, ok := asRef(in); !ok {
 					add(i, CodeRefs, "input must be a {sha256, bytes} reference")
@@ -176,6 +192,9 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 			}
 		case "policy_decision":
 			d, _ := p["decision"].(string)
+			if d == "allow" {
+				policyDestination, _ = asObj(p["destination"])
+			}
 			switch {
 			case d != "allow" && d != "deny":
 				add(i, CodePolicy, "decision must be allow or deny")
@@ -189,6 +208,8 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 		case "usage_reserved":
 			if n, ok := integer(p["units"]); !ok || n < 0 {
 				add(i, CodeRefs, "usage_reserved.units must be a non-negative integer")
+			} else {
+				reservedUnits, hasReservation = n, true
 			}
 		case "context_sealed":
 			sealedObjs = map[string]int64{}
@@ -221,6 +242,15 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 				}
 			}
 		case "disclosure_intent":
+			intentDestination = map[string]any{}
+			for _, k := range []string{"provider", "endpoint_id", "model_id"} {
+				if v, ok := p[k].(string); ok {
+					intentDestination[k] = v
+				}
+			}
+			if policyDestination != nil && !destinationEqual(policyDestination, intentDestination) {
+				add(i, CodeRefs, "disclosure intent destination differs from policy destination")
+			}
 			rq, ok := asRef(p["request"])
 			if !ok {
 				add(i, CodeRefs, "disclosure_intent.request must be a {sha256, bytes} reference")
@@ -239,6 +269,14 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 				}
 			}
 		case "evidence_ack":
+			if receipt, ok := p["receipt"].(string); !ok || strings.TrimSpace(receipt) == "" {
+				add(i, CodeRefs, "evidence_ack.receipt is required and must be nonempty")
+			}
+			if level, exists := p["storage_level"]; exists {
+				if s, ok := level.(string); !ok || strings.TrimSpace(s) == "" {
+					add(i, CodeRefs, "evidence_ack.storage_level must be nonempty when present")
+				}
+			}
 			a, ok := integer(p["acked_seq"])
 			h, _ := p["acked_event_hash"].(string)
 			if !ok || a < 0 || a >= int64(i) || h == "" || str(events[a], "event_hash") != h {
@@ -249,6 +287,15 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 				}
 			}
 		case "provider_accepted":
+			accepted := map[string]any{}
+			for _, k := range []string{"provider", "endpoint_id", "model_id"} {
+				if v, ok := p[k].(string); ok {
+					accepted[k] = v
+				}
+			}
+			if intentDestination != nil && !destinationEqual(intentDestination, accepted) {
+				add(i, CodeRefs, "provider acceptance destination differs from disclosure intent")
+			}
 			if j := last(events[:i], "disclosure_intent"); j < 0 || !acked[j] {
 				add(i, "R1", "provider contacted before acked disclosure_intent")
 			}
@@ -268,11 +315,16 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 		case "usage_settled":
 			if n, ok := integer(p["units"]); !ok || n < 0 {
 				add(i, CodeRefs, "usage_settled.units must be a non-negative integer")
+			} else if hasReservation && str(p, "basis") == "reserved_max" && DeriveDisclosure(events[:i]) != DisclosureNone && n != reservedUnits {
+				add(i, CodeRefs, "usage_settled reserved_max units must equal the full reservation")
 			}
 			if b, _ := p["basis"].(string); b == "" {
 				add(i, CodeRefs, "usage_settled.basis is required")
 			}
 		case TypeTurnCompleted:
+			if p["outcome"] == "completed" && last(events[:i], "usage_settled") < 0 {
+				add(i, CodeLifecycle, "successful completion requires usage_settled")
+			}
 			switch o, _ := p["outcome"].(string); {
 			case o == "completed" && !released:
 				add(i, CodeLifecycle, "turn_completed(completed) without a recorded release")
@@ -546,6 +598,17 @@ const (
 	DisclosureUnknown   = "unknown"
 	DisclosureDisclosed = "disclosed"
 )
+
+func destinationEqual(a, b map[string]any) bool {
+	for _, k := range []string{"provider", "endpoint_id", "model_id"} {
+		av, aok := a[k].(string)
+		bv, bok := b[k].(string)
+		if aok && bok && av != bv {
+			return false
+		}
+	}
+	return true
+}
 
 // DeriveDisclosure computes the disclosure state from the log alone. It is
 // defensive against malformed events (it never panics).

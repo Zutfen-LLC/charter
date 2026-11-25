@@ -33,7 +33,10 @@ class VerifierProfileControls(unittest.TestCase):
         self.assertIn("receipt", "\n".join(verify_turn(events, objects)))
 
     def test_intent_destination_matches_policy(self):
-        events, objects = rehashed("complete-turn.json", lambda e: e[4]["payload"].update(provider="other"))
+        def edit(events):
+            events[1]["payload"]["destination"] = {"provider": "test-a", "endpoint_id": "ep-1", "model_id": "test-model"}
+            events[4]["payload"]["provider"] = "other"
+        events, objects = rehashed("complete-turn.json", edit)
         self.assertIn("destination", "\n".join(verify_turn(events, objects)))
 
     def test_provider_acceptance_matches_intent_destination(self):

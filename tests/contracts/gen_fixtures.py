@@ -121,6 +121,16 @@ def negatives():
     add("bad-actor-kind", "ENVELOPE", mutate_steps(complete(), lambda s: s.__setitem__(0, ("turn_received", T(0), {"kind": "robot", "id": "x"}, {"input_summary": "s"}))))
     add("bad-timestamp", "ENVELOPE", mutate_steps(complete(), lambda s: s.__setitem__(0, ("turn_received", "2026-01-15 10:00:00", USER, {"input_summary": "s"}))))
     add("bad-identifier", "ENVELOPE", mutate_steps(complete(), lambda s: s), base={**BASE, "tenant_id": "TENANT/UPPER"})
+    # verifier profile regressions: synthetic, correctly rehashed logs
+    add("ack-missing-receipt", "REFS", mutate_steps(complete(), lambda s: s[ix(s, "evidence_ack")][3].pop("receipt", None)))
+    def intent_destination_mismatch(s):
+        s[ix(s, "policy_decision")][3]["destination"] = {"provider": "test-a", "endpoint_id": "ep-1", "model_id": "test-model"}
+        s[ix(s, "disclosure_intent")][3]["provider"] = "other"
+    add("intent-destination-mismatch", "REFS", mutate_steps(complete(), intent_destination_mismatch))
+    add("acceptance-destination-mismatch", "REFS", mutate_steps(complete(), lambda s: s[ix(s, "provider_accepted")][3].update(endpoint_id="other")))
+    add("unknown-under-settlement", "REFS", mutate_steps(unknown(), lambda s: s[ix(s, "usage_settled")][3].update(units=1)))
+    add("admission-service-actor", "ENVELOPE", mutate_steps(complete(), lambda s: s.__setitem__(0, (s[0][0], s[0][1], SVC, s[0][3]))))
+    add("legacy-summary-claims-exact", "REFS", mutate_steps(complete(), lambda s: s[0][3].update(input_summary="exact input: synthetic prompt")))
     return n
 
 
