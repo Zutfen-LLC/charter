@@ -38,17 +38,27 @@ type OIDC struct {
 }
 
 type Config struct {
-	Addr            string
-	DatabaseURL     string
-	EvidenceBackend string
-	OIDC            OIDC
+	Addr string
+	// DatabaseURL is the WORKSPACE serving credential (role member of
+	// charter_workspace_app). EvidenceDatabaseURL is the separate EVIDENCE
+	// serving credential (charter_evidence_app). MigrateDatabaseURL is the schema
+	// OWNER credential for `charter migrate` only: the serving process refuses to
+	// start if it is present in its environment. For `migrate` alone,
+	// DatabaseURL is accepted as a development fallback.
+	DatabaseURL         string
+	EvidenceDatabaseURL string
+	MigrateDatabaseURL  string
+	EvidenceBackend     string
+	OIDC                OIDC
 }
 
 func Load() Config {
 	return Config{
-		Addr:            get("CHARTER_ADDR", "127.0.0.1:8080"),
-		DatabaseURL:     os.Getenv("CHARTER_DATABASE_URL"),
-		EvidenceBackend: get("CHARTER_EVIDENCE_BACKEND", EvidenceBackendPostgresAppend),
+		Addr:                get("CHARTER_ADDR", "127.0.0.1:8080"),
+		DatabaseURL:         os.Getenv("CHARTER_DATABASE_URL"),
+		EvidenceDatabaseURL: os.Getenv("CHARTER_EVIDENCE_DATABASE_URL"),
+		MigrateDatabaseURL:  os.Getenv("CHARTER_MIGRATE_DATABASE_URL"),
+		EvidenceBackend:     get("CHARTER_EVIDENCE_BACKEND", EvidenceBackendPostgresAppend),
 		OIDC: OIDC{
 			Issuer:   os.Getenv("CHARTER_OIDC_ISSUER"),
 			Audience: os.Getenv("CHARTER_OIDC_AUDIENCE"),

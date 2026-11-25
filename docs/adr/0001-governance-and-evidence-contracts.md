@@ -254,3 +254,26 @@ a residual risk mitigated by the role matrix and anchoring (open gap, section 6)
 - Open: anchoring of chain heads; storage receipt level; grace-period length;
   whether `disposed_before_hold` should be blocking for matters with pending
   preservation notices (needs policy owner decision).
+
+
+## 14. Amendment A1 (clarifications from the C04 review; no change to hashes or rules R1-R4)
+
+Review of the first implementation (#4) found places where the text left room for a weaker reading. These are **clarifications** (PATCH under [versioning](contracts/versioning.md)); no event type, hash input or ordering rule changes.
+
+1. **`response_released` is authorization, not receipt.** It records that the control plane, holding a durable acknowledged output and a fresh authorization, committed to release that output. It does not record transport delivery or client receipt, and Charter never claims receipt. Between that record and the HTTP write the request can still end; the output is then withheld and stays deliverable by a delivery-only retry (idempotent replay), which is authorized again at that moment.
+2. **Delivery is authorized last.** The authorization check and the cancellation/deadline check run immediately before output is handed to the transport, after every evidence write (release record, settlement, terminal event, retries). R2 (durable before release) is unchanged; this adds that no evidence write can sit between the last check and delivery.
+3. **Crash and failure semantics by point** (each row is what the log shows and what recovery does; none re-dispatches):
+
+   | Failure point | Log | Disclosure | Recovery / result |
+   | --- | --- | --- | --- |
+   | before admission commits | nothing | none | request fails; nothing to recover |
+   | admitted, before acked intent | `turn_received`... | none | `turn_interrupted(crash_recovery)` |
+   | cancelled/expired after acked intent, before dispatch | intent + ack | **unknown** (over-reports; nothing was sent) | `turn_interrupted(cancelled_before_dispatch)`, settled at reserved max |
+   | after intent ack, before `provider_accepted` | intent + ack | unknown | `turn_interrupted(crash_recovery)` |
+   | output acked, authorization refused | `output_recorded`+ack | disclosed | `turn_interrupted(release_denied)` |
+   | `response_released` committed, settlement or terminal write lost | release recorded | disclosed | recovery appends `usage_settled` and `turn_completed` (R3: a released turn completes); output is deliverable by delivery-only retry |
+   | terminal committed, transport delivery fails | `turn_completed` | disclosed | no log change; client retries with the same key |
+
+4. **Single-instance recovery.** Recovery terminalizes every open turn older than the process start, so it must not run while another instance can be mid-turn. The pilot enforces one live control-plane instance with a PostgreSQL advisory-lock fence held on a dedicated connection for the life of the process; the process refuses to start without it. Multi-instance operation needs per-turn leases and is out of scope.
+5. **Idempotency identity.** A key is scoped to (tenant, project, custodian) and bound to a deterministic fingerprint of tenant, project, matter, custodian, the exact input and the ordered source selection (ids, versions, hashes, lengths); request ids and timestamps are excluded. A repeat with a different fingerprint is refused. After an interrupted turn with disclosure `unknown` or `disclosed`, a new request is **not** presented as a safe retry: the outcome needs review (reconciliation via `outcome_resolved`).
+6. **Verifier strictness** (sections 5-9, state-machines.md) is now executable in full: envelope and identifier syntax (`^[a-z0-9][a-z0-9._-]{0,127}$`, a superset of lowercase UUID/ULID that also admits the synthetic fixture ids), RFC 3339 millisecond `Z` timestamps, one `turn_received` at seq 0, exactly one `policy_decision` at seq 1 and nothing after a deny but the denied completion, the lifecycle transitions of state-machines.md, mandatory references (sealed objects, request hash and length matching the intent, sources among the sealed objects, a single output reference), a `turn_interrupted.disclosure` equal to the disclosure derived from the log, and object digests and byte lengths. Structural verification (log only) and full verification (log plus objects) are distinct. The legacy fixture form of `turn_received` with only `input_summary` is accepted so golden hashes do not change; events written by the recorder always carry an `input` reference. Strict parsing rejects duplicate keys, trailing data, invalid UTF-8 and lone surrogates instead of normalizing them.

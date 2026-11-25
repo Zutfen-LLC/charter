@@ -77,3 +77,43 @@ func run(ctx context.Context, tx pgx.Tx, name, sql string) error {
 	_, err := tx.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES ($1)`, name)
 	return err
 }
+
+// Pending lists embedded migrations that are not recorded as applied. It only
+// reads schema_migrations, so the serving credential can use it to refuse to
+// start against an unmigrated or older database without being able to migrate.
+func Pending(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	entries, err := migrations.FS.ReadDir(".")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sql") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	rows, err := pool.Query(ctx, `SELECT version FROM schema_migrations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	have := map[string]bool{}
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		have[v] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var pending []string
+	for _, n := range names {
+		if !have[n] {
+			pending = append(pending, n)
+		}
+	}
+	return pending, nil
+}

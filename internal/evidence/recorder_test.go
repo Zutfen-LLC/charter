@@ -412,6 +412,18 @@ func TestRecoverCompletesTurnAlreadyRecordedAsReleased(t *testing.T) {
 	if evs[len(evs)-1]["type"] != "turn_completed" {
 		t.Fatalf("log: %s", types(evs))
 	}
+	// response_released records that release was AUTHORIZED, not that bytes
+	// reached the client. The withheld output is therefore deliverable by a
+	// delivery-only retry (idempotent replay), which is gated again and never
+	// re-dispatches.
+	veto := errors.New("revoked since")
+	if res, err := f.rec.Process(context.Background(), f.req("k", "in"), f.model("x"), func(context.Context) error { return veto }); !errors.Is(err, veto) || len(res.Output) != 0 {
+		t.Fatalf("delivery retry bypassed the gate: %+v %v", res, err)
+	}
+	res, err = f.rec.Process(context.Background(), f.req("k", "in"), f.model("x"), nil)
+	if err != nil || !res.Replayed || string(res.Output) != "answer" || f.calls.Load() != 1 {
+		t.Fatalf("delivery-only retry: %+v %v calls=%d", res, err, f.calls.Load())
+	}
 }
 
 // ---- fault injection -------------------------------------------------------

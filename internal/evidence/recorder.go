@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -117,9 +118,13 @@ type Recorder struct {
 	EvidenceTimeout time.Duration
 	ServiceID       string
 	Logf            func(string, ...any)
+
+	once sync.Once // defaults are filled in exactly once; a Recorder is shared by concurrent requests
 }
 
-func (rc *Recorder) defaults() {
+func (rc *Recorder) defaults() { rc.once.Do(rc.fillDefaults) }
+
+func (rc *Recorder) fillDefaults() {
 	if rc.Clock == nil {
 		rc.Clock = time.Now
 	}
@@ -590,8 +595,21 @@ func (rc *Recorder) abort(ctx context.Context, t *turn, reason string) {
 	}
 }
 
-// resolve closes a turn. Shared by the live abort path and crash recovery.
+// resolve closes a turn. Shared by the live abort path and crash recovery. If
+// it loses a race with another resolver (a live request vs. recovery, or two
+// recoveries) the turn is terminal by the time it looks again, which is success:
+// the database allows exactly one terminal event.
 func (rc *Recorder) resolve(ctx context.Context, t *turn, reason string) error {
+	err := rc.resolveOnce(ctx, t, reason)
+	if err != nil && (errors.Is(err, ErrConflict) || errors.Is(err, ErrTerminal)) {
+		if t.reload(ctx) == nil && isTerminal(str(t.events[len(t.events)-1], "type")) {
+			return nil
+		}
+	}
+	return err
+}
+
+func (rc *Recorder) resolveOnce(ctx context.Context, t *turn, reason string) error {
 	if err := t.reload(ctx); err != nil {
 		return err
 	}

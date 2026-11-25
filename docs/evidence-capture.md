@@ -28,28 +28,32 @@ Evidence lives in `evidence_turns`, `evidence_events` and `evidence_objects` (mi
 `evidence.Recorder.Process` is the only write path:
 
 1. **Admission** is committed (turn row, input object, `turn_received`) before policy or dispatch work. A repeated `Idempotency-Key` returns the existing turn.
-2. `policy_decision`, `usage_reserved`, excerpts and request objects, `context_sealed`, `disclosure_intent` and its `evidence_ack` are durable before the model is called (**R1**).
+2. `policy_decision`, `usage_reserved`, excerpts and request objects, `context_sealed`, `disclosure_intent` and its `evidence_ack` are durable before the model is called (**R1**). If the request is cancelled or its deadline passes at any point before dispatch, including after the intent ack, **no model call is made**; the turn is closed `turn_interrupted(cancelled_before_dispatch)`.
 3. The output (or partial output) object and `output_recorded` are durable and acknowledged before anything is released (**R2**). Output is buffered, not streamed.
-4. The caller's release gate (the authorization re-check from #3) runs after the output ack and may veto; a veto records `turn_interrupted(release_denied)` and releases nothing.
-5. `response_released`, `usage_settled`, `turn_completed`.
+4. The caller's gate runs after the output ack and may veto; a veto records `turn_interrupted(release_denied)` and releases nothing.
+5. `response_released`, `usage_settled`, `turn_completed` are written.
+6. **The gate runs again, last**: after every evidence write and retry, immediately before the output is handed to the transport, it re-reads authorization (active account AND project membership, on its own bounded context) and re-checks cancellation and the deadline. If it refuses, the response carries no output (403/503/504) even though the log says the release was authorized and the turn completed; a delivery-only retry with the same key is authorized afresh. This keeps C03's guarantee: output is never returned once the work context is known to be done or access is known to be revoked.
 
-Any evidence write failure at any step fails closed: nothing is released (HTTP 503, no output) and the turn is marked interrupted, or left open for recovery if even that cannot be stored. `POST model-calls` with no recorder configured is refused before any model work.
+`response_released` means *authorized and committed to release*; it is not transport delivery or client receipt, and nothing here claims receipt (ADR 0001 amendment A1).
+
+Any evidence write failure at any step fails closed: nothing is released (HTTP 503, no output) and the turn is marked interrupted, or left open for recovery if even that cannot be stored. `POST model-calls` with no recorder configured is refused before any model work. Evidence writes use a context detached from the request's cancellation (with their own timeout) so a cancelled request still records what it already did.
 
 The chain and the single-terminal rule are also enforced inside the database (trigger): out-of-order or wrongly chained events and anything after a terminal event are rejected, serialized per turn, so a live request and crash recovery cannot both end a turn.
 
-## Crashes and replays
+## Crashes, recovery and replays
 
-`charter serve` runs recovery before accepting requests. Every turn without a terminal event gets, as the `service` actor, `usage_settled` at the reserved maximum (if disclosure is not `none`) and `turn_interrupted(reason: crash_recovery, disclosure: <derived>)`. **Disclosure after an acknowledged intent with no `provider_accepted` is `unknown`** and is reported as such, never guessed away. A turn already logged as `response_released` is completed instead (R3). Recovery assumes a single control-plane instance (it resolves all open turns older than "now"); multi-instance deployment needs a lease and is out of scope for the pilot.
+`charter serve` takes a single-instance **fence** (a PostgreSQL advisory lock on a dedicated connection; a second instance refuses to start) and then runs recovery before accepting requests. Every turn without a terminal event, admitted before this process started, is closed as the `service` actor with `usage_settled` at the reserved maximum (if disclosure is not `none`) and `turn_interrupted(reason: crash_recovery, disclosure: <derived>)`. **Disclosure after an acknowledged intent with no `provider_accepted` is `unknown`**, reported as such. A turn already logged as `response_released` is completed instead (R3). Overlapping recovery attempts are safe: the database allows one terminal event, and the loser sees the turn already terminal. Failure and crash points are tabulated in ADR 0001 amendment A1.
 
-A retried request is never replayed to a model on uncertain dispatch:
+A retried request is never replayed to a model on uncertain dispatch. Identity of a repeated key is the **fingerprint** of tenant, project, matter, custodian, exact input and the ordered sources (ids, versions, hashes, lengths); request ids and timestamps are excluded.
 
 | State of the turn for that key | Result |
 | --- | --- |
-| completed | `200`, stored output, `replayed: true`, no model call (still goes through the release gate; delivery is not logged as a second release) |
+| completed | `200`, stored output, `replayed: true`, no model call; the stored log must verify, belong to this request, and the output object must match its recorded hash and length, otherwise `503` and no output. The delivery gate still applies |
 | in flight or awaiting recovery | `409` |
-| interrupted (any disclosure) | `409`; the user must choose a new key. An explicit "safe retry" policy does not exist yet |
+| interrupted, disclosure `none` | `409`; nothing was disclosed, so a new request may be submitted |
+| interrupted, disclosure `unknown` or `disclosed` | `409`; **do not resubmit blindly**, the outcome needs review (a new key could disclose again) |
 | denied | `403` |
-| same key, different input | `422` |
+| same key, different request (input, sources, versions, content, order or matter) | `422` |
 
 ## Storage receipts and hashes
 
@@ -57,15 +61,28 @@ Hashing is the canonical form of ADR 0001 section 6, implemented in Go and verif
 
 Keeping secrets out: payload keys that look like credentials, headers or telemetry (`authorization`, `token`, `cookie`, `secret`, `password`, `api_key`, `header`, `user_agent`, `ip_address`, ...) are refused at write time, request headers are never read into evidence, and a test confirms a bearer token, forwarded address, user agent and cookie appear in no evidence row, object or log line. The user's own input and the excerpts are stored exactly as submitted, so they are the one place user-typed secrets can appear; that is inherent in "exact submitted inputs".
 
-## Protection against application credentials, and the open gap
+## Runtime credentials
 
-`evidence.QualifyProtection` attempts to rewrite and delete events, objects and turns and to truncate, as a given credential, in rolled-back transactions, and reports every attempt that was **not** refused. Against PostgreSQL:
+Migrations run as the schema **owner** (`charter migrate`, bootstrap only). The server serves with two different least-privilege logins and never holds the owner credential:
 
-- as `charter_evidence_app` (privileges): all refused, and the role cannot disable triggers, drop tables or grant itself more;
-- as the table owner (triggers): all refused.
+| Login | Member of | Can | Cannot |
+| --- | --- | --- | --- |
+| workspace (`CHARTER_DATABASE_URL`) | `charter_workspace_app` | read/write workspace tables, read `schema_migrations` | touch any evidence table at all |
+| evidence (`CHARTER_EVIDENCE_DATABASE_URL`) | `charter_evidence_app` | INSERT and SELECT evidence tables | UPDATE/DELETE/TRUNCATE, disable triggers, drop, grant, create objects, read workspace tables, assume the owner |
 
-**Not met, and not claimed:** the table owner or a superuser can still disable the triggers (asserted by `TestPostgresBackendIsNotRetentionEnforced_RecordedGap`), so this backend reports `retention_enforced: false` and `/healthz` says so. The deployment must run the control plane as a login role that is a member of `charter_evidence_app` and is not the owner; the dev stack and tests use the owner. **"Prove against a genuine retention-capable test backend before pilot qualification" remains open:** it needs a WORM/object-lock backend implementing `evidence.Backend` and `evidence.Prober`, run through the same suite and the same fault-injection tests. Until then preservation is unqualified, and chain heads are not anchored externally (ADR section 6).
+`charter serve` **refuses to start** if `CHARTER_MIGRATE_DATABASE_URL` is set, the two URLs are missing or identical, either login is a superuser/`CREATEROLE`/`CREATEDB`/`BYPASSRLS`/replication role, owns or is a member of the role that owns the evidence tables, holds privileges beyond the table above, or can create objects in the schema, or the database has unapplied migrations (the server cannot migrate). Provisioning: `scripts/dev.sh up` (dev) or `scripts/provision-runtime-roles.sql` after `charter migrate`. These checks inspect the live connection (`current_user`, catalog privileges), so a URL that merely authenticates as the owner is caught.
+
+## Protection qualification and the open gap
+
+`evidence.QualifyProtection` attacks one backend with one credential and reports, per attack, **REFUSED**, **ALLOWED** or **INCONCLUSIVE**. Only a verified protection refusal (privilege error, or our guard trigger) is REFUSED; unreachable storage, a failed `SET ROLE`, a credential whose identity is not the expected one, an absent target, an unrelated SQL error, a timeout, or a probe that matched no rows are INCONCLUSIVE and can never qualify. A preflight verifies reachability, credential identity, that every target exists (checked with a separate admin connection) and a positive control (the credential can run the same kinds of statements on a scratch table). Every attempt runs in a transaction that is always rolled back. A report qualifies only if all ten attacks (rewrite/delete events, objects and turns, truncate, disable protections, drop table, grant self destructive privileges, assume the owner role) are REFUSED, and only a **direct login** credential can qualify: `SET ROLE` from a privileged connection checks the privilege layer but is INCONCLUSIVE for escalation. Tests cover each control, a deliberately unprotected copy (probes see ALLOWED), and the actual runtime logins (both qualify).
+
+Against PostgreSQL:
+
+- the evidence and workspace serving logins: all attacks REFUSED, qualified;
+- the table owner: update/delete/truncate refused by the triggers, but it can disable them and drop the table (asserted by `TestOwnerCredentialIsNotQualified_RecordedGap`).
+
+**Not met, and not claimed:** an owner or superuser can still disable the triggers, so this backend reports `retention_enforced: false` and `/healthz` says so. **Issue #4 stays open:** "prove against a genuine retention-capable test backend" needs a WORM/object-lock backend implementing `evidence.Backend` and `evidence.Prober`, run through the same qualification and fault-injection suites. Until then preservation is unqualified, and chain heads are not anchored externally (ADR section 6).
 
 ## Tests
 
-`go test ./internal/evidence ./internal/server` (needs `CHARTER_TEST_DATABASE_URL`, see [local development](local-development.md)). Highlights: exact bytes and ordering at dispatch and at the release gate; denial, provider-error and partial-output logs verify; idempotent replay and key reuse; a crash after the intent ack; a fault injected at **every write** of a complete turn in three modes (rejected, committed-but-reported-failed, permanent outage), each followed by recovery, asserting nothing is released without evidence, a model call always implies disclosure is not `none`, the log is terminal and verifies, and the model is never dispatched twice.
+`go test ./internal/evidence ./internal/server` (needs `CHARTER_TEST_DATABASE_URL`, see [local development](local-development.md)). Highlights: exact bytes and ordering at dispatch and at **both** release gates; cancellation, deadline, revocation, disabled account and authorization-database outage at each finalization write; no dispatch after cancellation; the shared negative verifier fixtures; qualification controls; the real restricted logins; overlapping recovery and the instance fence; denial, provider-error and partial-output logs verify; idempotent replay and key reuse; a crash after the intent ack; a fault injected at **every write** of a complete turn in three modes (rejected, committed-but-reported-failed, permanent outage), each followed by recovery, asserting nothing is released without evidence, a model call always implies disclosure is not `none`, the log is terminal and verifies, and the model is never dispatched twice.
