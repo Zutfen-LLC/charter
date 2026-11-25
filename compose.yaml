@@ -1,0 +1,17 @@
+# Disposable development stack. Synthetic data only. Not a deployment.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: charter
+      POSTGRES_PASSWORD: charter-dev-only
+      POSTGRES_DB: charter
+    ports:
+      - "127.0.0.1:55432:5432"   # loopback only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U charter -d charter"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data   # nothing persists; teardown is `down -v`

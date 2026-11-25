@@ -20,3 +20,5 @@ Check the contract fixtures (Python 3 standard library only):
 ```bash
 python3 -m unittest discover -s tests/contracts -v
 ```
+
+Run the scaffold and tests: see [Local development](docs/local-development.md) (`scripts/dev.sh test`).
