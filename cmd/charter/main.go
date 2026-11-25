@@ -17,7 +17,9 @@ import (
 
 	"github.com/Zutfen-LLC/charter/internal/config"
 	"github.com/Zutfen-LLC/charter/internal/migrate"
+	"github.com/Zutfen-LLC/charter/internal/oidc"
 	"github.com/Zutfen-LLC/charter/internal/server"
+	"github.com/Zutfen-LLC/charter/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -57,7 +59,24 @@ func run(cmd string) error {
 		return nil
 	}
 
-	srv := &http.Server{Addr: cfg.Addr, Handler: server.New(pool, server.TestFixtureBackend()), ReadHeaderTimeout: 5 * time.Second}
+	var opts []server.Option
+	if cfg.OIDC.Configured() {
+		o := cfg.OIDC.EntraDefaults()
+		if o.Issuer == "" || o.Audience == "" || o.TenantID == "" || o.JWKSURL == "" {
+			return errors.New("incomplete OIDC config: need CHARTER_OIDC_TENANT_ID and CHARTER_OIDC_AUDIENCE (Entra defaults for issuer and JWKS URL), or all four CHARTER_OIDC_* values")
+		}
+		v, err := oidc.NewVerifier(oidc.Config{Issuer: o.Issuer, Audience: o.Audience, TenantID: o.TenantID,
+			Keys: &oidc.JWKSFetcher{URL: o.JWKSURL}})
+		if err != nil {
+			return err
+		}
+		opts = append(opts, server.WithAuth(&server.Auth{Verifier: v, Store: &store.Store{DB: pool}}))
+		log.Printf("OIDC enabled: issuer=%s tenant=%s", o.Issuer, o.TenantID)
+	} else {
+		log.Printf("OIDC not configured: only /healthz and /readyz are served (no data API)")
+	}
+
+	srv := &http.Server{Addr: cfg.Addr, Handler: server.New(pool, server.TestFixtureBackend(), opts...), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)

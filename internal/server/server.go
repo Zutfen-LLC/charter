@@ -29,7 +29,9 @@ func TestFixtureBackend() EvidenceBackend {
 	}
 }
 
-func New(db Pinger, ev EvidenceBackend) http.Handler {
+// New builds the handler. Without WithAuth only the unauthenticated health
+// endpoints exist; no data route is ever served unauthenticated.
+func New(db Pinger, ev EvidenceBackend, opts ...Option) http.Handler {
 	mux := http.NewServeMux()
 	// Liveness: process is up. No dependencies checked.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +47,9 @@ func New(db Pinger, ev EvidenceBackend) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "evidence_backend": ev})
 	})
+	for _, o := range opts {
+		o(mux)
+	}
 	return mux
 }
 

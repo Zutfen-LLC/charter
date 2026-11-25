@@ -25,7 +25,7 @@ scripts/dev.sh down
 The only evidence backend is `test-fixture`. It is **not immutable and does not enforce retention or holds**; `/healthz` reports `retention_enforced: false` with a notice, and the server logs it at startup. Do not advertise or use it as a preservation backend. Qualifying real storage protection is a later, separate test (#4); until then it is a recorded gap.
 
 ## Egress and providers
-The scaffold makes no outbound network calls and has no provider or IdP clients. Deterministic fake providers and a synthetic IdP arrive with #3/#5. Any future outbound call must be opt-in and default off.
+The server makes no outbound calls unless OIDC is configured, and then only to the configured JWKS URL ([identity and access](identity-and-access.md)). Tests use an in-process synthetic IdP. Deterministic fake model providers arrive with #5. Any future outbound call must be opt-in and default off.
 
 ## Stack decision
 Go + PostgreSQL, as the issue prefers: one static binary, a small dependency set (`pgx`), and embedded SQL migrations applied in order under an advisory lock. The initial migration holds instance metadata only; the durable evidence schema follows ADR 0001 in #4.

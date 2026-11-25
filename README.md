@@ -12,6 +12,7 @@ Prove that a single control plane can enforce project boundaries and model polic
 
 - [Pilot backlog](https://github.com/Zutfen-LLC/charter/issues)
 - [Pilot design and acceptance](docs/pilot.md)
+- [Identity, project isolation and role separation](docs/identity-and-access.md)
 - [Working in this repository](CONTRIBUTING.md)
 - [Governance and evidence contracts (ADR 0001)](docs/adr/0001-governance-and-evidence-contracts.md), with [role matrix](docs/contracts/role-matrix.md), [state transitions](docs/contracts/state-machines.md) and [versioning](docs/contracts/versioning.md)
 
