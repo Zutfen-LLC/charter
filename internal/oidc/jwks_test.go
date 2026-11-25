@@ -24,6 +24,8 @@ type jwksEnv struct {
 	front *httptest.Server
 	hits  atomic.Int64
 	fail  atomic.Bool
+	gate  chan struct{} // when non-nil, JWKS responses block until it is closed
+	began chan struct{} // receives one value per request that reached the gate
 	mu    sync.Mutex
 	now   time.Time
 	f     *oidc.JWKSFetcher
@@ -38,13 +40,17 @@ func newJWKSEnv(t *testing.T) *jwksEnv {
 	e.idp.Now = e.clock
 	e.front = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.hits.Add(1)
+		if e.gate != nil {
+			e.began <- struct{}{}
+			<-e.gate
+		}
 		if e.fail.Load() {
 			http.Error(w, "down", http.StatusServiceUnavailable)
 			return
 		}
 		resp, err := http.Get(e.idp.JWKSURL())
 		if err != nil {
-			http.Error(w, err.Error(), 502)
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
@@ -231,4 +237,34 @@ func TestPlainHTTPJWKSRefusedWithoutFixtureOptIn(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Fatalf("made %d plaintext requests to the IdP URL", hits.Load())
 	}
+}
+
+// A slow or hung refresh (triggered by an unknown kid) must not stall
+// verification of tokens whose keys are already cached.
+func TestSlowRefreshDoesNotBlockCachedKeyVerification(t *testing.T) {
+	e := newJWKSEnv(t)
+	good := e.idp.Token("s")
+	if err := e.verify(good); err != nil {
+		t.Fatal(err)
+	}
+	e.advance(16 * time.Second) // refresh allowed again
+	e.gate, e.began = make(chan struct{}), make(chan struct{}, 8)
+	attacker, _ := rsa.GenerateKey(rand.Reader, 2048)
+	unknown := e.idp.Mint(syntheticidp.Claims{Subject: "s", Kid: "unknown", SignWith: attacker})
+	done := make(chan struct{})
+	go func() { e.verify(unknown); close(done) }()
+	<-e.began // the refresh is now in flight and hung at the IdP
+
+	fast := make(chan error, 1)
+	go func() { fast <- e.verify(good) }()
+	select {
+	case err := <-fast:
+		if err != nil {
+			t.Errorf("cached-key verification failed during a refresh: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("cached-key verification blocked behind an in-flight JWKS refresh")
+	}
+	close(e.gate)
+	<-done
 }

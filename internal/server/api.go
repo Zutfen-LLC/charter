@@ -210,9 +210,25 @@ func (a *Auth) getArtifact(w http.ResponseWriter, r *http.Request, p store.Princ
 	writeJSON(w, 200, v)
 }
 
-// modelCall authorizes at entry, runs the work under a deadline, and
-// re-authorizes before releasing the result. If membership or the account was
-// revoked while the work ran, the output is discarded and nothing is returned.
+// modelCall guarantees, in order:
+//
+//  1. Entry: authenticated and a project member (route wrapper + a.member).
+//  2. Work runs under a deadline derived from the request context. The deadline
+//     is COOPERATIVE: the handler cannot preempt Work, so a non-cooperating
+//     adapter can still run past it. The real execution bound must come from the
+//     adapter's own enforced timeouts (#5); this handler only guarantees that a
+//     result produced after the deadline or cancellation is never released.
+//  3. Release gate (the linearization point): if the work context is done the
+//     output is dropped (504 deadline / 503 cancelled); otherwise ONE
+//     authoritative query re-checks "user active AND member of project" on
+//     committed state, on a fresh bounded context so cancellation cannot turn the
+//     check into an implicit allow. Revocations committed before that query are
+//     honoured; ones committed after it are not reflected in this response.
+//     Any failure, including an unavailable database, returns no output.
+//
+// Output the adapter already disclosed to a provider cannot be recalled; ADR 0001
+// R1/R2 (durable intent before send, durable output record before release) are
+// added to this same gate by #4/#5 and must also hold here.
 func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Principal) {
 	pid := r.PathValue("pid")
 	ctx, cancel := context.WithTimeout(r.Context(), a.WorkTimeout)
@@ -222,17 +238,23 @@ func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Princip
 		a.fail(w, err)
 		return
 	}
-	// Re-check against committed state, using a fresh context so a cancelled
-	// request context cannot turn the check into an implicit allow.
+	if cerr := ctx.Err(); cerr != nil {
+		if errors.Is(cerr, context.DeadlineExceeded) {
+			deny(w, http.StatusGatewayTimeout, "work deadline exceeded")
+		} else {
+			deny(w, http.StatusServiceUnavailable, "request cancelled")
+		}
+		return
+	}
 	rc, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer rcancel()
-	active, err1 := a.Store.StillActive(rc, p)
-	member, err2 := a.Store.IsMember(rc, p, pid)
-	if err1 != nil || err2 != nil {
+	member, err := a.Store.IsMember(rc, p, pid) // includes the active-account predicate
+	if err != nil {
+		a.Logf("model call release check: %v", err)
 		deny(w, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	if !active || !member {
+	if !member {
 		deny(w, http.StatusForbidden, "access revoked during request")
 		return
 	}

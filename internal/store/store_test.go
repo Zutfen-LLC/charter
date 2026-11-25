@@ -287,7 +287,7 @@ func lockTenant(t *testing.T, pool *pgxpool.Pool, tenant string) func() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM tenants WHERE id=$1 FOR UPDATE`, tenant); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM tenants WHERE id=$1 FOR NO KEY UPDATE`, tenant); err != nil {
 		t.Fatal(err)
 	}
 	done := false

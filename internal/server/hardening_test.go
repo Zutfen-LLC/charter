@@ -222,3 +222,19 @@ func TestEveryDeclaredRouteRejectsUnauthenticatedAcrossMethods(t *testing.T) {
 		}
 	}
 }
+
+// The role matrix allows one person to hold several explicitly granted roles;
+// each capability works independently and none implies workspace access.
+func TestOnePersonMayHoldMultipleExplicitRoles(t *testing.T) {
+	e := newEnv(t)
+	// A second admin is needed to give carol records_officer (no self-grant).
+	e.want("carol", "PUT", "/v1/users/"+e.users["alice"]+"/roles/tenant_admin", 204)
+	e.want("alice", "PUT", "/v1/users/"+e.users["carol"]+"/roles/records_officer", 204)
+	e.want("alice", "PUT", "/v1/users/"+e.users["carol"]+"/roles/export_reviewer", 204)
+	e.want("carol", "POST", "/v1/holds", 501)                                  // records_officer
+	e.want("carol", "POST", "/v1/exports/x/approve", 501)                      // export_reviewer
+	e.want("carol", "PUT", "/v1/users/"+e.users["bob"]+"/roles/operator", 204) // still tenant_admin
+	// Holding every role still grants no implicit workspace read.
+	e.want("carol", "GET", "/v1/artifacts/"+e.a1, 404)
+	e.want("carol", "GET", "/v1/projects/"+e.p1+"/artifacts", 404)
+}

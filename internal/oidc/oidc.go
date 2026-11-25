@@ -7,6 +7,22 @@
 //   - Email, name and similar claims are never returned or used for identity.
 //   - The tenant claim must equal the single configured tenant; a validly signed
 //     token for another tenant is refused.
+//
+// Accepted token profile (a delegated-user access token for this API):
+//   - JWS RS256; header typ absent, "JWT" or "at+jwt"; no crit header.
+//   - aud is the configured audience, as a string or a one-element array. A
+//     multi-audience token is refused: it was issued for other relying parties
+//     too and could be replayed against them (and vice versa).
+//   - exp and iat are required NumericDates; nbf is optional but, if present,
+//     must be valid. All are JSON numbers in (0, year 9999]. exp > iat, exp-iat
+//     <= MaxLifetime, nbf < exp. Malformed values are rejected, never ignored.
+//   - ID-token artifacts (nonce) and app-only tokens (idtyp other than "user")
+//     are refused, and Config.RequiredScope (scp) can pin the token's purpose.
+//     These are heuristics against token substitution: the primary defense is a
+//     dedicated API audience that no client uses for ID tokens.
+//
+// Live compatibility with a Microsoft Entra tenant has NOT been demonstrated;
+// the profile above is derived from the documented v2.0 access-token format.
 package oidc
 
 import (
@@ -18,6 +34,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -38,9 +56,12 @@ type Config struct {
 	TenantID    string // required value of the tenant claim
 	TenantClaim string // claim name; default "tid" (Entra)
 	Keys        KeySource
-	Leeway      time.Duration // clock skew allowance; default 30s
+	// RequiredScope, if set, must appear in the space-delimited scp claim.
+	RequiredScope string
+	Leeway        time.Duration // clock skew allowance; default 30s
 	// MaxLifetime bounds exp-iat so a long-lived token cannot extend the
-	// revocation-propagation bound. Default 1h.
+	// revocation-propagation bound. A token is accepted until exp+Leeway, so
+	// the IdP-side bound is MaxLifetime+Leeway. Default 1h.
 	MaxLifetime time.Duration
 	Now         func() time.Time
 }
@@ -90,6 +111,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	var hdr struct {
 		Alg  string          `json:"alg"`
 		Kid  string          `json:"kid"`
+		Typ  json.RawMessage `json:"typ"`
 		Crit json.RawMessage `json:"crit"`
 	}
 	if err := json.Unmarshal(hdrB, &hdr); err != nil {
@@ -97,6 +119,12 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	}
 	if hdr.Alg != "RS256" || hdr.Kid == "" || len(hdr.Crit) != 0 {
 		return Identity{}, bad("unsupported header alg=%q", hdr.Alg)
+	}
+	if len(hdr.Typ) != 0 {
+		var typ string
+		if json.Unmarshal(hdr.Typ, &typ) != nil || !(strings.EqualFold(typ, "JWT") || strings.EqualFold(typ, "at+jwt")) {
+			return Identity{}, bad("unsupported typ")
+		}
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
@@ -125,13 +153,6 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		_ = json.Unmarshal(claims[name], &s)
 		return s
 	}
-	num := func(name string) (time.Time, bool) {
-		var f float64
-		if err := json.Unmarshal(claims[name], &f); err != nil || f <= 0 {
-			return time.Time{}, false
-		}
-		return time.Unix(int64(f), 0), true
-	}
 	if str("iss") != v.c.Issuer {
 		return Identity{}, bad("issuer")
 	}
@@ -145,36 +166,96 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	if tid := str(v.c.TenantClaim); tid == "" || tid != v.c.TenantID {
 		return Identity{}, bad("tenant")
 	}
-	now := v.c.Now()
-	exp, ok := num("exp")
-	if !ok || !now.Before(exp.Add(v.c.Leeway)) {
-		return Identity{}, bad("expired or missing exp")
+	if _, ok := claims["nonce"]; ok {
+		return Identity{}, bad("ID-token artifact (nonce) in access token")
 	}
-	iat, ok := num("iat")
-	if !ok || iat.After(now.Add(v.c.Leeway)) {
-		return Identity{}, bad("iat missing or in future")
+	if _, ok := claims["idtyp"]; ok && str("idtyp") != "user" {
+		return Identity{}, bad("not a user token (idtyp)")
+	}
+	if v.c.RequiredScope != "" && !hasScope(str("scp"), v.c.RequiredScope) {
+		return Identity{}, bad("required scope missing")
+	}
+
+	exp, err := numericDate(claims, "exp", true)
+	if err != nil {
+		return Identity{}, err
+	}
+	iat, err := numericDate(claims, "iat", true)
+	if err != nil {
+		return Identity{}, err
+	}
+	nbf, err := numericDate(claims, "nbf", false)
+	if err != nil {
+		return Identity{}, err
+	}
+	if !exp.After(iat) {
+		return Identity{}, bad("exp is not after iat")
 	}
 	if exp.Sub(iat) > v.c.MaxLifetime {
 		return Identity{}, bad("lifetime exceeds %s", v.c.MaxLifetime)
 	}
-	if nbf, ok := num("nbf"); ok && nbf.After(now.Add(v.c.Leeway)) {
-		return Identity{}, bad("not yet valid")
+	now := v.c.Now()
+	if !now.Before(exp.Add(v.c.Leeway)) {
+		return Identity{}, bad("expired")
+	}
+	if iat.After(now.Add(v.c.Leeway)) {
+		return Identity{}, bad("iat in the future")
+	}
+	if !nbf.IsZero() {
+		if !nbf.Before(exp) {
+			return Identity{}, bad("nbf not before exp")
+		}
+		if nbf.After(now.Add(v.c.Leeway)) {
+			return Identity{}, bad("not yet valid")
+		}
 	}
 	return Identity{Issuer: v.c.Issuer, Subject: sub, TenantID: v.c.TenantID, Expires: exp}, nil
 }
 
+// maxNumericDate is 9999-12-31T23:59:59Z; larger values are treated as overflow.
+const maxNumericDate = 253402300799
+
+// numericDate parses a JWT NumericDate. A claim that is present must be a JSON
+// number in (0, maxNumericDate]; strings, null, booleans, arrays, objects,
+// non-positive, non-finite and overflowing values are all errors. An absent
+// optional claim returns the zero time.
+func numericDate(claims map[string]json.RawMessage, name string, required bool) (time.Time, error) {
+	raw, present := claims[name]
+	if !present {
+		if required {
+			return time.Time{}, bad("%s missing", name)
+		}
+		return time.Time{}, nil
+	}
+	if len(raw) == 0 || !(raw[0] == '-' || raw[0] >= '0' && raw[0] <= '9') {
+		return time.Time{}, bad("%s is not a number", name)
+	}
+	f, err := strconv.ParseFloat(string(raw), 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 || f > maxNumericDate {
+		return time.Time{}, bad("%s out of range", name)
+	}
+	sec := math.Floor(f)
+	return time.Unix(int64(sec), int64((f-sec)*1e9)), nil
+}
+
+func hasScope(scp, want string) bool {
+	for _, s := range strings.Fields(scp) {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// audienceMatches accepts the audience as a string or a one-element array.
 func audienceMatches(raw json.RawMessage, want string) bool {
 	var one string
 	if json.Unmarshal(raw, &one) == nil {
 		return one == want
 	}
 	var many []string
-	if json.Unmarshal(raw, &many) == nil {
-		for _, a := range many {
-			if a == want {
-				return true
-			}
-		}
+	if json.Unmarshal(raw, &many) == nil && len(many) == 1 {
+		return many[0] == want
 	}
 	return false
 }

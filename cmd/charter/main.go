@@ -62,16 +62,20 @@ func run(cmd string) error {
 	var opts []server.Option
 	if cfg.OIDC.Configured() {
 		o := cfg.OIDC.EntraDefaults()
-		if o.Issuer == "" || o.Audience == "" || o.TenantID == "" || o.JWKSURL == "" {
-			return errors.New("incomplete OIDC config: need CHARTER_OIDC_TENANT_ID and CHARTER_OIDC_AUDIENCE (Entra defaults for issuer and JWKS URL), or all four CHARTER_OIDC_* values")
+		if err := o.Validate(); err != nil {
+			return err
 		}
 		v, err := oidc.NewVerifier(oidc.Config{Issuer: o.Issuer, Audience: o.Audience, TenantID: o.TenantID,
-			Keys: &oidc.JWKSFetcher{URL: o.JWKSURL}})
+			RequiredScope: o.RequiredScope,
+			Keys:          &oidc.JWKSFetcher{URL: o.JWKSURL, AllowLoopbackHTTP: o.AllowInsecureLoopback}})
 		if err != nil {
 			return err
 		}
 		opts = append(opts, server.WithAuth(&server.Auth{Verifier: v, Store: &store.Store{DB: pool}}))
 		log.Printf("OIDC enabled: issuer=%s tenant=%s", o.Issuer, o.TenantID)
+		if o.AllowInsecureLoopback {
+			log.Printf("WARNING: plain-HTTP loopback IdP fixture mode enabled; never use outside local testing")
+		}
 	} else {
 		log.Printf("OIDC not configured: only /healthz and /readyz are served (no data API)")
 	}

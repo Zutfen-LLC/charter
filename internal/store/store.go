@@ -79,24 +79,17 @@ func (s *Store) Resolve(ctx context.Context, issuer, idpTenant, subject string) 
 	return p, rows.Err()
 }
 
-// StillActive re-reads user state for long-running requests.
-func (s *Store) StillActive(ctx context.Context, p Principal) (bool, error) {
-	var ok bool
-	err := s.DB.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id=$1 AND tenant_id=$2 AND disabled_at IS NULL)`,
-		p.UserID, p.TenantID).Scan(&ok)
-	return ok, err
-}
-
 // IsMember reports whether the principal is an active member of the project
 // (and the project is in the principal's tenant). Roles confer no membership.
 func (s *Store) IsMember(ctx context.Context, p Principal, projectID string) (bool, error) {
-	if !validUUID(projectID) {
+	projectID, valid := CanonicalID(projectID)
+	if !valid {
 		return false, nil
 	}
 	var ok bool
 	err := s.DB.QueryRow(ctx, `
 		SELECT EXISTS (
-		  SELECT 1 FROM project_members m JOIN users u ON u.id = m.user_id
+		  SELECT 1 FROM project_members m JOIN users u ON u.id = m.user_id AND u.tenant_id = m.tenant_id
 		  WHERE m.project_id=$1 AND m.user_id=$2 AND m.tenant_id=$3 AND u.disabled_at IS NULL)`,
 		projectID, p.UserID, p.TenantID).Scan(&ok)
 	return ok, err
@@ -124,11 +117,14 @@ type Artifact struct {
 	Body      string `json:"body,omitempty"`
 }
 
-// ListProjects returns only projects the principal is a member of.
+// ListProjects returns only projects the principal is an active member of. Like
+// every read below it re-checks that the user is still active, so a Principal
+// resolved before a disable cannot read anything afterwards.
 func (s *Store) ListProjects(ctx context.Context, p Principal) ([]Project, error) {
 	rows, err := s.DB.Query(ctx, `
 		SELECT pr.id::text, pr.name FROM projects pr
 		JOIN project_members m ON m.project_id = pr.id AND m.tenant_id = pr.tenant_id
+		JOIN users u ON u.id = m.user_id AND u.tenant_id = m.tenant_id AND u.disabled_at IS NULL
 		WHERE m.user_id=$1 AND pr.tenant_id=$2 ORDER BY pr.name`, p.UserID, p.TenantID)
 	if err != nil {
 		return nil, err
@@ -149,23 +145,25 @@ func (s *Store) ListProjects(ctx context.Context, p Principal) ([]Project, error
 // optionally filtered by a substring query. A project the caller is not in
 // yields an empty list indistinguishable from an empty project.
 func (s *Store) ListArtifacts(ctx context.Context, p Principal, projectID, q string) ([]Artifact, error) {
-	if !validUUID(projectID) {
+	projectID, valid := CanonicalID(projectID)
+	if !valid {
 		return []Artifact{}, nil
 	}
-	return s.artifacts(ctx, p, projectID, q)
+	return s.artifacts(ctx, p, &projectID, q)
 }
 
 // Search searches across every project the principal belongs to.
 func (s *Store) Search(ctx context.Context, p Principal, q string) ([]Artifact, error) {
-	return s.artifacts(ctx, p, "", q)
+	return s.artifacts(ctx, p, nil, q)
 }
 
-func (s *Store) artifacts(ctx context.Context, p Principal, projectID, q string) ([]Artifact, error) {
+func (s *Store) artifacts(ctx context.Context, p Principal, projectID *string, q string) ([]Artifact, error) {
 	rows, err := s.DB.Query(ctx, `
 		SELECT a.id::text, a.project_id::text, a.title FROM artifacts a
 		JOIN project_members m ON m.project_id = a.project_id AND m.tenant_id = a.tenant_id
+		JOIN users u ON u.id = m.user_id AND u.tenant_id = m.tenant_id AND u.disabled_at IS NULL
 		WHERE m.user_id=$1 AND a.tenant_id=$2
-		  AND ($3 = '' OR a.project_id::text = $3)
+		  AND ($3::uuid IS NULL OR a.project_id = $3::uuid)
 		  AND ($4 = '' OR a.title ILIKE '%' || $4 || '%' OR a.body ILIKE '%' || $4 || '%')
 		ORDER BY a.created_at, a.id LIMIT 200`,
 		p.UserID, p.TenantID, projectID, escapeLike(q))
@@ -187,14 +185,15 @@ func (s *Store) artifacts(ctx context.Context, p Principal, projectID, q string)
 // GetArtifact returns an artifact only if the principal is a member of its
 // project; otherwise ErrNotFound (same as nonexistent, to avoid an oracle).
 func (s *Store) GetArtifact(ctx context.Context, p Principal, id string) (Artifact, error) {
-	if !validUUID(id) {
+	id, valid := CanonicalID(id)
+	if !valid {
 		return Artifact{}, ErrNotFound
 	}
 	var a Artifact
 	err := s.DB.QueryRow(ctx, `
 		SELECT a.id::text, a.project_id::text, a.title, a.body FROM artifacts a
 		JOIN project_members m ON m.project_id = a.project_id AND m.tenant_id = a.tenant_id
-		JOIN users u ON u.id = m.user_id AND u.disabled_at IS NULL
+		JOIN users u ON u.id = m.user_id AND u.tenant_id = m.tenant_id AND u.disabled_at IS NULL
 		WHERE a.id=$1 AND m.user_id=$2 AND a.tenant_id=$3`, id, p.UserID, p.TenantID).
 		Scan(&a.ID, &a.ProjectID, &a.Title, &a.Body)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -207,19 +206,24 @@ func escapeLike(q string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
 }
 
-func validUUID(s string) bool {
+// CanonicalID returns the canonical lowercase hyphenated form of a UUID
+// (ADR 0001 identifiers are lowercase) and false if s is not a UUID. Every
+// identifier-bearing operation canonicalizes at its boundary, so comparisons in
+// Go and in SQL always see one spelling: 'ABC…' and 'abc…' are the same id.
+func CanonicalID(s string) (string, bool) {
 	if len(s) != 36 {
-		return false
+		return "", false
 	}
-	for i, c := range s {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
 		switch {
 		case i == 8 || i == 13 || i == 18 || i == 23:
 			if c != '-' {
-				return false
+				return "", false
 			}
 		case !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'):
-			return false
+			return "", false
 		}
 	}
-	return true
+	return strings.ToLower(s), true
 }

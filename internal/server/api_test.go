@@ -70,7 +70,7 @@ func newEnv(t *testing.T) *env {
 		}
 	}
 	v, err := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: audience, TenantID: idpTenant,
-		Keys: &oidc.JWKSFetcher{URL: idp.JWKSURL()}})
+		Keys: &oidc.JWKSFetcher{URL: idp.JWKSURL(), AllowLoopbackHTTP: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
