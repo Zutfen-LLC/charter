@@ -89,6 +89,12 @@ type Claims struct {
 	Kid         string          // default "k1"
 	Alg         string          // default RS256; "none"/"HS256" for forgery tests
 	SignWith    *rsa.PrivateKey // attacker key for forgery tests
+
+	// Fixture controls for negative claim tests (the token is still signed).
+	Omit        []string                   // claims to delete from the payload
+	Raw         map[string]json.RawMessage // exact JSON values overriding claims
+	Typ         string                     // header typ; default "JWT"; "-" omits it
+	HeaderExtra map[string]any
 }
 
 // Token mints a signed token for subject sub with valid defaults.
@@ -127,7 +133,22 @@ func (i *IdP) Mint(c Claims) string {
 	for k, v := range c.Extra {
 		pl[k] = v
 	}
-	hb, _ := json.Marshal(map[string]string{"alg": c.Alg, "kid": c.Kid, "typ": "JWT"})
+	for _, k := range c.Omit {
+		delete(pl, k)
+	}
+	for k, v := range c.Raw {
+		pl[k] = v
+	}
+	hdr := map[string]any{"alg": c.Alg, "kid": c.Kid}
+	if c.Typ == "" {
+		hdr["typ"] = "JWT"
+	} else if c.Typ != "-" {
+		hdr["typ"] = c.Typ
+	}
+	for k, v := range c.HeaderExtra {
+		hdr[k] = v
+	}
+	hb, _ := json.Marshal(hdr)
 	pb, _ := json.Marshal(pl)
 	signing := b64(hb) + "." + b64(pb)
 	switch c.Alg {
