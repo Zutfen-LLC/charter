@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -138,21 +139,19 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	defer deps.Close()
 	ev := evidence.PG{DB: deps.Evidence}
-	// Single-instance fence, then recovery: every turn a previous run left
-	// without a terminal event is resolved (explicitly marked, never replayed)
-	// BEFORE any request is accepted. Recovery is only safe while no other live
-	// instance can be mid-turn, which the fence guarantees.
+	// Both ownership and drain locks are held before recovery. The recovery
+	// scan and every evidence commit use the non-reconnecting owner session.
 	fence, err := ev.AcquireFence(ctx)
 	if err != nil {
 		return err
 	}
 	defer fence.Release()
-	rec := &evidence.Recorder{Backend: ev, Policy: server.StubPolicy(), Logf: log.Printf}
-	n, err := rec.Recover(ctx, time.Now())
+	rec := &evidence.Recorder{Backend: ev.WithFence(fence), Fence: fence, Policy: server.StubPolicy(), Logf: log.Printf}
+	n, err := rec.Recover(ctx, time.Time{})
 	if err != nil {
 		return fmt.Errorf("evidence recovery: %w", err)
 	}
-	log.Printf("evidence recovery: %d unfinished turn(s) marked turn_interrupted (crash_recovery)", n)
+	log.Printf("evidence recovery: resolved %d unfinished turn(s)", n)
 
 	var opts []server.Option
 	if cfg.OIDC.Configured() {
@@ -170,18 +169,68 @@ func serve(ctx context.Context, cfg config.Config) error {
 		log.Printf("OIDC not configured: only /healthz and /readyz are served (no data API)")
 	}
 
-	srv := &http.Server{Addr: cfg.Addr, Handler: server.New(pingAll{deps.Workspace, deps.Evidence}, server.PostgresEvidenceBackend(), opts...), ReadHeaderTimeout: 5 * time.Second}
-	go func() {
-		<-ctx.Done()
-		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
-		defer c()
-		_ = srv.Shutdown(sctx)
-	}()
-	log.Printf("charter listening on %s (evidence: postgres-append-only, NOT retention-enforced)", cfg.Addr)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	handler := server.New(pingAll{deps.Workspace, deps.Evidence}, server.PostgresEvidenceBackend(), opts...)
+	return serveFencedHTTP(ctx, cfg.Addr, fence, handler)
+}
+
+// serveFencedHTTP stops accepting connections immediately on shutdown or on
+// detected ownership loss. It joins handlers before its caller releases the
+// ownership and drain locks. Closing the listener alone does not join them.
+func serveFencedHTTP(ctx context.Context, addr string, fence *evidence.Fence, handler http.Handler) error {
+	if err := fence.Check(ctx); err != nil {
 		return err
 	}
-	return nil
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	handlerCtx, cancelHandlers := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelHandlers()
+	monitorCtx, cancelMonitor := context.WithCancel(context.Background())
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		fence.Monitor(monitorCtx)
+	}()
+	defer func() { cancelMonitor(); <-monitorDone }()
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := fence.Check(r.Context()); err != nil {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			handler.ServeHTTP(w, r)
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return handlerCtx },
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(listener) }()
+	log.Printf("charter listening on %s (evidence: postgres-append-only, NOT retention-enforced)", listener.Addr())
+	select {
+	case <-ctx.Done():
+	case <-fence.Lost():
+		err = evidence.ErrFenceLost
+	case e := <-serveErr:
+		if !errors.Is(e, http.ErrServerClosed) {
+			err = e
+		}
+	}
+	cancelHandlers()
+	// Do not release the locks on a timer while a non-cooperative handler is
+	// still active. An operator can forcibly terminate a stuck process.
+	if shutErr := srv.Shutdown(context.Background()); err == nil {
+		err = shutErr
+	}
+	select {
+	case <-fence.Lost():
+		if err == nil {
+			err = evidence.ErrFenceLost
+		}
+	default:
+	}
+	return err
 }
 
 // buildVerifier validates the (default-expanded) OIDC configuration and builds

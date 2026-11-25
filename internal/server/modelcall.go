@@ -140,6 +140,11 @@ func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Princip
 		a.callError(w, err)
 		return
 	}
+	// The recorder has returned; check at the actual HTTP delivery boundary too.
+	if err := a.Evidence.Fence.Check(ctx); err != nil {
+		a.callError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"output": string(res.Output), "turn_id": res.TurnID, "replayed": res.Replayed})
 }
 

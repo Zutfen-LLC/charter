@@ -14,7 +14,17 @@ import (
 // PG is the PostgreSQL evidence backend. Evidence lives in its own tables
 // (migration 0003), separate from every workspace/search table; protection is
 // privileges plus triggers and is NOT retention-enforced storage.
-type PG struct{ DB *pgxpool.Pool }
+type PG struct {
+	DB    *pgxpool.Pool
+	fence *Fence
+}
+
+// WithFence binds evidence writes and the recovery scan to the PostgreSQL
+// session that owns the fence, never to a pool that can reconnect.
+func (b PG) WithFence(f *Fence) PG {
+	b.fence = f
+	return b
+}
 
 const pgKind = "postgres-append-only"
 
@@ -27,25 +37,37 @@ func (PG) Info() BackendInfo {
 // synchronous_commit on for this transaction regardless of session defaults and
 // refuses to proceed if the server runs with fsync off. The level it returns is
 // the one recorded in receipts.
-func (b PG) begin(ctx context.Context) (pgx.Tx, string, error) {
-	tx, err := b.DB.Begin(ctx)
+func (b PG) begin(ctx context.Context) (pgx.Tx, string, func(), error) {
+	begin, release := b.DB.Begin, func() {}
+	if b.fence != nil {
+		conn, done, err := b.fence.lease(ctx)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		begin, release = conn.Begin, done
+	}
+	tx, err := begin(ctx)
 	if err != nil {
-		return nil, "", err
+		release()
+		return nil, "", nil, err
 	}
 	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = on`); err != nil {
 		_ = tx.Rollback(ctx)
-		return nil, "", err
+		release()
+		return nil, "", nil, err
 	}
 	var fsync, sc string
 	if err := tx.QueryRow(ctx, `SELECT current_setting('fsync'), current_setting('synchronous_commit')`).Scan(&fsync, &sc); err != nil {
 		_ = tx.Rollback(ctx)
-		return nil, "", err
+		release()
+		return nil, "", nil, err
 	}
 	if fsync != "on" || sc == "off" {
 		_ = tx.Rollback(ctx)
-		return nil, "", fmt.Errorf("%w: fsync=%s synchronous_commit=%s", ErrNotDurable, fsync, sc)
+		release()
+		return nil, "", nil, fmt.Errorf("%w: fsync=%s synchronous_commit=%s", ErrNotDurable, fsync, sc)
 	}
-	return tx, "postgres:fsync=" + fsync + ",synchronous_commit=" + sc, nil
+	return tx, "postgres:fsync=" + fsync + ",synchronous_commit=" + sc, release, nil
 }
 
 func receipt(level string, parts map[string]any) Receipt {
@@ -62,10 +84,11 @@ func putObject(ctx context.Context, tx pgx.Tx, tenant string, data []byte) (stri
 }
 
 func (b PG) PutObject(ctx context.Context, tenant string, data []byte) (Receipt, error) {
-	tx, level, err := b.begin(ctx)
+	tx, level, release, err := b.begin(ctx)
 	if err != nil {
 		return Receipt{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx) //nolint:errcheck
 	sha, err := putObject(ctx, tx, tenant, data)
 	if err != nil {
@@ -85,10 +108,11 @@ func (b PG) Admit(ctx context.Context, a Admission, first Event, objects [][]byt
 	if str(first, "tenant_id") != a.TenantID || str(first, "turn_id") != a.TurnID || str(first, "type") != "turn_received" {
 		return AdmitResult{}, errors.New("evidence: admission does not match its first event")
 	}
-	tx, level, err := b.begin(ctx)
+	tx, level, release, err := b.begin(ctx)
 	if err != nil {
 		return AdmitResult{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var turn string
 	err = tx.QueryRow(ctx, `INSERT INTO evidence_turns
@@ -164,10 +188,11 @@ func (b PG) Append(ctx context.Context, e Event) (Receipt, error) {
 		return Receipt{}, err
 	}
 	seq, _ := integer(e["seq"])
-	tx, level, err := b.begin(ctx)
+	tx, level, release, err := b.begin(ctx)
 	if err != nil {
 		return Receipt{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx) //nolint:errcheck
 	// Serialize with the chain trigger and any concurrent writer of this turn.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text, 4001))`, str(e, "turn_id")); err != nil {
@@ -242,10 +267,19 @@ func (b PG) Object(ctx context.Context, tenant, sha string) ([]byte, error) {
 }
 
 func (b PG) OpenTurns(ctx context.Context, before time.Time) ([]TurnRef, error) {
-	rows, err := b.DB.Query(ctx, `SELECT t.tenant_id::text, t.turn_id::text FROM evidence_turns t
-		WHERE t.admitted_at < $1 AND NOT EXISTS (
+	query := b.DB.Query
+	if b.fence != nil {
+		conn, release, err := b.fence.lease(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		query = conn.Query
+	}
+	rows, err := query(ctx, `SELECT t.tenant_id::text, t.turn_id::text FROM evidence_turns t
+		WHERE (NOT $2::boolean OR t.admitted_at < $1) AND NOT EXISTS (
 		  SELECT 1 FROM evidence_events e WHERE e.turn_id = t.turn_id AND e.type IN ('turn_completed','turn_interrupted'))
-		ORDER BY t.admitted_at`, before)
+		ORDER BY t.admitted_at`, before, !before.IsZero())
 	if err != nil {
 		return nil, err
 	}

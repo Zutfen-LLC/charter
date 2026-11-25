@@ -108,6 +108,9 @@ func (e *AbortedError) Unwrap() error { return e.Cause }
 // before each event is stored, and every step fails closed.
 type Recorder struct {
 	Backend Backend
+	// Fence is required by the serving entrypoint. Its backend must be bound to
+	// the same ownership session using PG.WithFence.
+	Fence *Fence
 	// Policy decides each turn. Required.
 	Policy func(ctx context.Context, r Request) (Decision, error)
 	Clock  func() time.Time
@@ -270,6 +273,9 @@ func (rc *Recorder) Process(ctx context.Context, req Request, call ModelFunc, ga
 	if err := ctx.Err(); err != nil {
 		return Result{}, &AbortedError{Stage: "admission", Cause: err}
 	}
+	if err := rc.Fence.Check(ctx); err != nil {
+		return Result{}, err
+	}
 	t, replay, err := rc.admit(ctx, req)
 	if err != nil {
 		return Result{}, err
@@ -416,7 +422,7 @@ func (rc *Recorder) finalGate(ctx context.Context, gate func(context.Context) er
 	if err := ctx.Err(); err != nil {
 		return &AbortedError{Stage: stage, Cause: err}
 	}
-	return nil
+	return rc.Fence.Check(ctx)
 }
 
 func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFunc, gate func(context.Context) error) (Result, error) {
@@ -484,6 +490,9 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	if err := ctx.Err(); err != nil {
 		rc.abort(ctx, t, "cancelled_before_dispatch")
 		return Result{}, &AbortedError{Stage: "dispatch", Cause: err}
+	}
+	if err := rc.Fence.Check(ctx); err != nil {
+		return fail("dispatch_ownership_lost", err)
 	}
 	out, callErr := call(ctx, sent) // the only outbound call
 	if !out.Accepted && callErr == nil {
@@ -645,7 +654,7 @@ func reservedUnits(evs []Event) int {
 }
 
 // Recover resolves every turn that has no terminal event and was admitted
-// before the cutoff: it appends turn_interrupted (reason crash_recovery) with
+// before the cutoff (zero means no cutoff): it appends turn_interrupted (reason crash_recovery) with
 // the disclosure derived from the log, as the service, never as the user. A
 // turn whose release was already recorded is completed instead. It never
 // re-dispatches anything. Unknown disclosure is surfaced, not guessed away.
