@@ -42,7 +42,9 @@ type BackendInfo struct {
 type Admission struct {
 	TenantID, ProjectID, MatterID, CustodianID string
 	IdempotencyKey, TurnID                     string
-	InputSHA256                                string
+	// Fingerprint binds the whole semantic request (see Fingerprint). A repeated
+	// idempotency key with a different fingerprint is refused.
+	Fingerprint string
 }
 
 // AdmitResult: Created is false when the idempotency key already admitted a

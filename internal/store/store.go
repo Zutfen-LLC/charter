@@ -264,9 +264,10 @@ func CanonicalID(s string) (string, bool) {
 }
 
 // ProjectMatter returns the matter a project maps to at this moment (ADR 0001
-// section 3: an event carries exactly one matter_id at capture time). The
-// caller must already have established membership; this still filters by
-// tenant so a foreign project id yields ErrNotFound.
+// section 3: an event carries exactly one matter_id at capture time). Like every
+// other read it requires an ACTIVE account that is a member of the project in
+// the principal's tenant, in SQL; a project that is absent, foreign or not the
+// caller's yields ErrNotFound, indistinguishable from nonexistent.
 func (s *Store) ProjectMatter(ctx context.Context, p Principal, projectID string) (string, error) {
 	p, okp := p.canon()
 	projectID, valid := CanonicalID(projectID)
@@ -274,7 +275,11 @@ func (s *Store) ProjectMatter(ctx context.Context, p Principal, projectID string
 		return "", ErrNotFound
 	}
 	var m string
-	err := s.DB.QueryRow(ctx, `SELECT matter_id::text FROM projects WHERE id=$1 AND tenant_id=$2`, projectID, p.TenantID).Scan(&m)
+	err := s.DB.QueryRow(ctx, `
+		SELECT pr.matter_id::text FROM projects pr
+		JOIN project_members m ON m.project_id = pr.id AND m.tenant_id = pr.tenant_id
+		JOIN users u ON u.id = m.user_id AND u.tenant_id = m.tenant_id AND u.disabled_at IS NULL
+		WHERE pr.id=$1 AND pr.tenant_id=$2 AND m.user_id=$3`, projectID, p.TenantID, p.UserID).Scan(&m)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}

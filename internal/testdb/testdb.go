@@ -56,3 +56,15 @@ func New(t *testing.T) *pgxpool.Pool {
 	}
 	return pool
 }
+
+// Clone opens another pool onto the same database and schema as pool, so a test
+// can make the authorization pool and the evidence pool fail independently.
+func Clone(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
+	t.Helper()
+	p, err := pgxpool.NewWithConfig(context.Background(), pool.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	return p
+}

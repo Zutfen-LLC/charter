@@ -83,6 +83,26 @@ func (e *InterruptedError) Error() string {
 	return fmt.Sprintf("evidence: turn %s was interrupted (%s, disclosure %s)", e.TurnID, e.Reason, e.Disclosure)
 }
 
+// SafeToResubmit reports whether nothing was disclosed, so a new request cannot
+// duplicate a disclosure. With "unknown" or "disclosed" it is false: the
+// operation may have happened and needs review (reconciliation), not a blind
+// retry under a new key.
+func (e *InterruptedError) SafeToResubmit() bool { return e.Disclosure == DisclosureNone }
+
+// AbortedError is returned when the caller's context ended (cancelled or
+// deadline) before dispatch or at delivery. Stage says where; Unwrap exposes
+// context.Canceled / context.DeadlineExceeded. Evidence of what already
+// happened is still recorded.
+type AbortedError struct {
+	Stage string
+	Cause error
+}
+
+func (e *AbortedError) Error() string {
+	return "evidence: aborted before " + e.Stage + ": " + e.Cause.Error()
+}
+func (e *AbortedError) Unwrap() error { return e.Cause }
+
 // Recorder is the durable write path. Its ordering enforces ADR 0001 R1-R4
 // before each event is stored, and every step fails closed.
 type Recorder struct {
@@ -242,12 +262,15 @@ func (rc *Recorder) Process(ctx context.Context, req Request, call ModelFunc, ga
 	if rc.Backend == nil || rc.Policy == nil || call == nil {
 		return Result{}, fmt.Errorf("%w: recorder is not configured", ErrFailClosed)
 	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, &AbortedError{Stage: "admission", Cause: err}
+	}
 	t, replay, err := rc.admit(ctx, req)
 	if err != nil {
 		return Result{}, err
 	}
 	if replay != nil {
-		return rc.replay(ctx, t, gate)
+		return rc.replay(ctx, t, req, gate)
 	}
 	return rc.run(ctx, t, req, call, gate)
 }
@@ -257,12 +280,16 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 		return nil, nil, errors.New("evidence: idempotency key required")
 	}
 	id := rc.NewID()
+	fp, err := Fingerprint(req)
+	if err != nil {
+		return nil, nil, err
+	}
 	first := Event{
 		"schema_version": SchemaVersion, "tenant_id": req.TenantID, "project_id": req.ProjectID,
 		"matter_id": req.MatterID, "turn_id": id, "seq": 0, "type": "turn_received",
 		"recorded_at": rc.stamp(), "actor": map[string]any{"kind": "user", "id": req.CustodianID},
 		"payload": map[string]any{"request_id": req.RequestID, "input": ref(req.Input),
-			"objects": []any{ref(req.Input)}},
+			"objects": []any{ref(req.Input)}, "request_fingerprint": fp},
 		"prev_hash": nil,
 	}
 	if err := Seal(first); err != nil {
@@ -272,7 +299,7 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 	defer cancel()
 	res, err := rc.Backend.Admit(wc, Admission{TenantID: req.TenantID, ProjectID: req.ProjectID,
 		MatterID: req.MatterID, CustodianID: req.CustodianID, IdempotencyKey: req.IdempotencyKey,
-		TurnID: id, InputSHA256: SHA256(req.Input)}, first, [][]byte{req.Input})
+		TurnID: id, Fingerprint: fp}, first, [][]byte{req.Input})
 	if err != nil {
 		if errors.Is(err, ErrIdempotencyMismatch) {
 			return nil, nil, err
@@ -285,45 +312,116 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 	return &turn{rc: rc, tenant: req.TenantID, id: id, events: []Event{first}}, nil, nil
 }
 
-// replay answers a repeated idempotency key from the log only.
-func (rc *Recorder) replay(ctx context.Context, t *turn, gate func(context.Context) error) (Result, error) {
+// replay answers a repeated idempotency key from the log only. It never
+// dispatches. Before returning anything it validates the stored evidence: the
+// log must verify, belong to this exact request, and the output object must
+// match what the log recorded. Anything missing, malformed or inconsistent
+// fails closed. A completed turn's output is still subject to the caller's
+// delivery gate (delivery-only retry stays authorized).
+func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(context.Context) error) (Result, error) {
 	wc, cancel := rc.wctx(ctx)
 	defer cancel()
+	bad := func(format string, a ...any) (Result, error) {
+		return Result{}, fmt.Errorf("%w: replay: %s", ErrFailClosed, fmt.Sprintf(format, a...))
+	}
 	evs, err := rc.Backend.Load(wc, t.tenant, t.id)
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: replay load: %v", ErrFailClosed, err)
+		return bad("load: %v", err)
 	}
-	last := evs[len(evs)-1]
-	switch str(last, "type") {
-	case TypeTurnInterrupted:
-		return Result{}, &InterruptedError{TurnID: t.id, Reason: str(payload(last), "reason"), Disclosure: DeriveDisclosure(evs)}
-	case TypeTurnCompleted:
-		if payload(last)["outcome"] == "denied" {
-			return Result{}, ErrDenied
-		}
-		i := lastIdx(evs, "output_recorded")
-		objs, _ := payload(evs[i])["objects"].([]any)
-		sha, _ := objs[0].(map[string]any)["sha256"].(string)
-		out, err := rc.Backend.Object(wc, t.tenant, sha)
-		if err != nil {
-			return Result{}, fmt.Errorf("%w: replay output: %v", ErrFailClosed, err)
-		}
-		if gate != nil {
-			if err := gate(ctx); err != nil {
-				return Result{}, err
-			}
-		}
-		return Result{TurnID: t.id, Output: out, Replayed: true}, nil
+	lastEv := evs[len(evs)-1]
+	if !isTerminal(str(lastEv, "type")) {
+		return Result{}, ErrTurnInFlight
 	}
-	return Result{}, ErrTurnInFlight
+	objs, err := loadObjects(wc, rc.Backend, t.tenant, evs)
+	if err != nil {
+		return bad("%v", err)
+	}
+	if errs := Verify(evs, objs); len(errs) != 0 {
+		return bad("stored evidence does not verify: %s", strings.Join(errs, "; "))
+	}
+	fp, err := Fingerprint(req)
+	first := evs[0]
+	if err != nil || payload(first)["request_fingerprint"] != fp || str(first, "tenant_id") != req.TenantID ||
+		str(first, "project_id") != req.ProjectID || str(first, "matter_id") != req.MatterID ||
+		str(actorOf(first), "id") != req.CustodianID {
+		return bad("stored turn does not match this request")
+	}
+	if str(lastEv, "type") == TypeTurnInterrupted {
+		return Result{}, &InterruptedError{TurnID: t.id, Reason: str(payload(lastEv), "reason"), Disclosure: DeriveDisclosure(evs)}
+	}
+	if payload(lastEv)["outcome"] == "denied" {
+		return Result{}, ErrDenied
+	}
+	i := last(evs, "output_recorded")
+	if i < 0 || payload(evs[i])["complete"] != true {
+		return bad("completed turn has no complete output")
+	}
+	refs, _ := payload(evs[i])["objects"].([]any)
+	if len(refs) != 1 {
+		return bad("output must be exactly one object")
+	}
+	m, _ := refs[0].(map[string]any)
+	sha, _ := m["sha256"].(string)
+	out, ok := objs[sha]
+	if !ok {
+		return bad("output object missing")
+	}
+	if n, _ := integer(m["bytes"]); n != int64(len(out)) || SHA256(out) != sha {
+		return bad("output object does not match its record")
+	}
+	if err := rc.finalGate(ctx, gate, "delivery"); err != nil {
+		return Result{}, err
+	}
+	return Result{TurnID: t.id, Output: out, Replayed: true}, nil
 }
 
-func lastIdx(evs []Event, typ string) int { return last(evs, typ) }
+func actorOf(e Event) map[string]any { a, _ := e["actor"].(map[string]any); return a }
+
+// loadObjects fetches every object an event log references.
+func loadObjects(ctx context.Context, b Backend, tenant string, evs []Event) (map[string][]byte, error) {
+	out := map[string][]byte{}
+	for _, e := range evs {
+		for _, r := range objectRefs(e) {
+			if _, ok := out[r]; ok {
+				continue
+			}
+			data, err := b.Object(ctx, tenant, r)
+			if err != nil {
+				if errors.Is(err, ErrNotFound) {
+					continue // reported by Verify as a missing object
+				}
+				return nil, fmt.Errorf("load object %s: %w", r, err)
+			}
+			out[r] = data
+		}
+	}
+	return out, nil
+}
+
+// finalGate is the delivery-time check: the caller's context must still be live
+// and the caller's fresh authorization check must pass. It runs AFTER every
+// evidence write, immediately before output is handed back, so no database
+// write, retry or settlement can sit between the last check and delivery.
+func (rc *Recorder) finalGate(ctx context.Context, gate func(context.Context) error, stage string) error {
+	if gate != nil {
+		if err := gate(ctx); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return &AbortedError{Stage: stage, Cause: err}
+	}
+	return nil
+}
 
 func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFunc, gate func(context.Context) error) (Result, error) {
 	fail := func(reason string, err error) (Result, error) {
 		rc.abort(ctx, t, reason)
 		return Result{}, fmt.Errorf("%w: %s: %v", ErrFailClosed, reason, err)
+	}
+	if err := ctx.Err(); err != nil { // admitted, but the caller is already gone: no policy work, no dispatch
+		rc.abort(ctx, t, "cancelled_before_dispatch")
+		return Result{}, &AbortedError{Stage: "policy", Cause: err}
 	}
 	d, err := rc.Policy(ctx, req)
 	if err != nil {
@@ -375,6 +473,13 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		return fail("evidence_write_failed", err)
 	}
 
+	// Cancellation or expiry while the evidence above was being written: do not
+	// dispatch. The acknowledged intent derives "unknown", which over-reports
+	// (nothing was sent) and is the safe direction.
+	if err := ctx.Err(); err != nil {
+		rc.abort(ctx, t, "cancelled_before_dispatch")
+		return Result{}, &AbortedError{Stage: "dispatch", Cause: err}
+	}
 	out, callErr := call(ctx, sent) // the only outbound call
 	if !out.Accepted && callErr == nil {
 		out.Accepted = true
@@ -421,6 +526,13 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	// withheld from the caller either way.
 	if err := rc.finish(ctx, t, d.ReserveUnits); err != nil {
 		return Result{}, fmt.Errorf("%w: %v", ErrFinalizeFailed, err)
+	}
+	// Delivery gate: re-authorize and re-check the context AFTER finalization.
+	// If it refuses, the log still says the release was authorized and the turn
+	// completed (the output is durable and a delivery-only retry stays possible
+	// through replay), but this call returns no output.
+	if err := rc.finalGate(ctx, gate, "delivery"); err != nil {
+		return Result{TurnID: t.id}, err
 	}
 	return Result{TurnID: t.id, Output: out.Output}, nil
 }

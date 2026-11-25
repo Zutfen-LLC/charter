@@ -92,19 +92,19 @@ func (b PG) Admit(ctx context.Context, a Admission, first Event, objects [][]byt
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var turn string
 	err = tx.QueryRow(ctx, `INSERT INTO evidence_turns
-		(turn_id, tenant_id, project_id, matter_id, custodian_id, idempotency_key, input_sha256)
-		VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,$7)
+		(turn_id, tenant_id, project_id, matter_id, custodian_id, idempotency_key, input_sha256, request_fingerprint)
+		VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,$7,$8)
 		ON CONFLICT (tenant_id, project_id, custodian_id, idempotency_key) DO NOTHING
 		RETURNING turn_id::text`,
-		a.TurnID, a.TenantID, a.ProjectID, a.MatterID, a.CustodianID, a.IdempotencyKey, a.InputSHA256).Scan(&turn)
+		a.TurnID, a.TenantID, a.ProjectID, a.MatterID, a.CustodianID, a.IdempotencyKey, inputSHA(first), a.Fingerprint).Scan(&turn)
 	if errors.Is(err, pgx.ErrNoRows) { // key already used: an idempotent replay
-		var sha string
-		if err := tx.QueryRow(ctx, `SELECT turn_id::text, input_sha256 FROM evidence_turns
+		var fp string
+		if err := tx.QueryRow(ctx, `SELECT turn_id::text, request_fingerprint FROM evidence_turns
 			WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND custodian_id=$3::uuid AND idempotency_key=$4`,
-			a.TenantID, a.ProjectID, a.CustodianID, a.IdempotencyKey).Scan(&turn, &sha); err != nil {
+			a.TenantID, a.ProjectID, a.CustodianID, a.IdempotencyKey).Scan(&turn, &fp); err != nil {
 			return AdmitResult{}, err
 		}
-		if sha != a.InputSHA256 {
+		if fp != a.Fingerprint {
 			return AdmitResult{}, ErrIdempotencyMismatch
 		}
 		return AdmitResult{TurnID: turn, Created: false}, nil
@@ -259,4 +259,15 @@ func (b PG) OpenTurns(ctx context.Context, before time.Time) ([]TurnRef, error) 
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// inputSHA is the exact input hash named by turn_received, kept as a column for
+// diagnostics; the idempotency decision uses the full fingerprint.
+func inputSHA(first Event) string {
+	if in, ok := payload(first)["input"].(map[string]any); ok {
+		if s, ok := in["sha256"].(string); ok {
+			return s
+		}
+	}
+	return SHA256(nil)
 }

@@ -87,21 +87,26 @@ func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Princip
 		a.fail(w, err)
 		return
 	}
+	pidC, _ := store.CanonicalID(pid) // ProjectMatter has just proven it is a valid, authorized id
 	var sources []evidence.Source
 	seen := map[string]bool{}
-	for _, id := range body.ArtifactIDs {
-		if seen[id] {
+	for _, raw := range body.ArtifactIDs {
+		id, valid := store.CanonicalID(raw)
+		if !valid {
+			deny(w, http.StatusNotFound, "not found")
+			return
+		}
+		if seen[id] { // mixed-case spellings of one id are one source
 			continue
 		}
 		seen[id] = true
 		art, err := a.Store.GetArtifact(r.Context(), p, id)
-		if err != nil || art.ProjectID != pid { // another project's artifact is "not found"
+		if err != nil || art.ProjectID != pidC { // another project's artifact is "not found"
 			deny(w, http.StatusNotFound, "not found")
 			return
 		}
 		sources = append(sources, evidence.Source{ID: art.ID, Version: 1, Bytes: []byte(art.Body)})
 	}
-	pidC, _ := store.CanonicalID(pid)
 	req := evidence.Request{TenantID: p.TenantID, ProjectID: pidC, MatterID: matter, CustodianID: p.UserID,
 		IdempotencyKey: key, RequestID: evidence.NewUUID(), Input: []byte(body.Input), Sources: sources}
 
@@ -158,9 +163,16 @@ func (a *Auth) readCallBody(w http.ResponseWriter, r *http.Request) (callBody, b
 func (a *Auth) callError(w http.ResponseWriter, err error) {
 	var ge *gateError
 	var ie *evidence.InterruptedError
+	var ae *evidence.AbortedError
 	switch {
 	case errors.As(err, &ge):
 		deny(w, ge.code, ge.msg)
+	case errors.As(err, &ae):
+		if errors.Is(ae.Cause, context.DeadlineExceeded) {
+			deny(w, http.StatusGatewayTimeout, "work deadline exceeded")
+		} else {
+			deny(w, http.StatusServiceUnavailable, "request cancelled")
+		}
 	case errors.Is(err, evidence.ErrDenied):
 		deny(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, evidence.ErrIdempotencyMismatch):
@@ -168,7 +180,12 @@ func (a *Auth) callError(w http.ResponseWriter, err error) {
 	case errors.Is(err, evidence.ErrTurnInFlight):
 		deny(w, http.StatusConflict, "a turn with this idempotency key is still in flight or awaiting recovery")
 	case errors.As(err, &ie):
-		deny(w, http.StatusConflict, "turn with this idempotency key was interrupted ("+ie.Disclosure+" disclosure); use a new Idempotency-Key to try again")
+		if ie.SafeToResubmit() {
+			deny(w, http.StatusConflict, "turn with this idempotency key was interrupted before any disclosure; a new request may be submitted")
+		} else {
+			// Disclosure is unknown or happened: resubmitting could disclose again.
+			deny(w, http.StatusConflict, "turn with this idempotency key was interrupted and disclosure is "+ie.Disclosure+"; do not resubmit blindly, the outcome needs review")
+		}
 	case evidence.IsProviderError(err):
 		a.fail(w, err) // provider failure: recorded; maps ErrNotFound/ErrForbidden, else 503
 	default:

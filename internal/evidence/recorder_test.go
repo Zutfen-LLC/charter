@@ -222,13 +222,16 @@ func TestAdmissionAndIntentDurableBeforeDispatch(t *testing.T) {
 // a veto releases nothing and records why.
 func TestOutputDurableBeforeReleaseAndGateVeto(t *testing.T) {
 	f := newFx(t, nil)
-	var atGate string
-	gate := func(context.Context) error { atGate = types(f.log(f.onlyTurn())); return nil }
+	// The gate runs twice: before the release is recorded, and again after every
+	// evidence write, immediately before delivery.
+	var atGate []string
+	gate := func(context.Context) error { atGate = append(atGate, types(f.log(f.onlyTurn()))); return nil }
 	if _, err := f.rec.Process(context.Background(), f.req("a", "in"), f.model("ok"), gate); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(atGate, "output_recorded,evidence_ack") {
-		t.Fatalf("log at release gate: %s", atGate)
+	if len(atGate) != 2 || !strings.HasSuffix(atGate[0], "output_recorded,evidence_ack") ||
+		!strings.HasSuffix(atGate[1], "response_released,usage_settled,turn_completed") {
+		t.Fatalf("logs at the two gates: %v", atGate)
 	}
 	veto := errors.New("revoked")
 	res, err := f.rec.Process(context.Background(), f.req("b", "in2"), f.model("secret-output"), func(context.Context) error { return veto })
@@ -602,7 +605,7 @@ func TestAppendIsIdempotentAndChainEnforced(t *testing.T) {
 		"actor": map[string]any{"kind": "user", "id": f2.user}, "payload": map[string]any{}, "prev_hash": nil}
 	_ = evidence.Seal(e0)
 	if _, err := f2.pg.Admit(ctx, evidence.Admission{TenantID: f2.tenant, ProjectID: f2.proj, MatterID: f2.matter,
-		CustodianID: f2.user, IdempotencyKey: "z", TurnID: e0["turn_id"].(string), InputSHA256: evidence.SHA256(nil)}, e0, nil); err != nil {
+		CustodianID: f2.user, IdempotencyKey: "z", TurnID: e0["turn_id"].(string), Fingerprint: evidence.SHA256(nil)}, e0, nil); err != nil {
 		t.Fatal(err)
 	}
 	for name, mut := range map[string]func(e evidence.Event){
