@@ -9,7 +9,7 @@ Go 1.24+, Docker with compose v2 (or your own disposable PostgreSQL 16 via `CHAR
 ```bash
 scripts/dev.sh test
 ```
-Starts a throwaway Postgres (tmpfs, nothing persists), runs the gofmt check, `go vet`, Go tests (including migrations against the real DB) and the contract fixtures, then destroys the database. `scripts/dev.sh up|down` start/destroy the DB alone. The DB test **drops the `public` schema**: only point `CHARTER_TEST_DATABASE_URL` at a disposable database.
+Starts a throwaway Postgres (tmpfs, nothing persists), runs the gofmt check, `go vet`, Go tests (including migrations against the real DB) and the contract fixtures, then destroys the database. `scripts/dev.sh up|down` start/destroy the DB alone. The DB test creates a uniquely named `charter_test_*` schema and drops only that schema afterwards; it never touches other schemas. Still prefer a disposable database for `CHARTER_TEST_DATABASE_URL`.
 
 ## Run the server
 ```bash

@@ -8,5 +8,10 @@ services:
       POSTGRES_DB: charter
     ports:
       - "127.0.0.1:55432:5432"   # loopback only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U charter -d charter"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     tmpfs:
       - /var/lib/postgresql/data   # nothing persists; teardown is `down -v`
