@@ -306,14 +306,26 @@ func lockTenant(t *testing.T, pool *pgxpool.Pool, tenant string) func() {
 	return release
 }
 
-// waitBlocked polls pg_stat_activity until n backends wait on a lock.
+// blockedCount counts backends of THIS test's pool that wait on a lock. The
+// count is scoped by application_name (testdb sets it to the test's unique
+// schema), so lock waiters of other tests and packages running in parallel
+// against the same database are never counted; a database-wide count let them
+// satisfy "n operations are queued" before this test's operations were.
+func blockedCount(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	var got int
+	err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+		WHERE datname=current_database() AND wait_event_type='Lock' AND pid <> pg_backend_pid()
+		  AND application_name = current_setting('application_name')`).Scan(&got)
+	return got, err
+}
+
+// waitBlocked polls pg_stat_activity until n of this test's backends wait on a lock.
 func waitBlocked(t *testing.T, pool *pgxpool.Pool, n int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		var got int
-		if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM pg_stat_activity
-			WHERE datname=current_database() AND wait_event_type='Lock' AND pid <> pg_backend_pid()`).Scan(&got); err != nil {
+		got, err := blockedCount(context.Background(), pool)
+		if err != nil {
 			t.Fatal(err)
 		}
 		if got >= n {
@@ -324,6 +336,42 @@ func waitBlocked(t *testing.T, pool *pgxpool.Pool, n int) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// Regression: a lock waiter belonging to ANOTHER test schema in the same
+// database must not be counted (it made TestStaleActorCannotCommitAfterConcurrentRevocation
+// intermittently fail when packages ran in parallel).
+func TestBlockedCountIgnoresOtherTestsLockWaiters(t *testing.T) {
+	a, b := testdb.New(t), testdb.New(t)
+	ctx := context.Background()
+	holder, err := b.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Whatever happens, release the lock before the schema is dropped, or the
+	// cleanup would wait behind the parked waiter forever.
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			_ = holder.Rollback(context.Background())
+		}
+	}
+	t.Cleanup(release)
+	if _, err := holder.Exec(ctx, `LOCK TABLE instance IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { // a genuine lock waiter in the OTHER schema
+		defer close(done)
+		_, _ = b.Exec(context.Background(), `SELECT 1 FROM instance`)
+	}()
+	waitBlocked(t, b, 1) // it is visible to its own test
+	if n, err := blockedCount(ctx, a); err != nil || n != 0 {
+		t.Fatalf("another schema's waiter was counted in this test: n=%d err=%v", n, err)
+	}
+	release()
+	<-done
 }
 
 type op func(ctx context.Context) error

@@ -41,6 +41,9 @@ func New(t *testing.T) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	// Lets a test count ITS OWN lock waiters (pg_stat_activity.application_name)
+	// without seeing those of other tests running in parallel in the same database.
+	cfg.ConnConfig.RuntimeParams["application_name"] = schema
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
