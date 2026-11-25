@@ -1,0 +1,40 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: charter
+          POSTGRES_PASSWORD: ci-throwaway
+          POSTGRES_DB: charter
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U charter" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      CHARTER_TEST_DATABASE_URL: postgres://charter:ci-throwaway@127.0.0.1:5432/charter?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Static check
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.5.1 ./...
+      - name: Go tests
+        run: go test -count=1 ./...
+      - name: Contract fixtures
+        run: python3 -m unittest discover -s tests/contracts
