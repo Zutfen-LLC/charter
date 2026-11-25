@@ -1,6 +1,6 @@
 """Generates the golden synthetic fixtures. Run: python3 tests/contracts/gen_fixtures.py"""
 import json, os
-from model import build_turn, sha256_bytes
+from model import build_turn, canonical, sha256_bytes
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "..", "fixtures", "contracts")
 BASE = {"tenant_id": "t-0001", "project_id": "p-alpha", "matter_id": "m-0001", "turn_id": "turn-0001"}
@@ -83,6 +83,16 @@ def main():
     ]
     h1 = {"id": "H1", "matter_id": "m-0001", "custodian_ids": [], "window_start": "2026-01-01", "window_end": None}
     h2 = {"id": "H2", "matter_id": "m-0001", "custodian_ids": ["c1"], "window_start": "2026-01-01", "window_end": None}
+    vectors = [
+        {"name": "utf16-key-order", "value": {"\ue000": 1, "\U00010000": 2},
+         "note": "JCS sorts by UTF-16 code units: U+10000 (D800 DC00) sorts before U+E000"},
+        {"name": "nested-and-escapes", "value": {"b": [1, {"z": None, "a": True}], "a": "line\nbreak \"q\""}},
+        {"name": "negative-int", "value": {"n": -7}},
+    ]
+    for v in vectors:
+        c = canonical(v["value"])
+        v["canonical_utf8_hex"], v["sha256"] = c.hex(), sha256_bytes(c)
+    write("canonical-vectors.json", {"description": "Cross-language golden vectors for RFC 8785 canonicalization (integers only)", "vectors": vectors})
     write("holds.json", {"description": "A in H1+H2, B only in H1, C unheld control", "items": items, "holds": [h1, h2]})
 
 

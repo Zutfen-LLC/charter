@@ -13,4 +13,4 @@ Applies to the event schema, export manifest, canonical hashing rules and the or
 
 ## Changelog
 
-- 1.0.0 (proposed): initial contract.
+- 1.0.0 (proposed): initial contract. Review fixes before freeze: R4 now requires an `allow` decision; canonicalization pinned to UTF-16 key order with cross-language vectors; purge specified as tombstone + conditional delete.

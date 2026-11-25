@@ -29,6 +29,23 @@ class Golden(unittest.TestCase):
         self.assertEqual(canonical({"b": 1, "a": 2}), canonical({"a": 2, "b": 1}))
 
 
+class Canonical(unittest.TestCase):
+    def test_vectors(self):
+        for v in load("canonical-vectors.json")["vectors"]:
+            c = canonical(v["value"])
+            self.assertEqual(c.hex(), v["canonical_utf8_hex"], v["name"])
+            self.assertEqual(sha256_bytes(c), v["sha256"], v["name"])
+
+    def test_utf16_order_not_code_point_order(self):
+        self.assertEqual(canonical({"\ue000": 1, "\U00010000": 2}).decode(),
+                         '{"\U00010000":2,"\ue000":1}')
+
+    def test_rejects_unsafe_values(self):
+        for bad in (2**53, {"s": "\ud800"}, {"f": 1.0}, {"x": object()}):
+            with self.assertRaises(ValueError):
+                canonical(bad)
+
+
 class Turns(unittest.TestCase):
     def test_complete_turn_verifies(self):
         f = load("complete-turn.json")
@@ -82,6 +99,20 @@ class Turns(unittest.TestCase):
         base = {k: f["events"][0][k] for k in ("tenant_id", "project_id", "matter_id", "turn_id")}
         self.assertTrue(any("R2" in e for e in verify_turn(build_turn(base, steps))))
 
+    def test_denied_turn_cannot_disclose_or_release(self):
+        f = load("complete-turn.json")
+        steps = []
+        for e in f["events"]:
+            p = dict(e["payload"])
+            if e["type"] == "evidence_ack":
+                p["acked_seq"] = "@prev"
+            steps.append((e["type"], e["recorded_at"], e["actor"], p))
+        steps[1][3]["decision"] = "deny"
+        base = {k: f["events"][0][k] for k in ("tenant_id", "project_id", "matter_id", "turn_id")}
+        errs = verify_turn(build_turn(base, steps))
+        for t in ("context_sealed", "disclosure_intent", "provider_accepted", "response_released"):
+            self.assertTrue(any(f"R4 {t}" in e for e in errs), t)
+
     def test_provider_contact_before_intent_ack_rejected(self):
         f = load("complete-turn.json")
         steps = [(e["type"], e["recorded_at"], e["actor"], dict(e["payload"])) for e in f["events"]
@@ -109,6 +140,22 @@ class Holds(unittest.TestCase):
         self.assertEqual(s.items["A"]["state"], "active")
         self.assertTrue(s.purge("C", 300, True))      # unheld control expires
         self.assertEqual(s.items["C"]["state"], "disposed")
+
+    def test_hold_acknowledged_during_inflight_purge(self):   # case F
+        f = load("holds.json"); s = Store(f["items"]); s.sweep(200)
+        self.assertTrue(s.begin_purge("A", 300, True))        # tombstoned, bytes still present
+        s.place_hold(f["holds"][0])                           # hold acked before delete commits
+        self.assertEqual(s.items["A"]["state"], "active")
+        self.assertEqual(s.finish_purge("A"), "not_purging")  # delete is refused
+
+    def test_stale_epoch_delete_never_blind(self):
+        f = load("holds.json"); s = Store(f["items"]); s.sweep(200)
+        self.assertTrue(s.begin_purge("B", 300, True))
+        s.epoch += 1                                          # unrelated hold change commits
+        self.assertEqual(s.finish_purge("B"), "stale_retry")
+        self.assertEqual(s.items["B"]["state"], "disposal_pending")
+        self.assertTrue(s.begin_purge("B", 300, True))
+        self.assertEqual(s.finish_purge("B"), "disposed")
 
     def test_hold_after_disposal_records_gap(self):   # case C
         f = load("holds.json"); s = Store(f["items"]); s.sweep(200); s.purge("A", 300, True)

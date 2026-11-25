@@ -105,9 +105,14 @@ or event-ordering rule violation (section 8).
 
 - Algorithm: SHA-256, written `sha256:<64 lowercase hex>`.
 - Event hash: SHA-256 of the canonical JSON of the event **without** `event_hash`.
-- Canonical JSON: RFC 8785 (JCS) rules: UTF-8, object keys sorted, no insignificant
-  whitespace. **Floating point numbers are forbidden** in events (use integers,
-  decimal strings, or minor units for money); the reference model rejects them.
+- Canonical JSON: RFC 8785 (JCS) rules: UTF-8, object keys sorted **by UTF-16 code
+  units** (not Unicode code points), no insignificant whitespace. The accepted
+  format is deliberately constrained to what is portable: strings (no lone
+  surrogates), booleans, null, arrays, objects, and **integers within
+  +/-(2^53 - 1)**. Floating point numbers and larger integers are forbidden
+  (use decimal strings or minor units); the reference model rejects them. Any
+  implementation must reproduce `fixtures/contracts/canonical-vectors.json`
+  byte for byte, including the UTF-16 ordering vector.
   Timestamps are RFC 3339 UTC strings with millisecond precision, `Z` suffix.
 - Chain: `prev_hash` of event N is `event_hash` of event N-1; event 0 has `null`.
   The chain head hash identifies the turn log.
@@ -137,11 +142,25 @@ disposal requires `now >= retention_expires_at` **and** not held.
 
 **Disposal is two-phase** (see state machines):
 1. *Sweep* marks eligible items `disposal_pending` and records the `hold_epoch` it observed.
-2. *Purge*, after the grace period, re-evaluates holds against the **current** epoch
-   and only then irreversibly deletes. A hold placed between the phases returns
-   the item to `active`/held. Placing a hold on an item already `disposed`
-   cannot recover it: the system records a `disposed_before_hold` gap in the
-   hold's report so the miss is visible rather than silent.
+2. *Purge*, after the grace period, is itself two steps so that a re-check can never
+   be separated from the delete:
+   - `begin_purge` re-evaluates holds, **tombstones** the item (unreadable to
+     everyone; bytes retained) and records the `hold_epoch` it observed.
+   - `finish_purge` is the only step that deletes bytes and must be a **conditional
+     delete**: it succeeds only if the matter's `hold_epoch` is still the observed
+     value. On mismatch it never deletes blindly: if a hold now matches, the
+     tombstone is lifted (`active`); otherwise purge restarts under the new epoch.
+   - Linearization point: a hold is *acknowledged* only once its epoch is committed.
+     Any purge whose conditional delete commits after that point observes the
+     bumped epoch and fails. A hold acknowledged before the delete commits
+     therefore always protects the item, including against an in-flight purge.
+   - If the storage backend cannot offer an atomic conditional delete (or an
+     equivalent fence such as a per-matter lock held by both paths), purge must
+     not be enabled. Proving this on a real backend is deferred to #4/#7 and
+     is a recorded gap until then.
+   A hold placed after the byte delete committed cannot recover the item: the
+   system records a `disposed_before_hold` gap in the hold's report so the
+   miss is visible rather than silent.
 3. Purge requires an approval by `records_officer` (not `tenant_admin` or `operator`).
 
 Retention is a technical timer here, not a statement of any legal retention period.
@@ -164,8 +183,9 @@ Mandatory ordering rules, enforced by the control plane and checked by the verif
 - **R3 (single terminal event):** every turn ends in exactly one of `turn_completed`
   or `turn_interrupted`. `response_released` may occur only in a turn that ends in
   `turn_completed`.
-- **R4 (policy first):** `policy_decision` (allow or deny) precedes any `context_sealed`;
-  a deny ends the turn with no disclosure.
+- **R4 (policy first):** an `allow` `policy_decision` must precede `context_sealed`,
+  `disclosure_intent`, `provider_accepted` and `response_released`. A `deny` ends the
+  turn with no disclosure; the verifier rejects any of those events after a deny.
 - If the evidence store is unavailable at any gate the turn fails closed
   (nothing is sent or released) and the failure is returned to the client.
   Fail-closed after R1 may waste a reservation but never causes unrecorded disclosure.

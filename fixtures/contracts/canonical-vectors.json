@@ -1,0 +1,38 @@
+{
+  "description": "Cross-language golden vectors for RFC 8785 canonicalization (integers only)",
+  "vectors": [
+    {
+      "canonical_utf8_hex": "7b22f0908080223a322c22ee8080223a317d",
+      "name": "utf16-key-order",
+      "note": "JCS sorts by UTF-16 code units: U+10000 (D800 DC00) sorts before U+E000",
+      "sha256": "sha256:9d4cdc71dda603c42f9b21d88d0c2ffc31a76cd1bd461d7359406cf169845f1e",
+      "value": {
+        "\ue000": 1,
+        "\ud800\udc00": 2
+      }
+    },
+    {
+      "canonical_utf8_hex": "7b2261223a226c696e655c6e627265616b205c22715c22222c2262223a5b312c7b2261223a747275652c227a223a6e756c6c7d5d7d",
+      "name": "nested-and-escapes",
+      "sha256": "sha256:911a78d673543f5d99479534fa74069b4b68b8eee59053201a27de75b75222bc",
+      "value": {
+        "a": "line\nbreak \"q\"",
+        "b": [
+          1,
+          {
+            "a": true,
+            "z": null
+          }
+        ]
+      }
+    },
+    {
+      "canonical_utf8_hex": "7b226e223a2d377d",
+      "name": "negative-int",
+      "sha256": "sha256:bb4b8ce0247b48700fcc91e6175e2fd5fd53855a00db3847856881805c2ecfe3",
+      "value": {
+        "n": -7
+      }
+    }
+  ]
+}

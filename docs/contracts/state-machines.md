@@ -6,7 +6,7 @@ Authoritative rules live in [ADR 0001](../adr/0001-governance-and-evidence-contr
 
 ```
 turn_received -> policy_decision
-policy_decision(deny)  -> turn_completed(outcome=denied)            disclosure: none
+policy_decision(deny)  -> turn_completed(outcome=denied)            disclosure: none (no sealing, intent, provider or release events allowed)
 policy_decision(allow) -> usage_reserved -> context_sealed
 context_sealed -> disclosure_intent -> evidence_ack(intent)         <- R1 gate
 evidence_ack(intent) -> provider_accepted                           disclosure: disclosed
@@ -31,7 +31,10 @@ Exactly one terminal event (`turn_completed` | `turn_interrupted`) per turn. `re
 ```
 active --(now >= retention_expires_at AND not held)--> disposal_pending   [sweep, records hold_epoch]
 disposal_pending --(hold matches at any time before purge)--> active      [hold wins]
-disposal_pending --(grace elapsed AND still not held at current epoch AND purge approved)--> disposed [purge, irreversible]
+disposal_pending --(grace elapsed AND not held AND purge approved)--> purging   [begin_purge: tombstone, records hold_epoch]
+purging --(hold matches)--> active                                         [hold wins; bytes still exist]
+purging --(conditional delete, hold_epoch unchanged)--> disposed           [finish_purge, irreversible]
+purging --(hold_epoch changed, no hold matches)--> disposal_pending        [restart under new epoch; never delete blind]
 ```
 
 `held(item) = exists active hold h: matches(h, item)`. `disposed` has no outgoing transitions. A hold that would have matched an already-`disposed` item records `disposed_before_hold` in its report.
@@ -53,3 +56,5 @@ Release removes only that hold's claim. Placement and release each take the next
 | C | sweep, purge, then hold placed | item disposed; hold reports `disposed_before_hold` |
 | D | two holds overlap, release one | item still held; not a sweep candidate |
 | E | two holds overlap, release both, expired | eligible; unheld control expires normally |
+| F | purge begun (tombstoned), hold acknowledged, purge finish attempted | item restored; delete refused |
+| G | purge begun, unrelated epoch change, finish attempted | no blind delete; purge restarts under new epoch |
