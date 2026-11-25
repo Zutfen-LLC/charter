@@ -76,6 +76,19 @@ func TestRuntimeRejectsUnsafeRealLogins(t *testing.T) {
 	}
 }
 
+func TestRuntimeRefusesAPortableDatabaseProfileWithIndirectSQLObjects(t *testing.T) {
+	owner := testdb.New(t)
+	c := testdb.Runtime(t, owner)
+	ctx := context.Background()
+	// No evidence access is performed; the runtime profile requires an audited
+	// base-table-only surface, even if this test view returns a harmless value.
+	mustSQL(t, owner, `CREATE VIEW synthetic_indirection AS SELECT 'fixture'::text AS value`)
+	mustSQL(t, owner, `GRANT SELECT (value) ON synthetic_indirection TO `+ident(c.WorkspaceRole))
+	if err := evidence.CheckWorkspaceRuntime(ctx, c.Workspace); err == nil {
+		t.Fatal("workspace login with an application view grant passed runtime validation")
+	}
+}
+
 func TestRuntimeRejectsDatabaseOwnerWithoutTableOwnership(t *testing.T) {
 	admin := testdb.New(t)
 	ctx := context.Background()
