@@ -436,7 +436,19 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	}
 	d, err := rc.Policy(ctx, req)
 	if err != nil {
-		return fail("policy_error", err)
+		// A policy evaluation failure is a durable denial, never an implicit
+		// allow or a retryable open turn. Recovery recognizes this decision too.
+		if _, _, writeErr := t.emit(ctx, "policy_decision", map[string]any{
+			"decision": "deny", "reason": "policy_evaluation_failed", "policy_version": "unavailable",
+		}); writeErr != nil {
+			rc.abort(ctx, t, "policy_error")
+			return Result{}, fmt.Errorf("%w: policy_error: %v (denial evidence: %v)", ErrFailClosed, err, writeErr)
+		}
+		if _, _, writeErr := t.emit(ctx, TypeTurnCompleted, map[string]any{"outcome": "denied"}); writeErr != nil {
+			rc.abort(ctx, t, "policy_error")
+			return Result{}, fmt.Errorf("%w: policy_error terminal: %v", ErrFailClosed, writeErr)
+		}
+		return Result{}, fmt.Errorf("%w: policy evaluation failed: %v", ErrDenied, err)
 	}
 	if !d.Allow {
 		pd := map[string]any{"decision": "deny", "reason": d.Reason, "policy_version": d.PolicyVersion}
@@ -625,6 +637,13 @@ func (rc *Recorder) resolveOnce(ctx context.Context, t *turn, reason string) err
 	lastEv := t.events[len(t.events)-1]
 	if isTerminal(str(lastEv, "type")) {
 		return nil
+	}
+	if i := last(t.events, "policy_decision"); i >= 0 && payload(t.events[i])["decision"] == "deny" {
+		_, _, err := t.emit(ctx, TypeTurnCompleted, map[string]any{"outcome": "denied"})
+		if errors.Is(err, ErrTerminal) {
+			return nil
+		}
+		return err
 	}
 	if last(t.events, "response_released") >= 0 {
 		// Already recorded as released: R3 requires it to complete.

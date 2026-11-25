@@ -7,6 +7,7 @@ Authoritative rules live in [ADR 0001](../adr/0001-governance-and-evidence-contr
 ```
 turn_received -> policy_decision
 policy_decision(deny)  -> turn_completed(outcome=denied)            disclosure: none (no sealing, intent, provider or release events allowed)
+policy evaluation error -> policy_decision(deny, reason=policy_evaluation_failed) -> turn_completed(outcome=denied)
 policy_decision(allow) -> usage_reserved -> context_sealed
 context_sealed -> disclosure_intent -> evidence_ack(intent)         <- R1 gate
 evidence_ack(intent) -> provider_accepted                           disclosure: disclosed

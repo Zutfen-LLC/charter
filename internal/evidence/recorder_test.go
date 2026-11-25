@@ -258,7 +258,7 @@ func TestPolicyEvaluationFailureIsDurableDenialWithoutRedispatch(t *testing.T) {
 		return evidence.Decision{}, policyErr
 	}
 	res, err := f.rec.Process(context.Background(), f.req("policy-failure", "in"), f.model("must-not-run"), nil)
-	if !errors.Is(err, policyErr) || len(res.Output) != 0 || f.calls.Load() != 0 {
+	if !errors.Is(err, evidence.ErrDenied) || len(res.Output) != 0 || f.calls.Load() != 0 {
 		t.Fatalf("res=%+v err=%v calls=%d", res, err, f.calls.Load())
 	}
 	evs := f.verified(f.onlyTurn())
@@ -275,6 +275,74 @@ func TestPolicyEvaluationFailureIsDurableDenialWithoutRedispatch(t *testing.T) {
 	}
 	if f.calls.Load() != 0 {
 		t.Fatalf("denied request redispatched: %d", f.calls.Load())
+	}
+}
+
+func TestPolicyDenialRecoveryAfterTerminalWriteOutage(t *testing.T) {
+	fb := &faulty{failTypes: map[string]bool{evidence.TypeTurnCompleted: true}, forever: true}
+	f := newFx(t, func(b evidence.Backend) evidence.Backend { fb.Backend = b; return fb })
+	policyErr := errors.New("policy unavailable")
+	f.rec.Policy = func(context.Context, evidence.Request) (evidence.Decision, error) {
+		return evidence.Decision{}, policyErr
+	}
+	_, err := f.rec.Process(context.Background(), f.req("policy-outage", "in"), f.model("never"), nil)
+	if !errors.Is(err, evidence.ErrFailClosed) || f.calls.Load() != 0 {
+		t.Fatalf("err=%v calls=%d", err, f.calls.Load())
+	}
+	open := f.log(f.onlyTurn())
+	if got := types(open); got != "turn_received,policy_decision" {
+		t.Fatalf("expected durable denial awaiting terminal recovery, got %s", got)
+	}
+	fb.failTypes = nil
+	if n, err := f.rec.Recover(context.Background(), time.Now().Add(time.Hour)); err != nil || n != 1 {
+		t.Fatalf("recover n=%d err=%v", n, err)
+	}
+	evs := f.verified(f.onlyTurn())
+	if got := types(evs); got != "turn_received,policy_decision,turn_completed" || evs[2]["payload"].(map[string]any)["outcome"] != "denied" {
+		t.Fatalf("recovered denial: %s", got)
+	}
+	if _, err := f.rec.Process(context.Background(), f.req("policy-outage", "in"), f.model("never"), nil); !errors.Is(err, evidence.ErrDenied) {
+		t.Fatalf("durable denied retry: %v", err)
+	}
+	if f.calls.Load() != 0 {
+		t.Fatalf("denied turn redispatched: %d", f.calls.Load())
+	}
+}
+
+type cancelAfterIntentAck struct {
+	evidence.Backend
+	cancel context.CancelFunc
+}
+
+func (b *cancelAfterIntentAck) Append(ctx context.Context, e evidence.Event) (evidence.Receipt, error) {
+	r, err := b.Backend.Append(ctx, e)
+	if err == nil && e["type"] == "evidence_ack" {
+		b.cancel()
+	}
+	return r, err
+}
+
+func TestCancellationAfterIntentAckPreventsDispatchAndFinalizes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := newFx(t, func(b evidence.Backend) evidence.Backend { return &cancelAfterIntentAck{Backend: b, cancel: cancel} })
+	_, err := f.rec.Process(ctx, f.req("cancel-after-intent", "in"), f.model("never"), nil)
+	var aborted *evidence.AbortedError
+	if !errors.As(err, &aborted) || aborted.Stage != "dispatch" || f.calls.Load() != 0 {
+		t.Fatalf("err=%v calls=%d", err, f.calls.Load())
+	}
+	evs := f.verified(f.onlyTurn())
+	terms := 0
+	for _, ev := range evs {
+		if ev["type"] == evidence.TypeTurnCompleted || ev["type"] == evidence.TypeTurnInterrupted {
+			terms++
+		}
+	}
+	last := evs[len(evs)-1]
+	if terms != 1 || last["type"] != evidence.TypeTurnInterrupted || last["payload"].(map[string]any)["disclosure"] != evidence.DisclosureUnknown {
+		t.Fatalf("cancelled turn not finalized conservatively: %s", types(evs))
+	}
+	if n, recErr := f.rec.Recover(context.Background(), time.Now().Add(time.Hour)); recErr != nil || n != 0 {
+		t.Fatalf("terminal turn rediscovered: n=%d err=%v", n, recErr)
 	}
 }
 
