@@ -21,11 +21,11 @@ scripts/dev.sh down
 ```
 `/healthz` is liveness; `/readyz` checks the database and returns 503 if it is unreachable.
 
-## Test evidence is not retention-enforced storage
-The only evidence backend is `test-fixture`. It is **not immutable and does not enforce retention or holds**; `/healthz` reports `retention_enforced: false` with a notice, and the server logs it at startup. Do not advertise or use it as a preservation backend. Qualifying real storage protection is a later, separate test (#4); until then it is a recorded gap.
+## Evidence is durable but not retention-enforced storage
+Evidence is written to append-only PostgreSQL tables ([evidence capture](evidence-capture.md)). That backend (`CHARTER_EVIDENCE_BACKEND=postgres-append-only`, default; `test-fixture` is an alias) is **not** WORM: a database owner can still alter it, `/healthz` reports `retention_enforced: false` with a notice, and the server logs it at startup. Do not advertise or use it as a preservation backend. Qualifying a genuinely retention-capable backend is still open (#4).
 
 ## Egress and providers
-The server makes no outbound calls unless OIDC is configured, and then only to the configured https JWKS URL, never following redirects ([identity and access](identity-and-access.md)). Tests use an in-process synthetic IdP. Deterministic fake model providers arrive with #5. Any future outbound call must be opt-in and default off.
+The server makes no outbound calls unless OIDC is configured, and then only to the configured https JWKS URL, never following redirects ([identity and access](identity-and-access.md)). Tests use an in-process synthetic IdP. Model calls go through the evidence recorder; deterministic fake model providers arrive with #5 (until then a stub answers). Any future outbound call must be opt-in and default off.
 
 ## Stack decision
-Go + PostgreSQL, as the issue prefers: one static binary, a small dependency set (`pgx`), and embedded SQL migrations applied in order under an advisory lock. The initial migration holds instance metadata only; the durable evidence schema follows ADR 0001 in #4.
+Go + PostgreSQL, as the issue prefers: one static binary, a small dependency set (`pgx`), and embedded SQL migrations applied in order under an advisory lock. Migration `0003` defines the evidence schema from ADR 0001.

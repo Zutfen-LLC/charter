@@ -12,8 +12,13 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/oidc"
 )
 
-// Evidence backend kinds. Only the test fixture exists in the pilot scaffold.
-const EvidenceBackendTestFixture = "test-fixture"
+// Evidence backend kinds. Both names select the PostgreSQL append-only evidence
+// tables; NEITHER is retention-enforced storage (docs/evidence-capture.md).
+// "test-fixture" is kept as an alias so existing environments keep working.
+const (
+	EvidenceBackendTestFixture    = "test-fixture"
+	EvidenceBackendPostgresAppend = "postgres-append-only"
+)
 
 // OIDC settings. Entra mode needs the designated test tenant's id; nothing
 // tenant-specific is committed to the repository.
@@ -43,7 +48,7 @@ func Load() Config {
 	return Config{
 		Addr:            get("CHARTER_ADDR", "127.0.0.1:8080"),
 		DatabaseURL:     os.Getenv("CHARTER_DATABASE_URL"),
-		EvidenceBackend: get("CHARTER_EVIDENCE_BACKEND", EvidenceBackendTestFixture),
+		EvidenceBackend: get("CHARTER_EVIDENCE_BACKEND", EvidenceBackendPostgresAppend),
 		OIDC: OIDC{
 			Issuer:   os.Getenv("CHARTER_OIDC_ISSUER"),
 			Audience: os.Getenv("CHARTER_OIDC_AUDIENCE"),

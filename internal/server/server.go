@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/Zutfen-LLC/charter/internal/evidence"
 )
 
 // Pinger reports whether the database is reachable.
@@ -27,6 +29,14 @@ func TestFixtureBackend() EvidenceBackend {
 		RetentionEnforced: false,
 		Notice:            "TEST EVIDENCE ONLY: not immutable, not retention-enforced; do not use for real records",
 	}
+}
+
+// PostgresEvidenceBackend describes the real evidence write path (#4). It is
+// durable and append-only by privileges and triggers, but it is NOT
+// retention-enforced storage and must not be presented as such.
+func PostgresEvidenceBackend() EvidenceBackend {
+	i := evidence.PG{}.Info()
+	return EvidenceBackend{Kind: i.Kind, RetentionEnforced: i.RetentionEnforced, Notice: i.Notice}
 }
 
 // New builds the handler. Without WithAuth only the unauthenticated health

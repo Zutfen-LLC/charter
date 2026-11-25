@@ -262,3 +262,21 @@ func CanonicalID(s string) (string, bool) {
 	}
 	return strings.ToLower(s), true
 }
+
+// ProjectMatter returns the matter a project maps to at this moment (ADR 0001
+// section 3: an event carries exactly one matter_id at capture time). The
+// caller must already have established membership; this still filters by
+// tenant so a foreign project id yields ErrNotFound.
+func (s *Store) ProjectMatter(ctx context.Context, p Principal, projectID string) (string, error) {
+	p, okp := p.canon()
+	projectID, valid := CanonicalID(projectID)
+	if !okp || !valid {
+		return "", ErrNotFound
+	}
+	var m string
+	err := s.DB.QueryRow(ctx, `SELECT matter_id::text FROM projects WHERE id=$1 AND tenant_id=$2`, projectID, p.TenantID).Scan(&m)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return m, err
+}
