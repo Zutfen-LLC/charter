@@ -122,6 +122,8 @@ def strict_loads(text):
 def _next_state(state, typ, p):
     if typ == "turn_interrupted":
         return None if state in ("start", "denied", "released", "settled_released", "terminal") else "terminal"
+    if state == "intent" and typ == "output_recorded" and p.get("complete") is False:
+        return "output_unconfirmed"
     table = {
         "start": {"turn_received": "received"},
         "received": {"policy_decision": "deny" if p.get("decision") == "deny" else "decided"},
@@ -130,6 +132,7 @@ def _next_state(state, typ, p):
         "reserved": {"context_sealed": "sealed"},
         "sealed": {"disclosure_intent": "intent"},
         "intent": {"provider_accepted": "accepted", "usage_settled": "settled"},
+        "output_unconfirmed": {"usage_settled": "settled"},
         "accepted": {"output_recorded": "output", "usage_settled": "settled"},
         "output": {"response_released": "released", "usage_settled": "settled"},
         "released": {"usage_settled": "settled_released", "turn_completed": "terminal"},
@@ -360,6 +363,9 @@ def verify_turn(events, objects=None):
             if not idx or idx[-1] not in acked:
                 add(i, "R1", "provider contacted before acked disclosure_intent")
         elif typ == "output_recorded":
+            intents = [j for j, x in enumerate(events[:i]) if isinstance(x, dict) and x.get("type") == "disclosure_intent"]
+            if not intents or intents[-1] not in acked:
+                add(i, "R1", "output recorded without acknowledged disclosure intent")
             if not isinstance(p.get("complete"), bool):
                 add(i, "REFS", "output_recorded.complete must be a boolean")
             o = _refs(p.get("objects"))

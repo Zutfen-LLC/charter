@@ -326,6 +326,9 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 				add(i, "R1", "provider contacted before acked disclosure_intent")
 			}
 		case "output_recorded":
+			if j := last(events[:i], "disclosure_intent"); j < 0 || !acked[j] {
+				add(i, "R1", "output recorded without acknowledged disclosure intent")
+			}
 			if _, ok := p["complete"].(bool); !ok {
 				add(i, CodeRefs, "output_recorded.complete must be a boolean")
 			}
@@ -469,7 +472,12 @@ func transition(state, typ string, p map[string]any, denied, released bool) stri
 	case "sealed":
 		return pick(typ, "disclosure_intent", "intent")
 	case "intent":
+		if typ == "output_recorded" && p["complete"] == false {
+			return "output_unconfirmed"
+		}
 		return pick(typ, "provider_accepted", "accepted", "usage_settled", "settled")
+	case "output_unconfirmed":
+		return pick(typ, "usage_settled", "settled")
 	case "accepted":
 		return pick(typ, "output_recorded", "output", "usage_settled", "settled")
 	case "output":

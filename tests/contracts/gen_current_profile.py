@@ -61,10 +61,24 @@ def omit(f, typ):
     f["events"] = [e for e in f["events"] if e["type"] != typ]
 
 
+def with_unconfirmed_output(unknown, complete):
+    f = copy.deepcopy(unknown)
+    output = copy.deepcopy(by_type(complete, "output_recorded"))
+    output["payload"]["complete"] = False
+    for ref in output["payload"]["objects"]:
+        f["objects"][ref["sha256"]] = complete["objects"][ref["sha256"]]
+    ack = copy.deepcopy(by_type(complete, "evidence_ack"))
+    i = next(i for i, e in enumerate(f["events"]) if e["type"] == "usage_settled")
+    f["events"][i:i] = [output, ack]
+    return f
+
+
 def cases():
     complete, unknown = current("complete-turn.json"), current("unknown-disclosure.json")
+    partial = with_unconfirmed_output(unknown, complete)
     yield "positive-complete", "", seal(copy.deepcopy(complete))
     yield "positive-unknown", "", seal(copy.deepcopy(unknown))
+    yield "positive-unconfirmed-partial", "", seal(copy.deepcopy(partial))
     for name, code, source, mutate in (
         ("missing-policy-destination", "REFS", complete, lambda f: drop(f,"policy_decision","destination")),
         ("missing-intent-model", "REFS", complete, lambda f: drop(f,"disclosure_intent","model_id")),
@@ -81,6 +95,8 @@ def cases():
         ("unknown-no-settlement", "LIFECYCLE", unknown, lambda f: omit(f,"usage_settled")),
         ("unknown-wrong-basis", "REFS", unknown, lambda f: update(f,"usage_settled",basis="provider_reported")),
         ("unknown-under-reserved", "REFS", unknown, lambda f: update(f,"usage_settled",units=1)),
+        ("unconfirmed-output-complete", "LIFECYCLE", partial, lambda f: update(f,"output_recorded",complete=True)),
+        ("unconfirmed-output-before-intent-ack", "R1", partial, lambda f: f["events"].pop(5)),
         ("admission-custodian-mismatch", "ENVELOPE", complete, lambda f: update(f,"turn_received",custodian_id="different")),
         ("summary-only-current", "REFS", complete, lambda f: (drop(f,"turn_received","input"), update(f,"turn_received",input_summary="description only"))),
         ("unknown-profile", "ENVELOPE", complete, lambda f: update(f,"turn_received",evidence_profile="unknown")),

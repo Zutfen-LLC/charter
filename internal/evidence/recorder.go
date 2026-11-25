@@ -517,15 +517,15 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		return fail("dispatch_ownership_lost", err)
 	}
 	out, callErr := call(ctx, sent) // the only outbound call
-	if !out.Accepted && callErr == nil {
-		out.Accepted = true
-	}
+	// Only a confirmed adapter acceptance is evidence of disclosure. An
+	// adapter can return buffered bytes after an ambiguous failure; preserve
+	// them as partial, but do not invent an acceptance or authorize release.
 	if out.Accepted {
 		if _, _, err := t.emit(ctx, "provider_accepted", dest); err != nil {
 			return fail("evidence_write_failed", err)
 		}
 	}
-	complete := callErr == nil && out.Complete
+	complete := out.Accepted && callErr == nil && out.Complete
 	if len(out.Output) > 0 || complete {
 		if err := rc.put(ctx, t.tenant, out.Output); err != nil {
 			return fail("evidence_write_failed", err)
@@ -538,10 +538,17 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		reason := "provider_stream_error"
 		if !out.Accepted {
 			reason = "provider_error"
+			if len(out.Output) > 0 || out.Complete {
+				reason = "provider_acceptance_unconfirmed"
+			}
 		}
 		rc.abort(ctx, t, reason)
 		if callErr == nil {
-			callErr = errors.New("provider returned an incomplete response")
+			if !out.Accepted {
+				callErr = errors.New("adapter did not confirm provider acceptance")
+			} else {
+				callErr = errors.New("provider returned an incomplete response")
+			}
 		}
 		return Result{}, fmt.Errorf("%w: %w", errProvider, callErr)
 	}

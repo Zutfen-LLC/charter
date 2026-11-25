@@ -32,7 +32,7 @@ func TestCurrentProfileFixtureSemantics(t *testing.T) {
 		Events  []json.RawMessage `json:"events"`
 		Objects map[string]string `json:"objects"`
 	}
-	if err := json.Unmarshal(raw, &cases); err != nil || len(cases) != 20 {
+	if err := json.Unmarshal(raw, &cases); err != nil || len(cases) != 23 {
 		t.Fatalf("fixture census: %d %v", len(cases), err)
 	}
 	for _, f := range cases {
