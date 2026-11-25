@@ -49,8 +49,15 @@ func (p *PGProber) grantAttempt(ctx context.Context) (Outcome, string) {
 		return Inconclusive, err.Error()
 	}
 	defer rollbackProbe(tx) //nolint:errcheck
-	target, err := lookupGrantTarget(ctx, tx, p.tables().Events)
-	if err != nil || (p.target.oid != 0 && target != p.target) {
+	table := p.tables().Events
+	if p.scope != nil {
+		if err := p.scope.checkRuntime(ctx, tx); err != nil {
+			return Inconclusive, "self-grant target changed: " + err.Error()
+		}
+		table = p.scope.events.qualified()
+	}
+	target, err := lookupGrantTarget(ctx, tx, table)
+	if err != nil || (p.scope != nil && target != p.scope.events) {
 		return Inconclusive, fmt.Sprintf("self-grant target did not resolve exactly: %v", err)
 	}
 	return runGrantAttempt(ctx, tx, target, who)
@@ -72,7 +79,7 @@ func runGrantAttempt(ctx context.Context, tx pgx.Tx, target grantTarget, who str
 	if err != nil {
 		return Inconclusive, "savepoint creation failed: " + err.Error()
 	}
-	qualified := pgx.Identifier{target.schema, target.table}.Sanitize()
+	qualified := target.qualified()
 	tag, attemptErr := sp.Exec(ctx, `GRANT UPDATE, DELETE, TRUNCATE ON TABLE `+qualified+` TO `+pgx.Identifier{who}.Sanitize())
 	if attemptErr != nil {
 		if err := rollbackProbe(sp); err != nil {
@@ -117,8 +124,8 @@ func (p *PGProber) indirectAttempt(ctx context.Context) (Outcome, string) {
 		return Inconclusive, err.Error()
 	}
 	defer rollbackProbe(tx) //nolint:errcheck
-	if actual, err := lookupGrantTarget(ctx, tx, p.tables().Events); err != nil || p.target.oid == 0 || actual != p.target {
-		return Inconclusive, fmt.Sprintf("indirect authority target was not verified: %v", err)
+	if err := p.scope.checkRuntime(ctx, tx); err != nil {
+		return Inconclusive, "indirect authority target changed: " + err.Error()
 	}
 	var ev, ws bool
 	if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_has_role(current_user,$1,'USAGE'),pg_catalog.pg_has_role(current_user,$2,'USAGE')`, evidenceGroup, workspaceGroup).Scan(&ev, &ws); err != nil {

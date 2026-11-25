@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var grantProbeFault = errors.New("synthetic transaction fault")
+var errGrantProbeFault = errors.New("synthetic transaction fault")
 
 type grantFaultTx struct {
 	pgx.Tx
@@ -21,7 +21,7 @@ type grantFaultTx struct {
 
 func (tx *grantFaultTx) Begin(ctx context.Context) (pgx.Tx, error) {
 	if tx.mode == "create-savepoint" {
-		return nil, grantProbeFault
+		return nil, errGrantProbeFault
 	}
 	s, err := tx.Tx.Begin(ctx)
 	if err != nil {
@@ -40,7 +40,7 @@ func (tx *grantFaultTx) Rollback(ctx context.Context) error {
 		return err
 	}
 	if tx.mode == "outer-rollback" {
-		return grantProbeFault
+		return errGrantProbeFault
 	}
 	return nil
 }
@@ -65,7 +65,7 @@ func (sp grantFaultSavepoint) Commit(ctx context.Context) error {
 		return err
 	}
 	if sp.mode == "finish-savepoint" {
-		return grantProbeFault
+		return errGrantProbeFault
 	}
 	return nil
 }

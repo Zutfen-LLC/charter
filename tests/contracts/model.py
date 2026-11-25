@@ -89,7 +89,7 @@ def _int(v):
 
 def _ref(v):
     """{sha256, bytes} -> (sha, bytes) or None."""
-    if isinstance(v, dict) and isinstance(v.get("sha256"), str) and SHA_RE.match(v["sha256"]) \
+    if isinstance(v, dict) and isinstance(v.get("sha256"), str) and SHA_RE.fullmatch(v["sha256"]) \
             and _int(v.get("bytes")) and v["bytes"] >= 0:
         return v["sha256"], v["bytes"]
     return None
@@ -194,21 +194,21 @@ def verify_turn(events, objects=None):
         types.append(typ)
         p = e.get("payload") if isinstance(e.get("payload"), dict) else {}
         v = e.get("schema_version")
-        if not isinstance(v, str) or not SEMVER_RE.match(v):
+        if not isinstance(v, str) or not SEMVER_RE.fullmatch(v):
             add(i, "ENVELOPE", "schema_version must be semantic-version text")
         elif not v.startswith("1."):
             add(i, "ENVELOPE", "unsupported schema_version")
         for k in ("tenant_id", "project_id", "matter_id", "turn_id"):
-            if not isinstance(e.get(k), str) or not ID_RE.match(e[k]):
+            if not isinstance(e.get(k), str) or not ID_RE.fullmatch(e[k]):
                 add(i, "ENVELOPE", f"{k} must be an opaque lowercase identifier")
             elif e[k] != first.get(k):
                 add(i, "ENVELOPE", f"{k} differs within the turn")
-        if not TYPE_RE.match(typ):
+        if not TYPE_RE.fullmatch(typ):
             add(i, "ENVELOPE", "type must be a lowercase identifier")
         if not _int(e.get("seq")):
             add(i, "ENVELOPE", "seq must be an integer")
         ts = e.get("recorded_at")
-        if not isinstance(ts, str) or not TS_RE.match(ts):
+        if not isinstance(ts, str) or not TS_RE.fullmatch(ts):
             add(i, "ENVELOPE", "recorded_at must be RFC 3339 UTC with milliseconds and Z")
         else:
             import datetime
@@ -219,15 +219,15 @@ def verify_turn(events, objects=None):
         a = e.get("actor")
         expected_actor = "user" if i == 0 else "service"
         if not isinstance(a, dict) or a.get("kind") != expected_actor \
-                or not isinstance(a.get("id"), str) or not ID_RE.match(a["id"]):
+                or not isinstance(a.get("id"), str) or not ID_RE.fullmatch(a["id"]):
             add(i, "ENVELOPE", "actor must be {kind: user|service, id: identifier}")
         if not isinstance(e.get("payload"), dict):
             add(i, "ENVELOPE", "payload must be an object")
         if "prev_hash" not in e:
             add(i, "ENVELOPE", "prev_hash is required")
-        elif e["prev_hash"] is not None and not (isinstance(e["prev_hash"], str) and SHA_RE.match(e["prev_hash"])):
+        elif e["prev_hash"] is not None and not (isinstance(e["prev_hash"], str) and SHA_RE.fullmatch(e["prev_hash"])):
             add(i, "ENVELOPE", "prev_hash must be null or sha256:<hex>")
-        if not isinstance(e.get("event_hash"), str) or not SHA_RE.match(e["event_hash"]):
+        if not isinstance(e.get("event_hash"), str) or not SHA_RE.fullmatch(e["event_hash"]):
             add(i, "ENVELOPE", "event_hash must be sha256:<hex>")
         # chain
         if e.get("seq") != i:
@@ -297,7 +297,7 @@ def verify_turn(events, objects=None):
             if not objs:
                 add(i, "REFS", "context_sealed.objects must be a non-empty list of {sha256, bytes}")
             sealed_req = p.get("request_sha256")
-            if not (isinstance(sealed_req, str) and SHA_RE.match(sealed_req)):
+            if not (isinstance(sealed_req, str) and SHA_RE.fullmatch(sealed_req)):
                 add(i, "REFS", "request_sha256 missing or malformed"); sealed_req = None
             elif sealed_req not in sealed:
                 add(i, "REFS", "request_sha256 is not among the sealed objects")
@@ -307,7 +307,7 @@ def verify_turn(events, objects=None):
             for sx in srcs:
                 ok = isinstance(sx, dict) and isinstance(sx.get("source_id"), str) and sx["source_id"] \
                     and _int(sx.get("version")) and sx["version"] >= 0 \
-                    and isinstance(sx.get("sha256"), str) and SHA_RE.match(sx["sha256"])
+                    and isinstance(sx.get("sha256"), str) and SHA_RE.fullmatch(sx["sha256"])
                 if not ok:
                     add(i, "REFS", "malformed source reference")
                 elif sx["sha256"] not in sealed:
@@ -430,7 +430,7 @@ def verify_turn(events, objects=None):
             for r in (_refs(p.get("objects")) or []) + [x for x in (_ref(p.get("request")), _ref(p.get("input"))) if x]:
                 refs.append(r)
             rs = p.get("request_sha256")
-            if isinstance(rs, str) and SHA_RE.match(rs) and sealed and rs in sealed:
+            if isinstance(rs, str) and SHA_RE.fullmatch(rs) and sealed and rs in sealed:
                 refs.append((rs, sealed[rs]))
         for sha, n in refs:
             if (sha, n) in seen:

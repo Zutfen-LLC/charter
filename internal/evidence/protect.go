@@ -166,8 +166,7 @@ type PGProber struct {
 	// Timeout bounds each attempt (statement_timeout). Default 5s.
 	Timeout time.Duration
 
-	owner  string
-	target grantTarget
+	scope *probeScope
 }
 
 func (p *PGProber) tables() TableNames {
@@ -243,43 +242,28 @@ func (p *PGProber) begin(ctx context.Context) (pgx.Tx, error) {
 	return tx, nil
 }
 
-func (p *PGProber) Preflight(ctx context.Context, tenant, turn, sha string) error {
+func (p *PGProber) Preflight(ctx context.Context, tenant, turn, object string) error {
+	p.scope = nil
 	if p.DB == nil || p.Admin == nil {
 		return errors.New("prober needs the credential under test and an admin connection")
 	}
-	t := p.tables()
-	if !t.valid() {
+	if !p.tables().valid() {
 		return errors.New("invalid table names")
 	}
-	// 1. the targets exist (checked with the privileged connection).
-	var ev, ob, tu int
-	if err := p.Admin.QueryRow(ctx, fmt.Sprintf(`SELECT
-		(SELECT count(*) FROM %s WHERE tenant_id=$1::uuid AND turn_id=$2::uuid),
-		(SELECT count(*) FROM %s WHERE tenant_id=$1::uuid AND sha256=$3),
-		(SELECT count(*) FROM %s WHERE tenant_id=$1::uuid AND turn_id=$2::uuid)`, t.Events, t.Objects, t.Turns),
-		tenant, turn, sha).Scan(&ev, &ob, &tu); err != nil {
-		return fmt.Errorf("target lookup: %w", err)
-	}
-	if ev == 0 || ob == 0 || tu == 0 {
-		return fmt.Errorf("target absent (events=%d objects=%d turns=%d)", ev, ob, tu)
-	}
-	target, err := lookupGrantTarget(ctx, p.Admin, t.Events)
+	scope, err := p.adminScope(ctx, tenant, turn, object)
 	if err != nil {
-		return fmt.Errorf("owner and target lookup: %w", err)
+		return err
 	}
-	p.owner, p.target = target.owner, target
-	// 2. the credential is who we think it is, and 3. it can do ordinary work
-	// (positive control: the same kind of statements the attacks use succeed on
-	// a scratch table, so a refusal below is about the evidence, not about a
-	// credential that cannot do anything).
 	tx, err := p.begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer rollbackProbe(tx) //nolint:errcheck
-	if actual, err := lookupGrantTarget(ctx, tx, t.Events); err != nil || actual != p.target {
-		return fmt.Errorf("runtime credential does not resolve the admin-verified target: %v", err)
+	if err := scope.checkRuntime(ctx, tx); err != nil {
+		return fmt.Errorf("runtime credential does not resolve the admin-verified targets: %w", err)
 	}
+	// Positive control on a scratch table establishes the ability to run the
+	// operations in this session; arbitrary failed SQL is not a refusal.
 	for _, q := range []string{`CREATE TEMP TABLE _ctl_probe(x int) ON COMMIT DROP`, `INSERT INTO _ctl_probe VALUES (1)`,
 		`UPDATE _ctl_probe SET x = 2`, `DELETE FROM _ctl_probe`} {
 		if tag, err := tx.Exec(ctx, q); err != nil {
@@ -288,7 +272,11 @@ func (p *PGProber) Preflight(ctx context.Context, tenant, turn, sha string) erro
 			return errors.New("positive control matched no rows")
 		}
 	}
-	return rollbackProbe(tx)
+	if err := rollbackProbe(tx); err != nil {
+		return err
+	}
+	p.scope = &scope
+	return nil
 }
 
 func (p *PGProber) Attempt(ctx context.Context, attack, tenant, turn, sha string) (Outcome, string) {
@@ -296,6 +284,22 @@ func (p *PGProber) Attempt(ctx context.Context, attack, tenant, turn, sha string
 	if !t.valid() {
 		return Inconclusive, "invalid table identifiers"
 	}
+	if p.scope == nil {
+		// A standalone self-grant control may use its own verified runtime target.
+		// Only a positive preflight can ever produce a full qualified report.
+		if attack == AttackGrantSelf && p.Admin == nil {
+			return p.grantAttempt(ctx)
+		}
+		return Inconclusive, "targets have not been verified by preflight"
+	}
+	if tenant != p.scope.tenant || turn != p.scope.turn || sha != p.scope.object {
+		return Inconclusive, "attempt coordinates differ from the preflight target"
+	}
+	scope, err := p.adminScope(ctx, tenant, turn, sha)
+	if err != nil || scope != *p.scope {
+		return Inconclusive, fmt.Sprintf("preflight target changed or cannot be reverified: %v", err)
+	}
+	t = scope.tables()
 	var sql string
 	args := []any{tenant, turn, sha}
 	dml := true
@@ -332,15 +336,12 @@ func (p *PGProber) Attempt(ctx context.Context, attack, tenant, turn, sha string
 			// nothing about the credential. Only a direct login can be judged.
 			return Inconclusive, "role-switch attack is meaningless under AsRole; qualify a direct login credential"
 		}
-		if !validRoleIdent(p.owner) {
+		if !validRoleIdent(scope.events.owner) {
 			return Inconclusive, "owner role unknown"
 		}
-		sql, args, dml = `SET LOCAL ROLE `+pgx.Identifier{p.owner}.Sanitize(), nil, false
+		sql, args, dml = `SET LOCAL ROLE `+pgx.Identifier{scope.events.owner}.Sanitize(), nil, false
 	case AttackDropSchema:
-		if p.target.oid == 0 {
-			return Inconclusive, "schema target has not been verified"
-		}
-		sql, args, dml = `DROP SCHEMA `+pgx.Identifier{p.target.schema}.Sanitize()+` CASCADE`, nil, false
+		sql, args, dml = `DROP SCHEMA `+pgx.Identifier{scope.events.schema}.Sanitize()+` CASCADE`, nil, false
 	case AttackIndirectAuthority:
 		return p.indirectAttempt(ctx)
 	default:
@@ -351,11 +352,8 @@ func (p *PGProber) Attempt(ctx context.Context, attack, tenant, turn, sha string
 		return Inconclusive, err.Error()
 	}
 	defer rollbackProbe(tx) //nolint:errcheck
-	if p.target.oid != 0 {
-		actual, err := lookupGrantTarget(ctx, tx, t.Events)
-		if err != nil || actual != p.target {
-			return Inconclusive, fmt.Sprintf("target changed: %v", err)
-		}
+	if err := scope.checkRuntime(ctx, tx); err != nil {
+		return Inconclusive, "runtime target changed: " + err.Error()
 	}
 	tag, err := tx.Exec(ctx, sql, args...)
 	if e := rollbackProbe(tx); e != nil {
