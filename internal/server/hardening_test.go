@@ -7,10 +7,12 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Zutfen-LLC/charter/internal/store"
+	"github.com/jackc/pgx/v5"
 )
 
 const sensitive = "SENSITIVE-MODEL-OUTPUT"
@@ -237,4 +239,106 @@ func TestOnePersonMayHoldMultipleExplicitRoles(t *testing.T) {
 	// Holding every role still grants no implicit workspace read.
 	e.want("carol", "GET", "/v1/artifacts/"+e.a1, 404)
 	e.want("carol", "GET", "/v1/projects/"+e.p1+"/artifacts", 404)
+}
+
+// ---- Round 2, finding 2: cancellation during the release-time query ----------
+
+// serverWaitBlocked polls pg_stat_activity until n backends wait on a lock.
+func (e *env) waitBlocked(n int) {
+	e.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var got int
+		if err := e.st.DB.QueryRow(context.Background(), `SELECT count(*) FROM pg_stat_activity
+			WHERE datname=current_database() AND wait_event_type='Lock' AND pid <> pg_backend_pid()`).Scan(&got); err != nil {
+			e.t.Fatal(err)
+		}
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("release-time authorization query never blocked (blocked=%d)", got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+type callResult struct {
+	code int
+	body string
+}
+
+// blockedRelease runs a model call whose Work takes an ACCESS EXCLUSIVE lock on
+// project_members before returning sensitive output, so the handler's single
+// release-time authorization query blocks on real PostgreSQL. It returns the
+// work context seen by Work, a function that lets the query complete, and the
+// eventual response. The query is then provably in flight when the test acts.
+func (e *env) blockedRelease(reqCtx context.Context) (workCtx <-chan context.Context, unblock func(), res <-chan callResult) {
+	e.t.Helper()
+	wc := make(chan context.Context, 1)
+	txc := make(chan pgx.Tx, 1)
+	e.auth.Work = func(ctx context.Context, _ store.Principal, _ string) (string, error) {
+		tx, err := e.st.DB.Begin(context.Background())
+		if err != nil {
+			return "", err
+		}
+		if _, err := tx.Exec(context.Background(), `LOCK TABLE project_members IN ACCESS EXCLUSIVE MODE`); err != nil {
+			return "", err
+		}
+		wc <- ctx
+		txc <- tx
+		return sensitive, nil
+	}
+	out := make(chan callResult, 1)
+	go func() {
+		code, body := e.modelCall("alice", reqCtx)
+		out <- callResult{code, body}
+	}()
+	tx := <-txc
+	e.waitBlocked(1) // the release-time query is now waiting on the lock
+	var once sync.Once
+	e.t.Cleanup(func() { once.Do(func() { _ = tx.Rollback(context.Background()) }) })
+	return wc, func() {
+		once.Do(func() {
+			if err := tx.Commit(context.Background()); err != nil {
+				e.t.Error(err)
+			}
+		})
+	}, out
+}
+
+func TestReleaseQueryHarnessReleasesWhenNothingExpires(t *testing.T) {
+	e := newEnv(t)
+	_, unblock, res := e.blockedRelease(context.Background())
+	unblock()
+	r := <-res
+	if r.code != 200 || !strings.Contains(r.body, sensitive) {
+		t.Fatalf("control case failed: %d %s", r.code, r.body)
+	}
+}
+
+func TestOutputNotReleasedWhenRequestCancelledDuringReleaseQuery(t *testing.T) {
+	e := newEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, unblock, res := e.blockedRelease(ctx)
+	cancel()  // cancelled while the authorization query is blocked...
+	unblock() // ...then the query completes successfully (user is a member)
+	r := <-res
+	if r.code == 200 || strings.Contains(r.body, sensitive) {
+		t.Fatalf("output released after cancellation during the release query: %d %s", r.code, r.body)
+	}
+}
+
+func TestOutputNotReleasedWhenDeadlineExpiresDuringReleaseQuery(t *testing.T) {
+	e := newEnv(t)
+	e.auth.WorkTimeout = time.Second
+	wc, unblock, res := e.blockedRelease(context.Background())
+	ctx := <-wc
+	<-ctx.Done() // the work deadline passes while the query is blocked (event, not a sleep)
+	unblock()
+	r := <-res
+	if r.code != http.StatusGatewayTimeout || strings.Contains(r.body, sensitive) {
+		t.Fatalf("output released after deadline expiry during the release query: %d %s", r.code, r.body)
+	}
 }

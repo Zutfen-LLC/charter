@@ -23,6 +23,9 @@ type IdP struct {
 	Audience string
 	TenantID string
 	Now      func() time.Time
+	// Scope is the delegated scope (scp) carried by default tokens, mirroring a
+	// delegated-user access token for the API. Default "charter.access".
+	Scope string
 
 	mu   sync.Mutex
 	keys map[string]*rsa.PrivateKey
@@ -30,7 +33,7 @@ type IdP struct {
 
 // New starts a synthetic IdP. Close it with idp.Server.Close().
 func New(audience, tenantID string) *IdP {
-	idp := &IdP{Audience: audience, TenantID: tenantID, Now: time.Now, keys: map[string]*rsa.PrivateKey{}}
+	idp := &IdP{Audience: audience, TenantID: tenantID, Now: time.Now, Scope: "charter.access", keys: map[string]*rsa.PrivateKey{}}
 	idp.Server = httptest.NewServer(http.HandlerFunc(idp.serve))
 	idp.Issuer = idp.Server.URL
 	idp.AddKey("k1")
@@ -127,6 +130,10 @@ func (i *IdP) Mint(c Claims) string {
 	}
 	pl := map[string]any{"iss": c.Issuer, "aud": c.Audience, "sub": c.Subject, c.TenantClaim: c.Tenant,
 		"iat": c.IssuedAt.Unix(), "nbf": c.IssuedAt.Unix(), "exp": c.IssuedAt.Add(c.Lifetime).Unix()}
+	if i.Scope != "" {
+		pl["scp"] = i.Scope
+		pl["ver"] = "2.0"
+	}
 	if c.Email != "" {
 		pl["email"] = c.Email
 	}

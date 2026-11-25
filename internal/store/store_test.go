@@ -586,3 +586,129 @@ func TestRacingMutualRevocationStress(t *testing.T) {
 		}
 	}
 }
+
+// ---- Round 2, finding 1: noncanonical Principal values -----------------------
+
+// forms of an id: canonical, upper, mixed.
+func spellings(id string) []string {
+	return []string{id, strings.ToUpper(id), mixedCase(id)}
+}
+
+func (f *fx) rolesOf(user string) int {
+	return f.count(`SELECT count(*) FROM tenant_roles WHERE user_id=$1 AND role IN ('records_officer','export_reviewer')`, f.u[user])
+}
+
+func TestNoncanonicalPrincipalCannotBypassSelfGrant(t *testing.T) {
+	f := newFx(t)
+	ctx := context.Background()
+	carol := f.principal("carol") // canonical, resolved from the database
+	for _, actorID := range spellings(f.u["carol"]) {
+		for _, tenantID := range spellings(f.tenant) {
+			actor := store.Principal{UserID: actorID, TenantID: tenantID, Roles: carol.Roles}
+			for _, role := range []string{store.RoleRecordsOfficer, store.RoleExportReviewer} {
+				for _, target := range spellings(f.u["carol"]) {
+					err := f.st.GrantRole(ctx, actor, target, role)
+					if !errors.Is(err, store.ErrForbidden) {
+						t.Errorf("actor=%q tenant=%q target=%q role=%s: got %v, want ErrForbidden", actorID, tenantID, target, role, err)
+					}
+				}
+			}
+		}
+	}
+	if n := f.rolesOf("carol"); n != 0 {
+		t.Errorf("carol obtained %d restricted roles by self-grant", n)
+	}
+	if n := f.grantAudits(); n != 0 {
+		t.Errorf("%d successful-grant audit events for denied self-grants", n)
+	}
+}
+
+func TestNoncanonicalPrincipalLegitimateGrantsStillWork(t *testing.T) {
+	f := newFx(t)
+	ctx := context.Background()
+	dave := f.principal("dave")
+	for i, actorID := range spellings(f.u["dave"]) { // second administrator, any spelling
+		actor := store.Principal{UserID: actorID, TenantID: strings.ToUpper(f.tenant), Roles: dave.Roles}
+		role := []string{store.RoleRecordsOfficer, store.RoleExportReviewer, store.RoleOperator}[i]
+		if err := f.st.GrantRole(ctx, actor, spellings(f.u["carol"])[i], role); err != nil {
+			t.Fatalf("legitimate grant of %s with actor %q: %v", role, actorID, err)
+		}
+	}
+	if n := f.grantAudits(); n != 3 {
+		t.Fatalf("want 3 audit rows, got %d", n)
+	}
+	if n := f.count(`SELECT count(*) FROM audit_log WHERE actor_id::text <> lower(actor_id::text)
+		OR tenant_id::text <> lower(tenant_id::text) OR detail->>'user_id' <> lower(detail->>'user_id')`); n != 0 {
+		t.Fatalf("%d audit rows hold noncanonical identifiers", n)
+	}
+	if n := f.count(`SELECT count(*) FROM tenant_roles WHERE granted_by <> $1 AND role <> 'tenant_admin'`, f.u["dave"]); n != 0 {
+		t.Fatalf("granted_by not the canonical actor in %d rows", n)
+	}
+}
+
+func TestMalformedPrincipalCannotAdminister(t *testing.T) {
+	f := newFx(t)
+	ctx := context.Background()
+	bad := []store.Principal{
+		{UserID: "", TenantID: f.tenant},
+		{UserID: "not-a-uuid", TenantID: f.tenant},
+		{UserID: f.u["carol"], TenantID: ""},
+		{UserID: f.u["carol"], TenantID: "garbage"},
+		{UserID: f.u["carol"] + " ", TenantID: f.tenant},
+		{UserID: "{" + f.u["carol"] + "}", TenantID: f.tenant},
+		{UserID: strings.ReplaceAll(f.u["carol"], "-", ""), TenantID: f.tenant},
+		{UserID: f.u["carol"], TenantID: f.other}, // wrong tenant for this user
+	}
+	before := f.count(`SELECT count(*) FROM audit_log`)
+	for _, p := range bad {
+		if err := f.st.GrantRole(ctx, p, f.u["alice"], store.RoleOperator); err == nil {
+			t.Errorf("GrantRole with malformed principal %+v succeeded", p)
+		}
+		if err := f.st.RevokeRole(ctx, p, f.u["dave"], store.RoleTenantAdmin); err == nil {
+			t.Errorf("RevokeRole with malformed principal %+v succeeded", p)
+		}
+		if err := f.st.AddMember(ctx, p, f.p2, f.u["alice"]); err == nil {
+			t.Errorf("AddMember with malformed principal %+v succeeded", p)
+		}
+		if err := f.st.RemoveMember(ctx, p, f.p1, f.u["alice"]); err == nil {
+			t.Errorf("RemoveMember with malformed principal %+v succeeded", p)
+		}
+		if err := f.st.DisableUser(ctx, p, f.u["bob"]); err == nil {
+			t.Errorf("DisableUser with malformed principal %+v succeeded", p)
+		}
+	}
+	if n := f.count(`SELECT count(*) FROM audit_log`); n != before {
+		t.Errorf("%d audit rows from refused malformed-principal operations", n-before)
+	}
+	if f.activeAdmins() != 2 || f.count(`SELECT count(*) FROM tenant_roles WHERE user_id=$1`, f.u["alice"]) != 0 {
+		t.Error("state changed by a malformed principal")
+	}
+}
+
+// Reads fail closed for a malformed principal too, and accept any spelling of a
+// valid one.
+func TestNoncanonicalPrincipalReadsMatchCanonical(t *testing.T) {
+	f := newFx(t)
+	ctx := context.Background()
+	alice := f.principal("alice")
+	up := store.Principal{UserID: strings.ToUpper(alice.UserID), TenantID: strings.ToUpper(alice.TenantID)}
+	if ps, err := f.st.ListProjects(ctx, up); err != nil || len(ps) != 1 {
+		t.Errorf("upper-case principal ListProjects: %v %v", ps, err)
+	}
+	if ok, _ := f.st.IsMember(ctx, up, f.p1); !ok {
+		t.Error("upper-case principal not recognised as member")
+	}
+	if ok, _ := f.st.IsMember(ctx, up, f.p2); ok {
+		t.Error("upper-case principal member of P2")
+	}
+	junk := store.Principal{UserID: "x", TenantID: f.tenant}
+	if ps, _ := f.st.ListProjects(ctx, junk); len(ps) != 0 {
+		t.Error("malformed principal listed projects")
+	}
+	if as, _ := f.st.Search(ctx, junk, "needle"); len(as) != 0 {
+		t.Error("malformed principal searched")
+	}
+	if ok, _ := f.st.IsMember(ctx, junk, f.p1); ok {
+		t.Error("malformed principal is member")
+	}
+}
