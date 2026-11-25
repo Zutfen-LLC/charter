@@ -50,7 +50,7 @@ func TestRestrictedRoleIsRefusedButCannotQualifyViaSetRole(t *testing.T) {
 	o := outcomes(rep)
 	for _, a := range evidence.AllAttacks {
 		want := evidence.Refused
-		if a == evidence.AttackAssumeOwner {
+		if a == evidence.AttackAssumeOwner || a == evidence.AttackIndirectAuthority {
 			want = evidence.Inconclusive
 		}
 		if o[a] != want {
@@ -80,7 +80,7 @@ func TestOwnerCredentialIsNotQualified_RecordedGap(t *testing.T) {
 			t.Errorf("owner %s: %s (the triggers should refuse it)\n%s", a, o[a], rep)
 		}
 	}
-	if rep.Qualified() || o[evidence.AttackDisableGuards] != evidence.Allowed || o[evidence.AttackDropTable] != evidence.Allowed {
+	if rep.Qualified() || o[evidence.AttackDisableGuards] != evidence.Allowed || o[evidence.AttackDropTable] != evidence.Allowed || o[evidence.AttackDropSchema] != evidence.Allowed {
 		t.Fatalf("owner must be reported as able to disable protections:\n%s", rep)
 	}
 	t.Log("gap confirmed: an owner/superuser can disable the append-only triggers; real WORM storage is required for qualification")

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -28,21 +30,23 @@ const (
 
 // Attack names. Qualification requires every one of them to be Refused.
 const (
-	AttackRewriteEvent  = "rewrite event"
-	AttackDeleteEvent   = "delete event"
-	AttackRewriteObject = "rewrite object"
-	AttackDeleteObject  = "delete object"
-	AttackDeleteTurn    = "delete turn"
-	AttackTruncate      = "truncate"
-	AttackDisableGuards = "disable protections"
-	AttackDropTable     = "drop table"
-	AttackGrantSelf     = "grant self destructive privileges"
-	AttackAssumeOwner   = "assume owner role"
+	AttackRewriteEvent      = "rewrite event"
+	AttackDeleteEvent       = "delete event"
+	AttackRewriteObject     = "rewrite object"
+	AttackDeleteObject      = "delete object"
+	AttackDeleteTurn        = "delete turn"
+	AttackTruncate          = "truncate"
+	AttackDisableGuards     = "disable protections"
+	AttackDropTable         = "drop table"
+	AttackGrantSelf         = "grant self destructive privileges"
+	AttackAssumeOwner       = "assume owner role"
+	AttackDropSchema        = "drop evidence schema"
+	AttackIndirectAuthority = "indirect evidence authority"
 )
 
 // AllAttacks is the required set.
 var AllAttacks = []string{AttackRewriteEvent, AttackDeleteEvent, AttackRewriteObject, AttackDeleteObject,
-	AttackDeleteTurn, AttackTruncate, AttackDisableGuards, AttackDropTable, AttackGrantSelf, AttackAssumeOwner}
+	AttackDeleteTurn, AttackTruncate, AttackDisableGuards, AttackDropTable, AttackGrantSelf, AttackAssumeOwner, AttackDropSchema, AttackIndirectAuthority}
 
 type Finding struct {
 	Attack  string
@@ -62,12 +66,18 @@ type Report struct {
 // layer but cannot judge whether the credential could escalate, so only a
 // direct login credential can qualify.
 func (r Report) Qualified() bool {
-	got := map[string]Outcome{}
+	if len(r.Findings) != len(AllAttacks) {
+		return false
+	}
+	got := map[string]bool{}
 	for _, f := range r.Findings {
-		got[f.Attack] = f.Outcome
+		if f.Outcome != Refused || got[f.Attack] {
+			return false
+		}
+		got[f.Attack] = true
 	}
 	for _, a := range AllAttacks {
-		if got[a] != Refused {
+		if !got[a] {
 			return false
 		}
 	}
@@ -156,7 +166,8 @@ type PGProber struct {
 	// Timeout bounds each attempt (statement_timeout). Default 5s.
 	Timeout time.Duration
 
-	owner string
+	owner  string
+	target grantTarget
 }
 
 func (p *PGProber) tables() TableNames {
@@ -182,7 +193,22 @@ func (p *PGProber) expected() string {
 }
 
 // begin opens the always-rolled-back attempt transaction and verifies identity.
+func validRoleIdent(name string) bool {
+	if name == "" || len(name) > 63 || !utf8.ValidString(name) {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *PGProber) begin(ctx context.Context) (pgx.Tx, error) {
+	if p.DB == nil {
+		return nil, errors.New("missing runtime database connection")
+	}
 	tx, err := p.DB.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
@@ -192,27 +218,27 @@ func (p *PGProber) begin(ctx context.Context) (pgx.Tx, error) {
 		to = 5 * time.Second
 	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d`, to.Milliseconds())); err != nil {
-		_ = tx.Rollback(ctx)
+		_ = rollbackProbe(tx)
 		return nil, fmt.Errorf("setup: %w", err)
 	}
 	if p.AsRole != "" {
-		if !identRe.MatchString(p.AsRole) {
-			_ = tx.Rollback(ctx)
+		if !validRoleIdent(p.AsRole) {
+			_ = rollbackProbe(tx)
 			return nil, errors.New("invalid AsRole")
 		}
-		if _, err := tx.Exec(ctx, `SET LOCAL ROLE `+p.AsRole); err != nil {
-			_ = tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `SET LOCAL ROLE `+pgx.Identifier{p.AsRole}.Sanitize()); err != nil {
+			_ = rollbackProbe(tx)
 			return nil, fmt.Errorf("SET ROLE %s failed: %w", p.AsRole, err)
 		}
 	}
-	var cu string
-	if err := tx.QueryRow(ctx, `SELECT current_user`).Scan(&cu); err != nil {
-		_ = tx.Rollback(ctx)
+	var cu, su string
+	if err := tx.QueryRow(ctx, `SELECT current_user, session_user`).Scan(&cu, &su); err != nil {
+		_ = rollbackProbe(tx)
 		return nil, fmt.Errorf("identity query: %w", err)
 	}
-	if p.expected() == "" || cu != p.expected() {
-		_ = tx.Rollback(ctx)
-		return nil, fmt.Errorf("credential identity is %q, expected %q", cu, p.expected())
+	if !validRoleIdent(p.expected()) || cu != p.expected() || (p.AsRole == "" && (cu != su || su != p.DB.Config().ConnConfig.User)) {
+		_ = rollbackProbe(tx)
+		return nil, fmt.Errorf("credential identity is %q (session %q), expected %q", cu, su, p.expected())
 	}
 	return tx, nil
 }
@@ -237,9 +263,11 @@ func (p *PGProber) Preflight(ctx context.Context, tenant, turn, sha string) erro
 	if ev == 0 || ob == 0 || tu == 0 {
 		return fmt.Errorf("target absent (events=%d objects=%d turns=%d)", ev, ob, tu)
 	}
-	if err := p.Admin.QueryRow(ctx, `SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = to_regclass($1)`, t.Events).Scan(&p.owner); err != nil || p.owner == "" {
-		return fmt.Errorf("owner lookup: %v", err)
+	target, err := lookupGrantTarget(ctx, p.Admin, t.Events)
+	if err != nil {
+		return fmt.Errorf("owner and target lookup: %w", err)
 	}
+	p.owner, p.target = target.owner, target
 	// 2. the credential is who we think it is, and 3. it can do ordinary work
 	// (positive control: the same kind of statements the attacks use succeed on
 	// a scratch table, so a refusal below is about the evidence, not about a
@@ -248,7 +276,10 @@ func (p *PGProber) Preflight(ctx context.Context, tenant, turn, sha string) erro
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer rollbackProbe(tx) //nolint:errcheck
+	if actual, err := lookupGrantTarget(ctx, tx, t.Events); err != nil || actual != p.target {
+		return fmt.Errorf("runtime credential does not resolve the admin-verified target: %v", err)
+	}
 	for _, q := range []string{`CREATE TEMP TABLE _ctl_probe(x int) ON COMMIT DROP`, `INSERT INTO _ctl_probe VALUES (1)`,
 		`UPDATE _ctl_probe SET x = 2`, `DELETE FROM _ctl_probe`} {
 		if tag, err := tx.Exec(ctx, q); err != nil {
@@ -257,11 +288,14 @@ func (p *PGProber) Preflight(ctx context.Context, tenant, turn, sha string) erro
 			return errors.New("positive control matched no rows")
 		}
 	}
-	return nil
+	return rollbackProbe(tx)
 }
 
 func (p *PGProber) Attempt(ctx context.Context, attack, tenant, turn, sha string) (Outcome, string) {
 	t := p.tables()
+	if !t.valid() {
+		return Inconclusive, "invalid table identifiers"
+	}
 	var sql string
 	args := []any{tenant, turn, sha}
 	dml := true
@@ -298,10 +332,17 @@ func (p *PGProber) Attempt(ctx context.Context, attack, tenant, turn, sha string
 			// nothing about the credential. Only a direct login can be judged.
 			return Inconclusive, "role-switch attack is meaningless under AsRole; qualify a direct login credential"
 		}
-		if p.owner == "" || !identRe.MatchString(p.owner) {
+		if !validRoleIdent(p.owner) {
 			return Inconclusive, "owner role unknown"
 		}
-		sql, args, dml = `SET LOCAL ROLE `+p.owner, nil, false
+		sql, args, dml = `SET LOCAL ROLE `+pgx.Identifier{p.owner}.Sanitize(), nil, false
+	case AttackDropSchema:
+		if p.target.oid == 0 {
+			return Inconclusive, "schema target has not been verified"
+		}
+		sql, args, dml = `DROP SCHEMA `+pgx.Identifier{p.target.schema}.Sanitize()+` CASCADE`, nil, false
+	case AttackIndirectAuthority:
+		return p.indirectAttempt(ctx)
 	default:
 		return Inconclusive, "unknown attack"
 	}
@@ -309,8 +350,17 @@ func (p *PGProber) Attempt(ctx context.Context, attack, tenant, turn, sha string
 	if err != nil {
 		return Inconclusive, err.Error()
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // ALWAYS rolled back, even if the attack worked
+	defer rollbackProbe(tx) //nolint:errcheck
+	if p.target.oid != 0 {
+		actual, err := lookupGrantTarget(ctx, tx, t.Events)
+		if err != nil || actual != p.target {
+			return Inconclusive, fmt.Sprintf("target changed: %v", err)
+		}
+	}
 	tag, err := tx.Exec(ctx, sql, args...)
+	if e := rollbackProbe(tx); e != nil {
+		return Inconclusive, "transaction rollback failed: " + e.Error()
+	}
 	return classify(err, tag.RowsAffected(), dml)
 }
 
@@ -332,34 +382,4 @@ func classify(err error, rows int64, dml bool) (Outcome, string) {
 		return Inconclusive, fmt.Sprintf("unrelated error %s: %s", pe.Code, pe.Message)
 	}
 	return Inconclusive, "non-database error: " + err.Error()
-}
-
-func (p *PGProber) grantAttempt(ctx context.Context) (Outcome, string) {
-	t := p.tables()
-	who := p.expected()
-	tx, err := p.begin(ctx)
-	if err != nil {
-		return Inconclusive, err.Error()
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-	// The grant may merely warn (non-owner with a grant option) or fail outright
-	// (no privileges at all). Either way read the privileges actually held; a
-	// savepoint keeps a failed GRANT from aborting the check that follows.
-	if sp, err := tx.Begin(ctx); err == nil {
-		if _, gerr := sp.Exec(ctx, fmt.Sprintf(`GRANT UPDATE, DELETE, TRUNCATE ON %s TO %s`, t.Events, who)); gerr != nil {
-			_ = sp.Rollback(ctx)
-		} else {
-			_ = sp.Commit(ctx)
-		}
-	}
-	var upd, del, trunc bool
-	if err := tx.QueryRow(ctx, `SELECT has_table_privilege(current_user, $1, 'UPDATE'),
-		has_table_privilege(current_user, $1, 'DELETE'), has_table_privilege(current_user, $1, 'TRUNCATE')`, t.Events).
-		Scan(&upd, &del, &trunc); err != nil {
-		return Inconclusive, "privilege query failed: " + err.Error()
-	}
-	if upd || del || trunc {
-		return Allowed, fmt.Sprintf("privileges held after self-grant: update=%v delete=%v truncate=%v", upd, del, trunc)
-	}
-	return Refused, "no destructive privilege held after self-grant attempt"
 }
