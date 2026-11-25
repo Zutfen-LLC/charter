@@ -1,0 +1,44 @@
+{
+  "description": "A in H1+H2, B only in H1, C unheld control",
+  "holds": [
+    {
+      "custodian_ids": [],
+      "id": "H1",
+      "matter_id": "m-0001",
+      "window_end": null,
+      "window_start": "2026-01-01"
+    },
+    {
+      "custodian_ids": [
+        "c1"
+      ],
+      "id": "H2",
+      "matter_id": "m-0001",
+      "window_end": null,
+      "window_start": "2026-01-01"
+    }
+  ],
+  "items": [
+    {
+      "custodian_id": "c1",
+      "id": "A",
+      "matter_id": "m-0001",
+      "recorded_at": "2026-01-10",
+      "retention_expires_at": 100
+    },
+    {
+      "custodian_id": "c2",
+      "id": "B",
+      "matter_id": "m-0001",
+      "recorded_at": "2026-01-11",
+      "retention_expires_at": 100
+    },
+    {
+      "custodian_id": "c1",
+      "id": "C",
+      "matter_id": "m-0002",
+      "recorded_at": "2026-01-12",
+      "retention_expires_at": 100
+    }
+  ]
+}

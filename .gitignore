@@ -12,3 +12,7 @@ compose.override.yml
 /coverage/
 /.local/
 /evidence-out/
+
+# Python bytecode
+__pycache__/
+*.pyc

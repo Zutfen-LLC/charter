@@ -13,3 +13,10 @@ Prove that a single control plane can enforce project boundaries and model polic
 - [Pilot backlog](https://github.com/Zutfen-LLC/charter/issues)
 - [Pilot design and acceptance](docs/pilot.md)
 - [Working in this repository](CONTRIBUTING.md)
+- [Governance and evidence contracts (ADR 0001)](docs/adr/0001-governance-and-evidence-contracts.md), with [role matrix](docs/contracts/role-matrix.md), [state transitions](docs/contracts/state-machines.md) and [versioning](docs/contracts/versioning.md)
+
+Check the contract fixtures (Python 3 standard library only):
+
+```bash
+python3 -m unittest discover -s tests/contracts -v
+```
