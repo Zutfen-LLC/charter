@@ -10,7 +10,11 @@ import (
 	"time"
 )
 
-const SchemaVersion = "1.0.0"
+const (
+	SchemaVersion = "1.0.0"
+	// CurrentProfile is recorded on admission and covers the entire turn.
+	CurrentProfile = "charter-postgres-v1"
+)
 
 // Destination is where the policy decision routed the request: the ACTUAL
 // provider endpoint and model identifier, not what the client asked for.
@@ -300,6 +304,7 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 		"matter_id": req.MatterID, "turn_id": id, "seq": 0, "type": "turn_received",
 		"recorded_at": rc.stamp(), "actor": map[string]any{"kind": "user", "id": req.CustodianID},
 		"payload": map[string]any{"request_id": req.RequestID, "input": ref(req.Input),
+			"evidence_profile": CurrentProfile, "custodian_id": req.CustodianID,
 			"objects": []any{ref(req.Input)}, "request_fingerprint": fp},
 		"prev_hash": nil,
 	}
@@ -359,6 +364,11 @@ func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(
 	}
 	if str(lastEv, "type") == TypeTurnInterrupted {
 		return Result{}, &InterruptedError{TurnID: t.id, Reason: str(payload(lastEv), "reason"), Disclosure: DeriveDisclosure(evs)}
+	}
+	// Even historical logs may be replayed only if their exact original input
+	// matches this request. A summary and a matching identity are not enough.
+	if input, ok := asRef(payload(first)["input"]); !ok || input.sha != SHA256(req.Input) || input.bytes != int64(len(req.Input)) {
+		return bad("stored input does not match exact original bytes")
 	}
 	if payload(lastEv)["outcome"] == "denied" {
 		return Result{}, ErrDenied
@@ -511,7 +521,7 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		out.Accepted = true
 	}
 	if out.Accepted {
-		if _, _, err := t.emit(ctx, "provider_accepted", map[string]any{"endpoint_id": d.Destination.EndpointID, "model_id": d.Destination.ModelID}); err != nil {
+		if _, _, err := t.emit(ctx, "provider_accepted", dest); err != nil {
 			return fail("evidence_write_failed", err)
 		}
 	}

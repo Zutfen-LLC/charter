@@ -26,7 +26,10 @@ func (b PG) WithFence(f *Fence) PG {
 	return b
 }
 
-const pgKind = "postgres-append-only"
+const (
+	pgKind               = "postgres-append-only"
+	postgresDurableLevel = "postgres:fsync=on,synchronous_commit=on"
+)
 
 func (PG) Info() BackendInfo {
 	return BackendInfo{Kind: pgKind, RetentionEnforced: false,
@@ -67,7 +70,7 @@ func (b PG) begin(ctx context.Context) (pgx.Tx, string, func(), error) {
 		release()
 		return nil, "", nil, fmt.Errorf("%w: fsync=%s synchronous_commit=%s", ErrNotDurable, fsync, sc)
 	}
-	return tx, "postgres:fsync=" + fsync + ",synchronous_commit=" + sc, release, nil
+	return tx, postgresDurableLevel, release, nil
 }
 
 func receipt(level string, parts map[string]any) Receipt {

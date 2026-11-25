@@ -7,6 +7,8 @@ import hashlib
 import json
 
 SCHEMA_VERSION = "1.0.0"
+CURRENT_PROFILE = "charter-postgres-v1"
+POSTGRES_DURABLE_LEVEL = "postgres:fsync=on,synchronous_commit=on"
 
 
 MAX_SAFE_INT = 2**53 - 1
@@ -73,6 +75,8 @@ SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 TS_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
 SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+RECEIPT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
+DESTINATION_KEYS = ("provider", "endpoint_id", "model_id")
 KNOWN = {"turn_received", "policy_decision", "usage_reserved", "context_sealed", "disclosure_intent",
          "evidence_ack", "provider_accepted", "output_recorded", "response_released", "usage_settled",
          "turn_completed", "turn_interrupted", "outcome_resolved"}
@@ -136,15 +140,44 @@ def _next_state(state, typ, p):
     return table.get(state, {}).get(typ)
 
 
+def _destination_fields(p):
+    return isinstance(p, dict) and all(k not in p or (isinstance(p[k], str) and p[k] and p[k].strip() == p[k])
+                                       for k in DESTINATION_KEYS)
+
+
+def _destination_equal(a, b):
+    return all(k not in a or k not in b or (isinstance(a[k], str) and isinstance(b[k], str) and a[k] == b[k])
+               for k in DESTINATION_KEYS)
+
+
+def _complete_destination(p):
+    return _destination_fields(p) and all(k in p for k in DESTINATION_KEYS)
+
+
+def verify_current_full(events, objects):
+    """Require current-profile evidence with exact input and all referenced bytes."""
+    if not events or _pl(events[0]).get("evidence_profile") != CURRENT_PROFILE:
+        return ["[ENVELOPE] current evidence profile is required"]
+    if objects is None:
+        return ["[OBJECT] current full verification requires the referenced objects"]
+    return verify_turn(events, objects)
+
+
 def verify_turn(events, objects=None):
     """Return violation strings, each "seq N: [CODE] text" or "[CODE] text".
     Same rules and codes as the Go verifier (internal/evidence/verify.go).
-    objects=None is structural-only verification; a dict is full verification."""
+    objects=None checks structure; a dict checks declared objects. Legacy logs
+    may pass without proving exact original input. To require the current
+    profile and input bytes, use verify_current_full."""
     errs = []
     add = lambda i, code, msg: errs.append((f"seq {i}: " if i >= 0 else "") + f"[{code}] {msg}")
     if not events:
         return ["[ENVELOPE] empty log"]
     first = events[0]
+    first_payload = _pl(first)
+    current = first_payload.get("evidence_profile") == CURRENT_PROFILE
+    if "evidence_profile" in first_payload and not current:
+        add(0, "ENVELOPE", "unknown evidence profile")
     acked, sealed, sealed_req, state = set(), None, None, "start"
     released = decided = denied = False
     declared = {}
@@ -223,6 +256,11 @@ def verify_turn(events, objects=None):
         if i > 0 and typ == "turn_received":
             add(i, "LIFECYCLE", "turn_received may appear only once, at seq 0")
         if typ == "turn_received":
+            if current and (not _ref(p.get("input")) or "input_summary" in p):
+                add(i, "REFS", "current evidence requires exact input bytes, not a legacy summary")
+            a = e.get("actor") if isinstance(e.get("actor"), dict) else {}
+            if current and (not isinstance(p.get("custodian_id"), str) or not p["custodian_id"] or p["custodian_id"] != a.get("id")):
+                add(i, "ENVELOPE", "admission actor does not match the declared custodian")
             if isinstance(p.get("input_summary"), str) and "exact input" in p["input_summary"].lower():
                 add(i, "REFS", "legacy input_summary cannot claim exact input bytes")
             if "input" in p:
@@ -232,8 +270,14 @@ def verify_turn(events, objects=None):
                 add(i, "REFS", "turn_received needs an input reference (or a legacy input_summary)")
         elif typ == "policy_decision":
             d = p.get("decision")
-            if d == "allow" and isinstance(p.get("destination"), dict):
-                policy_destination = p["destination"]
+            if d == "allow":
+                if "destination" in p and not _destination_fields(p["destination"]):
+                    add(i, "REFS", "policy destination has invalid identifiers")
+                policy_destination = p.get("destination") if isinstance(p.get("destination"), dict) else None
+                if policy_destination is not None and not _destination_equal(p, policy_destination):
+                    add(i, "REFS", "policy destination conflicts with its corresponding identifiers")
+                if current and (not _complete_destination(policy_destination) or p.get("route") != policy_destination["endpoint_id"]):
+                    add(i, "REFS", "policy must identify the actual provider, endpoint, and model, with its route matching the endpoint")
             if d not in ("allow", "deny"):
                 add(i, "POLICY", "decision must be allow or deny")
             elif i != 1:
@@ -268,8 +312,10 @@ def verify_turn(events, objects=None):
                 elif sx["sha256"] not in sealed:
                     add(i, "REFS", "source sha256 is not among the sealed objects")
         elif typ == "disclosure_intent":
-            intent_destination = {k: p[k] for k in ("provider", "endpoint_id", "model_id") if isinstance(p.get(k), str)}
-            if policy_destination is not None and any(policy_destination.get(k) != v for k, v in intent_destination.items()):
+            intent_destination = p
+            if not _destination_fields(p) or (current and not _complete_destination(p)):
+                add(i, "REFS", "disclosure intent has invalid or missing destination identifiers")
+            if policy_destination is not None and not _destination_equal(policy_destination, intent_destination):
                 add(i, "REFS", "disclosure intent destination differs from policy destination")
             rq = _ref(p.get("request"))
             if not rq:
@@ -284,19 +330,33 @@ def verify_turn(events, objects=None):
                 if not isinstance(p.get(k), str) or not p[k]:
                     add(i, "REFS", f"disclosure_intent.{k} is required")
         elif typ == "evidence_ack":
-            if not isinstance(p.get("receipt"), str) or not p["receipt"].strip():
-                add(i, "REFS", "evidence_ack.receipt is required and must be nonempty")
-            if "storage_level" in p and (not isinstance(p["storage_level"], str) or not p["storage_level"].strip()):
-                add(i, "REFS", "evidence_ack.storage_level must be nonempty when present")
+            receipt = p.get("receipt")
+            if not isinstance(receipt, str) or RECEIPT_RE.fullmatch(receipt) is None:
+                add(i, "REFS", "evidence_ack.receipt is required and must be a valid identifier")
+            level = p.get("storage_level")
+            if (current or "storage_level" in p) and level != POSTGRES_DURABLE_LEVEL:
+                add(i, "REFS", "evidence_ack.storage_level must identify a supported durable storage class")
             ak = p.get("acked_seq")
-            if not _int(ak) or ak < 0 or ak >= i or events[ak].get("event_hash") != p.get("acked_event_hash") \
-                    or not p.get("acked_event_hash"):
+            if not _int(ak) or ak < 0 or ak >= i or not isinstance(events[ak], dict) \
+                    or events[ak].get("event_hash") != p.get("acked_event_hash") or not p.get("acked_event_hash"):
                 add(i, "REFS", "ack does not match event")
             else:
+                target = events[ak]
+                if level == POSTGRES_DURABLE_LEVEL:
+                    try:
+                        expected = sha256_bytes(canonical({"backend": "postgres-append-only", "level": level,
+                            **{key: target.get(key) for key in ("tenant_id", "turn_id", "seq", "event_hash")}}))
+                    except (ValueError, AttributeError):
+                        expected = None
+                    if receipt != expected:
+                        add(i, "REFS", "evidence_ack receipt does not bind the storage level and target event")
+                if current and (ak != i - 1 or target.get("type") not in ("disclosure_intent", "output_recorded")):
+                    add(i, "REFS", "current evidence_ack must target its immediately preceding intent or output event")
                 acked.update(range(ak + 1))
         elif typ == "provider_accepted":
-            accepted_destination = {k: p[k] for k in ("provider", "endpoint_id", "model_id") if isinstance(p.get(k), str)}
-            if intent_destination is not None and any(intent_destination.get(k) != v for k, v in accepted_destination.items()):
+            if not _destination_fields(p) or (current and not _complete_destination(p)):
+                add(i, "REFS", "provider acceptance has invalid or missing destination identifiers")
+            if intent_destination is not None and not _destination_equal(intent_destination, p):
                 add(i, "REFS", "provider acceptance destination differs from disclosure intent")
             idx = [j for j, x in enumerate(events[:i]) if isinstance(x, dict) and x.get("type") == "disclosure_intent"]
             if not idx or idx[-1] not in acked:
@@ -315,10 +375,12 @@ def verify_turn(events, objects=None):
         elif typ == "usage_settled":
             if not _int(p.get("units")) or p["units"] < 0:
                 add(i, "REFS", "usage_settled.units must be a non-negative integer")
-            elif reserved_units is not None and p.get("basis") == "reserved_max" and derive_disclosure(events[:i]) != "none" and p["units"] != reserved_units:
+            elif p.get("basis") == "reserved_max" and p["units"] != reserved_units:
                 add(i, "REFS", "usage_settled reserved_max units must equal the full reservation")
-            if not isinstance(p.get("basis"), str) or not p["basis"]:
-                add(i, "REFS", "usage_settled.basis is required")
+            if p.get("basis") not in ("reserved_max", "provider_reported"):
+                add(i, "REFS", "usage_settled.basis must be provider_reported or reserved_max")
+            if derive_disclosure(events[:i]) == "unknown" and p.get("basis") != "reserved_max":
+                add(i, "REFS", "unknown disclosure must use reserved_max settlement")
         elif typ == "turn_completed":
             o = p.get("outcome")
             if o == "completed" and not any(isinstance(x, dict) and x.get("type") == "usage_settled" for x in events[:i]):
@@ -337,6 +399,8 @@ def verify_turn(events, objects=None):
                 add(i, "REFS", "turn_interrupted.disclosure must be none, unknown or disclosed")
             elif dv != derive_disclosure(events[:i]):
                 add(i, "DISCLOSURE", f"recorded disclosure {dv!r} but the log derives {derive_disclosure(events[:i])!r}")
+            if derive_disclosure(events[:i]) == "unknown" and "usage_settled" not in types[:-1]:
+                add(i, "LIFECYCLE", "unknown disclosure must settle the full reservation before interruption")
             if released:
                 add(i, "R3", "a turn with a recorded release cannot end interrupted")
         if typ in ("context_sealed", "disclosure_intent", "provider_accepted", "response_released"):

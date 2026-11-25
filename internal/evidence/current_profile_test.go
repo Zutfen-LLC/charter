@@ -8,6 +8,19 @@ import (
 	"testing"
 )
 
+func TestLegacyObjectVerificationDoesNotEstablishCurrentExactInput(t *testing.T) {
+	events, objects := loadGolden(t, "complete-turn.json")
+	if errs := VerifyStructure(events); len(errs) != 0 {
+		t.Fatalf("legacy structure: %v", errs)
+	}
+	if errs := VerifyFull(events, objects); len(errs) != 0 {
+		t.Fatalf("legacy declared objects: %v", errs)
+	}
+	if errs := VerifyCurrentFull(events, objects); !strings.Contains(strings.Join(errs, "\n"), "current evidence profile") {
+		t.Fatalf("current verification must reject a legacy summary: %v", errs)
+	}
+}
+
 func TestCurrentProfileFixtureSemantics(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "contracts", "current-profile.json"))
 	if err != nil {
@@ -42,6 +55,12 @@ func TestCurrentProfileFixtureSemantics(t *testing.T) {
 			}
 			errs := Verify(events, objs)
 			if f.Expect == "" {
+				if errs := VerifyCurrentFull(events, objs); len(errs) != 0 {
+					t.Fatalf("explicit current full: %v", errs)
+				}
+				if errs := VerifyCurrentFull(events, nil); len(errs) == 0 {
+					t.Fatal("nil objects accepted as current full")
+				}
 				if len(errs) > 0 {
 					t.Fatalf("positive current profile: %v", errs)
 				}

@@ -31,11 +31,12 @@ const (
 )
 
 var (
-	idRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
-	semverRe = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
-	tsRe     = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$`)
-	shaRe    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	typeRe   = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	idRe      = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	semverRe  = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	tsRe      = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$`)
+	shaRe     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	typeRe    = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	receiptRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 )
 
 type vref struct {
@@ -82,8 +83,10 @@ func asRefList(v any) ([]vref, bool) {
 // altered objects; use VerifyFull for that.
 func VerifyStructure(events []Event) []string { return verify(events, nil, false) }
 
-// VerifyFull is VerifyStructure plus every referenced object: present, the
-// digest matches, and the byte length equals the declared one. objects must be
+// VerifyFull verifies every declared object in addition to VerifyStructure. A
+// legacy log with only input_summary can pass this compatibility check; it does
+// not prove the exact bytes of an original input. Use VerifyCurrentFull to
+// require the current evidence profile. objects must be
 // non-nil (an empty map means "no objects available", so every reference is
 // reported missing).
 func VerifyFull(events []Event, objects map[string][]byte) []string {
@@ -98,6 +101,16 @@ func VerifyFull(events []Event, objects map[string][]byte) []string {
 func Verify(events []Event, objects map[string][]byte) []string {
 	if objects == nil {
 		return VerifyStructure(events)
+	}
+	return VerifyFull(events, objects)
+}
+
+// VerifyCurrentFull requires the current profile, exact input and every
+// object. Callers verifying current evidence must explicitly select this entry
+// point, rather than delegating profile expectations to an untrusted export.
+func VerifyCurrentFull(events []Event, objects map[string][]byte) []string {
+	if len(events) == 0 || str(payload(events[0]), "evidence_profile") != CurrentProfile {
+		return []string{"[ENVELOPE] current evidence profile is required"}
 	}
 	return VerifyFull(events, objects)
 }
@@ -120,6 +133,11 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 		return []string{"[" + CodeEnvelope + "] empty log"}
 	}
 	first := events[0]
+	profile, hasProfile := payload(first)["evidence_profile"]
+	current := profile == CurrentProfile
+	if hasProfile && !current {
+		add(0, CodeEnvelope, "unknown evidence profile")
+	}
 	acked := map[int]bool{}
 	var sealedObjs map[string]int64 // object refs declared by context_sealed
 	var sealedReq string
@@ -178,6 +196,9 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 		if i > 0 && typ == "turn_received" {
 			add(i, CodeLifecycle, "turn_received may appear only once, at seq 0")
 		}
+		if current {
+			checkCurrentEvent(events, i, typ, p, add)
+		}
 		switch typ {
 		case "turn_received":
 			if summary, ok := p["input_summary"].(string); ok && strings.Contains(strings.ToLower(summary), "exact input") {
@@ -194,6 +215,12 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 			d, _ := p["decision"].(string)
 			if d == "allow" {
 				policyDestination, _ = asObj(p["destination"])
+				if v, exists := p["destination"]; exists && (policyDestination == nil || !destinationFieldsWellFormed(v)) {
+					add(i, CodeRefs, "policy destination has invalid identifiers")
+				}
+				if policyDestination != nil && !destinationEqual(p, policyDestination) {
+					add(i, CodeRefs, "policy destination conflicts with its corresponding identifiers")
+				}
 			}
 			switch {
 			case d != "allow" && d != "deny":
@@ -242,11 +269,9 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 				}
 			}
 		case "disclosure_intent":
-			intentDestination = map[string]any{}
-			for _, k := range []string{"provider", "endpoint_id", "model_id"} {
-				if v, ok := p[k].(string); ok {
-					intentDestination[k] = v
-				}
+			intentDestination = p
+			if !destinationFieldsWellFormed(p) {
+				add(i, CodeRefs, "disclosure intent has invalid destination identifiers")
 			}
 			if policyDestination != nil && !destinationEqual(policyDestination, intentDestination) {
 				add(i, CodeRefs, "disclosure intent destination differs from policy destination")
@@ -269,31 +294,35 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 				}
 			}
 		case "evidence_ack":
-			if receipt, ok := p["receipt"].(string); !ok || strings.TrimSpace(receipt) == "" {
-				add(i, CodeRefs, "evidence_ack.receipt is required and must be nonempty")
+			receipt, ok := p["receipt"].(string)
+			if !ok || !receiptRe.MatchString(receipt) {
+				add(i, CodeRefs, "evidence_ack.receipt is required and must be a valid identifier")
 			}
-			if level, exists := p["storage_level"]; exists {
-				if s, ok := level.(string); !ok || strings.TrimSpace(s) == "" {
-					add(i, CodeRefs, "evidence_ack.storage_level must be nonempty when present")
-				}
+			level, hasLevel := p["storage_level"]
+			if (current || hasLevel) && level != postgresDurableLevel {
+				add(i, CodeRefs, "evidence_ack.storage_level must identify a supported durable storage class")
 			}
 			a, ok := integer(p["acked_seq"])
 			h, _ := p["acked_event_hash"].(string)
 			if !ok || a < 0 || a >= int64(i) || h == "" || str(events[a], "event_hash") != h {
 				add(i, CodeRefs, "ack does not match event")
 			} else {
+				if level == postgresDurableLevel && receipt != eventReceipt(postgresDurableLevel, events[a]).ID {
+					add(i, CodeRefs, "evidence_ack receipt does not bind the storage level and target event")
+				}
+				target := str(events[a], "type")
+				if current && (a != int64(i-1) || (target != "disclosure_intent" && target != "output_recorded")) {
+					add(i, CodeRefs, "current evidence_ack must target its immediately preceding intent or output event")
+				}
 				for j := 0; j <= int(a); j++ {
 					acked[j] = true
 				}
 			}
 		case "provider_accepted":
-			accepted := map[string]any{}
-			for _, k := range []string{"provider", "endpoint_id", "model_id"} {
-				if v, ok := p[k].(string); ok {
-					accepted[k] = v
-				}
+			if !destinationFieldsWellFormed(p) {
+				add(i, CodeRefs, "provider acceptance has invalid destination identifiers")
 			}
-			if intentDestination != nil && !destinationEqual(intentDestination, accepted) {
+			if intentDestination != nil && !destinationEqual(intentDestination, p) {
 				add(i, CodeRefs, "provider acceptance destination differs from disclosure intent")
 			}
 			if j := last(events[:i], "disclosure_intent"); j < 0 || !acked[j] {
@@ -313,13 +342,17 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 			}
 			released = true
 		case "usage_settled":
+			basis := str(p, "basis")
 			if n, ok := integer(p["units"]); !ok || n < 0 {
 				add(i, CodeRefs, "usage_settled.units must be a non-negative integer")
-			} else if hasReservation && str(p, "basis") == "reserved_max" && DeriveDisclosure(events[:i]) != DisclosureNone && n != reservedUnits {
+			} else if basis == "reserved_max" && (!hasReservation || n != reservedUnits) {
 				add(i, CodeRefs, "usage_settled reserved_max units must equal the full reservation")
 			}
-			if b, _ := p["basis"].(string); b == "" {
-				add(i, CodeRefs, "usage_settled.basis is required")
+			if basis != "reserved_max" && basis != "provider_reported" {
+				add(i, CodeRefs, "usage_settled.basis must be provider_reported or reserved_max")
+			}
+			if DeriveDisclosure(events[:i]) == DisclosureUnknown && basis != "reserved_max" {
+				add(i, CodeRefs, "unknown disclosure must use reserved_max settlement")
 			}
 		case TypeTurnCompleted:
 			if p["outcome"] == "completed" && last(events[:i], "usage_settled") < 0 {
@@ -342,6 +375,9 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 				add(i, CodeRefs, "turn_interrupted.disclosure must be none, unknown or disclosed")
 			} else if want := DeriveDisclosure(events[:i]); dv != want {
 				add(i, CodeDisclosure, "recorded disclosure %q but the log derives %q", dv, want)
+			}
+			if DeriveDisclosure(events[:i]) == DisclosureUnknown && last(events[:i], "usage_settled") < 0 {
+				add(i, CodeLifecycle, "unknown disclosure must settle the full reservation before interruption")
 			}
 			if released {
 				add(i, "R3", "a turn with a recorded release cannot end interrupted")
@@ -599,15 +635,73 @@ const (
 	DisclosureDisclosed = "disclosed"
 )
 
-func destinationEqual(a, b map[string]any) bool {
-	for _, k := range []string{"provider", "endpoint_id", "model_id"} {
-		av, aok := a[k].(string)
-		bv, bok := b[k].(string)
-		if aok && bok && av != bv {
+var destinationKeys = []string{"provider", "endpoint_id", "model_id"}
+
+func destinationFieldsWellFormed(v any) bool {
+	p, ok := asObj(v)
+	if !ok {
+		return false
+	}
+	for _, k := range destinationKeys {
+		if v, exists := p[k]; exists {
+			if name, ok := v.(string); !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func completeDestination(p map[string]any) bool {
+	if p == nil || !destinationFieldsWellFormed(p) {
+		return false
+	}
+	for _, k := range destinationKeys {
+		if str(p, k) == "" {
 			return false
 		}
 	}
 	return true
+}
+
+func destinationEqual(a, b map[string]any) bool {
+	for _, k := range destinationKeys {
+		av, aok := a[k]
+		bv, bok := b[k]
+		if aok && bok {
+			as, aok := av.(string)
+			bs, bok := bv.(string)
+			if !aok || !bok || as != bs {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func checkCurrentEvent(events []Event, i int, typ string, p map[string]any, add func(int, string, string, ...any)) {
+	switch typ {
+	case "turn_received":
+		_, summary := p["input_summary"]
+		if _, ok := asRef(p["input"]); !ok || summary {
+			add(i, CodeRefs, "current evidence requires exact input bytes, not a legacy summary")
+		}
+		custodian := str(p, "custodian_id")
+		if custodian == "" || custodian != str(actorOf(events[i]), "id") {
+			add(i, CodeEnvelope, "admission actor does not match the declared custodian")
+		}
+	case "policy_decision":
+		if str(p, "decision") == "allow" {
+			d, _ := asObj(p["destination"])
+			if !completeDestination(d) || str(p, "route") != str(d, "endpoint_id") {
+				add(i, CodeRefs, "policy must identify the actual provider, endpoint, and model, with its route matching the endpoint")
+			}
+		}
+	case "disclosure_intent", "provider_accepted":
+		if !completeDestination(p) {
+			add(i, CodeRefs, "%s must identify the actual provider, endpoint and model", typ)
+		}
+	}
 }
 
 // DeriveDisclosure computes the disclosure state from the log alone. It is
