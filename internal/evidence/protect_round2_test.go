@@ -53,6 +53,28 @@ func TestProtectionSelfGrantUsesExactQuotedLoginAndRollsBack(t *testing.T) {
 	checkNoUpdate()
 }
 
+func TestProtectionAttemptMustMatchQualifiedRowsAndRelations(t *testing.T) {
+	f, turn, object := sample(t)
+	c := testdb.Runtime(t, f.pool)
+	ctx := context.Background()
+	p := &evidence.PGProber{DB: c.Workspace, Admin: f.pool, Identity: c.WorkspaceRole}
+	if err := p.Preflight(ctx, f.tenant, turn, object); err != nil {
+		t.Fatal(err)
+	}
+	if got, why := p.Attempt(ctx, evidence.AttackDeleteTurn, f.tenant, evidence.NewUUID(), object); got != evidence.Inconclusive {
+		t.Errorf("unverified turn counted as a refusal: %s %s", got, why)
+	}
+	// The intent is an exact target relation, not whatever later resolves at
+	// the same name. The replacement in this disposable schema is protected
+	// too: a 42501 against it must nevertheless not count.
+	mustSQL(t, f.pool, "ALTER TABLE evidence_objects RENAME TO evidence_objects_original")
+	mustSQL(t, f.pool, "CREATE TABLE evidence_objects (LIKE evidence_objects_original INCLUDING ALL)")
+	mustSQL(t, f.pool, "INSERT INTO evidence_objects SELECT * FROM evidence_objects_original")
+	if got, why := p.Attempt(ctx, evidence.AttackDeleteObject, f.tenant, turn, object); got != evidence.Inconclusive {
+		t.Errorf("replacement relation counted as a refusal: %s %s", got, why)
+	}
+}
+
 func TestProtectionQualificationRejectsDuplicateOrUnexpectedFindings(t *testing.T) {
 	for _, bad := range []evidence.Finding{{Attack: evidence.AttackGrantSelf, Outcome: evidence.Inconclusive}, {Attack: "unexpected", Outcome: evidence.Refused}} {
 		rep := evidence.Report{Findings: []evidence.Finding{bad}}

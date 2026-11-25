@@ -17,7 +17,7 @@ class CurrentProfileSemantics(unittest.TestCase):
 
     def test_current_profile_cases(self):
         cases = json.loads(FIXTURE.read_text())
-        self.assertEqual(len(cases), 23)
+        self.assertEqual(len(cases), 24)
         for case in cases:
             with self.subTest(name=case['name']):
                 prev = None

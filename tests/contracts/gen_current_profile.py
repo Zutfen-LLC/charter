@@ -100,6 +100,7 @@ def cases():
         ("admission-custodian-mismatch", "ENVELOPE", complete, lambda f: update(f,"turn_received",custodian_id="different")),
         ("summary-only-current", "REFS", complete, lambda f: (drop(f,"turn_received","input"), update(f,"turn_received",input_summary="description only"))),
         ("unknown-profile", "ENVELOPE", complete, lambda f: update(f,"turn_received",evidence_profile="unknown")),
+        ("identifier-trailing-newline", "ENVELOPE", complete, lambda f: [e.update(tenant_id=e["tenant_id"]+"\n") for e in f["events"]]),
     ):
         f = copy.deepcopy(source)
         mutate(f)
