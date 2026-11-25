@@ -84,7 +84,7 @@ func TestClaimValidationPositiveControls(t *testing.T) {
 		"nbf = iat":               {Subject: "s"},
 		"idtyp user":              {Subject: "s", Extra: map[string]any{"idtyp": "user"}},
 		"within leeway expired":   {Subject: "s", IssuedAt: now.Add(-10*time.Minute - 10*time.Second), Lifetime: 10 * time.Minute},
-		"unrelated claims":        {Subject: "s", Email: "x@example.test", Extra: map[string]any{"scp": "access_as_user", "ver": "2.0", "oid": "abc"}},
+		"unrelated claims":        {Subject: "s", Email: "x@example.test", Extra: map[string]any{"scp": "access_as_user charter.access", "ver": "2.0", "oid": "abc"}},
 	}
 	for name, c := range cases {
 		if _, err := v.Verify(context.Background(), idp.Mint(c)); err != nil {

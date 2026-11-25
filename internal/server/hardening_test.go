@@ -342,3 +342,16 @@ func TestOutputNotReleasedWhenDeadlineExpiresDuringReleaseQuery(t *testing.T) {
 		t.Fatalf("output released after deadline expiry during the release query: %d %s", r.code, r.body)
 	}
 }
+
+// The release-time query is bounded: if the database cannot answer in time the
+// call fails closed with no output (and the handler does not hang).
+func TestReleaseQueryIsBoundedAndFailsClosed(t *testing.T) {
+	e := newEnv(t)
+	e.auth.ReleaseCheckTimeout = 150 * time.Millisecond
+	_, unblock, res := e.blockedRelease(context.Background())
+	r := <-res // returns without the lock ever being released
+	unblock()
+	if r.code != http.StatusServiceUnavailable || strings.Contains(r.body, sensitive) {
+		t.Fatalf("slow authorization query not failed closed: %d %s", r.code, r.body)
+	}
+}

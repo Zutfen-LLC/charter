@@ -18,7 +18,7 @@ func setup(t *testing.T) (*syntheticidp.IdP, *oidc.Verifier) {
 	t.Helper()
 	idp := syntheticidp.New(aud, tid)
 	t.Cleanup(idp.Server.Close)
-	v, err := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid,
+	v, err := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid, RequiredScope: scope,
 		Keys: &oidc.JWKSFetcher{URL: idp.JWKSURL(), AllowLoopbackHTTP: true}})
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestJWKSCacheBoundsKeyRevocation(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { return now }
 	f := &oidc.JWKSFetcher{URL: idp.JWKSURL(), TTL: 5 * time.Minute, Now: clock, AllowLoopbackHTTP: true}
-	v, _ := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid, Keys: f, Now: clock})
+	v, _ := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid, RequiredScope: scope, Keys: f, Now: clock})
 	idp.Now = clock
 
 	tok := idp.Token("s")
@@ -125,7 +125,7 @@ func TestJWKSRotationPicksUpNewKey(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { return now }
 	idp.Now = clock
-	v, _ := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid, Now: clock,
+	v, _ := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid, RequiredScope: scope, Now: clock,
 		Keys: &oidc.JWKSFetcher{URL: idp.JWKSURL(), Now: clock, AllowLoopbackHTTP: true}})
 	if _, err := v.Verify(context.Background(), idp.Token("s")); err != nil {
 		t.Fatal(err)

@@ -31,6 +31,10 @@ func (s *Store) RemoveMember(ctx context.Context, actor Principal, projectID, us
 }
 
 func (s *Store) changeMember(ctx context.Context, actor Principal, projectID, userID string, add bool) error {
+	actor, okp := actor.canon()
+	if !okp {
+		return ErrForbidden
+	}
 	projectID, ok1 := CanonicalID(projectID)
 	userID, ok2 := CanonicalID(userID)
 	if !ok1 || !ok2 {
@@ -75,6 +79,10 @@ func (s *Store) changeMember(ctx context.Context, actor Principal, projectID, us
 // ids, so no UUID spelling matters), and the tenant must always keep at least
 // one ACTIVE tenant_admin.
 func (s *Store) GrantRole(ctx context.Context, actor Principal, userID, role string) error {
+	actor, okp := actor.canon() // before any comparison: self-grant compares canonical ids
+	if !okp {
+		return ErrForbidden
+	}
 	userID, valid := CanonicalID(userID)
 	if !valid || !ValidRole(role) {
 		return ErrNotFound
@@ -103,6 +111,10 @@ func (s *Store) GrantRole(ctx context.Context, actor Principal, userID, role str
 }
 
 func (s *Store) RevokeRole(ctx context.Context, actor Principal, userID, role string) error {
+	actor, okp := actor.canon()
+	if !okp {
+		return ErrForbidden
+	}
 	userID, valid := CanonicalID(userID)
 	if !valid || !ValidRole(role) {
 		return ErrNotFound
@@ -127,6 +139,10 @@ func (s *Store) RevokeRole(ctx context.Context, actor Principal, userID, role st
 // DisableUser blocks all access for a user immediately (workspace access only;
 // evidence custodian attribution is unaffected by design).
 func (s *Store) DisableUser(ctx context.Context, actor Principal, userID string) error {
+	actor, okp := actor.canon()
+	if !okp {
+		return ErrForbidden
+	}
 	userID, valid := CanonicalID(userID)
 	if !valid {
 		return ErrNotFound
@@ -171,6 +187,10 @@ func requireOtherActiveAdmin(ctx context.Context, tx pgx.Tx, tenantID, target st
 // re-verifying (inside that lock) that the actor is still an active
 // tenant_admin. A stale Principal therefore cannot commit anything.
 func (s *Store) inTx(ctx context.Context, actor Principal, fn func(pgx.Tx) error) error {
+	actor, okp := actor.canon() // callers canonicalize first; refuse here too
+	if !okp {
+		return ErrForbidden
+	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err

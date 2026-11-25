@@ -16,10 +16,18 @@
 //   - exp and iat are required NumericDates; nbf is optional but, if present,
 //     must be valid. All are JSON numbers in (0, year 9999]. exp > iat, exp-iat
 //     <= MaxLifetime, nbf < exp. Malformed values are rejected, never ignored.
-//   - ID-token artifacts (nonce) and app-only tokens (idtyp other than "user")
-//     are refused, and Config.RequiredScope (scp) can pin the token's purpose.
-//     These are heuristics against token substitution: the primary defense is a
-//     dedicated API audience that no client uses for ID tokens.
+//   - POSITIVE delegated-API evidence is mandatory: the token must carry an scp
+//     claim, a string of single-space-separated scope tokens, one of which is
+//     EXACTLY Config.RequiredScope. Missing, empty, non-string, malformed
+//     (leading/trailing/double spaces, tabs, newlines, quotes), substring or
+//     case-different scp is refused. This is what rejects ID tokens and app-only
+//     (client-credentials) tokens, which carry no delegated scp; it does not
+//     depend on the absence of nonce or the presence of optional claims.
+//   - Defense in depth: tokens with a nonce or an idtyp other than "user" are
+//     also refused. The audience must be a dedicated API audience that no client
+//     uses for ID tokens.
+//   - There is no permissive fallback: NewVerifier fails without a valid
+//     RequiredScope.
 //
 // Live compatibility with a Microsoft Entra tenant has NOT been demonstrated;
 // the profile above is derived from the documented v2.0 access-token format.
@@ -56,7 +64,8 @@ type Config struct {
 	TenantID    string // required value of the tenant claim
 	TenantClaim string // claim name; default "tid" (Entra)
 	Keys        KeySource
-	// RequiredScope, if set, must appear in the space-delimited scp claim.
+	// RequiredScope is the delegated API scope that must appear exactly in scp.
+	// Required; see ValidScopeToken.
 	RequiredScope string
 	Leeway        time.Duration // clock skew allowance; default 30s
 	// MaxLifetime bounds exp-iat so a long-lived token cannot extend the
@@ -79,6 +88,9 @@ type Verifier struct{ c Config }
 func NewVerifier(c Config) (*Verifier, error) {
 	if c.Issuer == "" || c.Audience == "" || c.TenantID == "" || c.Keys == nil {
 		return nil, errors.New("oidc: issuer, audience, tenant id and key source are required")
+	}
+	if !ValidScopeToken(c.RequiredScope) {
+		return nil, errors.New("oidc: a valid required delegated scope is mandatory (no permissive fallback)")
 	}
 	if c.TenantClaim == "" {
 		c.TenantClaim = "tid"
@@ -172,8 +184,8 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	if _, ok := claims["idtyp"]; ok && str("idtyp") != "user" {
 		return Identity{}, bad("not a user token (idtyp)")
 	}
-	if v.c.RequiredScope != "" && !hasScope(str("scp"), v.c.RequiredScope) {
-		return Identity{}, bad("required scope missing")
+	if err := requireScope(claims["scp"], v.c.RequiredScope); err != nil {
+		return Identity{}, err
 	}
 
 	exp, err := numericDate(claims, "exp", true)
@@ -238,13 +250,42 @@ func numericDate(claims map[string]json.RawMessage, name string, required bool) 
 	return time.Unix(int64(sec), int64((f-sec)*1e9)), nil
 }
 
-func hasScope(scp, want string) bool {
-	for _, s := range strings.Fields(scp) {
-		if s == want {
-			return true
+// ValidScopeToken reports whether s is a single scope token: 1-128 printable
+// ASCII characters excluding space, double quote, backslash and comma (RFC 6749
+// scope-token, minus comma which is never used as a separator here).
+func ValidScopeToken(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x21 || c > 0x7e || c == '"' || c == '\\' || c == ',' {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+// requireScope demands scp to be a JSON string of single-space-separated valid
+// scope tokens containing want exactly.
+func requireScope(raw json.RawMessage, want string) error {
+	var scp string
+	if len(raw) == 0 || json.Unmarshal(raw, &scp) != nil || raw[0] != '"' {
+		return bad("scp missing or not a string")
+	}
+	found := false
+	for _, tok := range strings.Split(scp, " ") {
+		if !ValidScopeToken(tok) {
+			return bad("scp malformed")
+		}
+		if tok == want {
+			found = true
+		}
+	}
+	if !found {
+		return bad("required delegated scope missing")
+	}
+	return nil
 }
 
 // audienceMatches accepts the audience as a string or a one-element array.

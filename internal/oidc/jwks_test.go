@@ -62,7 +62,7 @@ func newJWKSEnv(t *testing.T) *jwksEnv {
 	t.Cleanup(e.front.Close)
 	e.f = newFetcher(e.front.URL, e.clock)
 	var err error
-	e.v, err = oidc.NewVerifier(oidc.Config{Issuer: e.idp.Issuer, Audience: aud, TenantID: tid, Keys: e.f, Now: e.clock})
+	e.v, err = oidc.NewVerifier(oidc.Config{Issuer: e.idp.Issuer, Audience: aud, TenantID: tid, RequiredScope: scope, Keys: e.f, Now: e.clock})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestRedirectsAreNotFollowed(t *testing.T) {
 		http.Redirect(w, r, target.URL+"/keys", http.StatusFound)
 	}))
 	defer front.Close()
-	v, _ := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid, Keys: newFetcher(front.URL, time.Now)})
+	v, _ := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid, RequiredScope: scope, Keys: newFetcher(front.URL, time.Now)})
 	if _, err := v.Verify(context.Background(), idp.Token("s")); err == nil {
 		t.Fatal("verified using keys obtained through a redirect")
 	}
@@ -230,7 +230,7 @@ func TestPlainHTTPJWKSRefusedWithoutFixtureOptIn(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
 	defer srv.Close()
 	f := &oidc.JWKSFetcher{URL: srv.URL + "/keys"} // no fixture opt-in
-	v, _ := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid, Keys: f})
+	v, _ := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: aud, TenantID: tid, RequiredScope: scope, Keys: f})
 	if _, err := v.Verify(context.Background(), idp.Token("s")); err == nil {
 		t.Fatal("verified")
 	}

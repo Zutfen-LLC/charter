@@ -44,6 +44,21 @@ type Principal struct {
 
 func (p Principal) Has(role string) bool { return p.Roles[role] }
 
+// canon returns the Principal with canonical lowercase ids. A Principal whose
+// ids are not UUIDs is malformed and every store operation refuses it (fail
+// closed). Principals from Resolve are already canonical; this protects against
+// ones constructed or carried elsewhere, so no id spelling can change a
+// comparison done in Go (self-grant) or in SQL.
+func (p Principal) canon() (Principal, bool) {
+	u, ok1 := CanonicalID(p.UserID)
+	t, ok2 := CanonicalID(p.TenantID)
+	if !ok1 || !ok2 {
+		return p, false
+	}
+	p.UserID, p.TenantID = u, t
+	return p, true
+}
+
 type Store struct{ DB *pgxpool.Pool }
 
 // Resolve maps a validated (issuer, idp tenant, subject) to an active user.
@@ -82,8 +97,9 @@ func (s *Store) Resolve(ctx context.Context, issuer, idpTenant, subject string) 
 // IsMember reports whether the principal is an active member of the project
 // (and the project is in the principal's tenant). Roles confer no membership.
 func (s *Store) IsMember(ctx context.Context, p Principal, projectID string) (bool, error) {
+	p, okp := p.canon()
 	projectID, valid := CanonicalID(projectID)
-	if !valid {
+	if !okp || !valid {
 		return false, nil
 	}
 	var ok bool
@@ -97,6 +113,10 @@ func (s *Store) IsMember(ctx context.Context, p Principal, projectID string) (bo
 
 // HasRole re-reads a tenant role from the database (not from Principal.Roles).
 func (s *Store) HasRole(ctx context.Context, p Principal, role string) (bool, error) {
+	p, okp := p.canon()
+	if !okp {
+		return false, nil
+	}
 	var ok bool
 	err := s.DB.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM tenant_roles r JOIN users u ON u.id=r.user_id
@@ -121,6 +141,10 @@ type Artifact struct {
 // every read below it re-checks that the user is still active, so a Principal
 // resolved before a disable cannot read anything afterwards.
 func (s *Store) ListProjects(ctx context.Context, p Principal) ([]Project, error) {
+	p, okp := p.canon()
+	if !okp {
+		return nil, ErrForbidden
+	}
 	rows, err := s.DB.Query(ctx, `
 		SELECT pr.id::text, pr.name FROM projects pr
 		JOIN project_members m ON m.project_id = pr.id AND m.tenant_id = pr.tenant_id
@@ -145,6 +169,9 @@ func (s *Store) ListProjects(ctx context.Context, p Principal) ([]Project, error
 // optionally filtered by a substring query. A project the caller is not in
 // yields an empty list indistinguishable from an empty project.
 func (s *Store) ListArtifacts(ctx context.Context, p Principal, projectID, q string) ([]Artifact, error) {
+	if _, okp := p.canon(); !okp {
+		return nil, ErrForbidden
+	}
 	projectID, valid := CanonicalID(projectID)
 	if !valid {
 		return []Artifact{}, nil
@@ -158,6 +185,10 @@ func (s *Store) Search(ctx context.Context, p Principal, q string) ([]Artifact, 
 }
 
 func (s *Store) artifacts(ctx context.Context, p Principal, projectID *string, q string) ([]Artifact, error) {
+	p, okp := p.canon()
+	if !okp {
+		return nil, ErrForbidden
+	}
 	rows, err := s.DB.Query(ctx, `
 		SELECT a.id::text, a.project_id::text, a.title FROM artifacts a
 		JOIN project_members m ON m.project_id = a.project_id AND m.tenant_id = a.tenant_id
@@ -185,6 +216,10 @@ func (s *Store) artifacts(ctx context.Context, p Principal, projectID *string, q
 // GetArtifact returns an artifact only if the principal is a member of its
 // project; otherwise ErrNotFound (same as nonexistent, to avoid an oracle).
 func (s *Store) GetArtifact(ctx context.Context, p Principal, id string) (Artifact, error) {
+	p, okp := p.canon()
+	if !okp {
+		return Artifact{}, ErrForbidden
+	}
 	id, valid := CanonicalID(id)
 	if !valid {
 		return Artifact{}, ErrNotFound

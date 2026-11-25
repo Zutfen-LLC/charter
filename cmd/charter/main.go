@@ -62,12 +62,7 @@ func run(cmd string) error {
 	var opts []server.Option
 	if cfg.OIDC.Configured() {
 		o := cfg.OIDC.EntraDefaults()
-		if err := o.Validate(); err != nil {
-			return err
-		}
-		v, err := oidc.NewVerifier(oidc.Config{Issuer: o.Issuer, Audience: o.Audience, TenantID: o.TenantID,
-			RequiredScope: o.RequiredScope,
-			Keys:          &oidc.JWKSFetcher{URL: o.JWKSURL, AllowLoopbackHTTP: o.AllowInsecureLoopback}})
+		v, err := buildVerifier(o)
 		if err != nil {
 			return err
 		}
@@ -92,4 +87,18 @@ func run(cmd string) error {
 		return err
 	}
 	return nil
+}
+
+// buildVerifier validates the (default-expanded) OIDC configuration and builds
+// the token verifier. Incomplete or unsafe configuration, including a missing
+// delegated scope, is an error: the server then refuses to start rather than
+// serving with weaker token-purpose checks.
+func buildVerifier(o config.OIDC) (*oidc.Verifier, error) {
+	o = o.EntraDefaults()
+	if err := o.Validate(); err != nil {
+		return nil, err
+	}
+	return oidc.NewVerifier(oidc.Config{Issuer: o.Issuer, Audience: o.Audience, TenantID: o.TenantID,
+		RequiredScope: o.RequiredScope,
+		Keys:          &oidc.JWKSFetcher{URL: o.JWKSURL, AllowLoopbackHTTP: o.AllowInsecureLoopback}})
 }

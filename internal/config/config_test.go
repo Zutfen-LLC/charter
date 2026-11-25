@@ -9,7 +9,7 @@ const guid = "11111111-2222-3333-4444-555555555555"
 
 func TestOIDCValidate(t *testing.T) {
 	ok := func(o OIDC) OIDC { return o.EntraDefaults() }
-	valid := ok(OIDC{TenantID: guid, Audience: "api://charter-test"})
+	valid := ok(OIDC{TenantID: guid, Audience: "api://charter-test", RequiredScope: "charter.access"})
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("entra defaults should validate: %v", err)
 	}
@@ -17,7 +17,7 @@ func TestOIDCValidate(t *testing.T) {
 		valid.JWKSURL != "https://login.microsoftonline.com/"+guid+"/discovery/v2.0/keys" {
 		t.Fatalf("entra defaults: %+v", valid)
 	}
-	custom := OIDC{TenantID: "t1", Audience: "a", Issuer: "https://idp.example.test", JWKSURL: "https://idp.example.test/keys"}
+	custom := OIDC{TenantID: "t1", Audience: "a", RequiredScope: "charter.access", Issuer: "https://idp.example.test", JWKSURL: "https://idp.example.test/keys"}
 	if err := custom.Validate(); err != nil {
 		t.Fatalf("custom https IdP: %v", err)
 	}
@@ -41,13 +41,16 @@ func TestOIDCValidate(t *testing.T) {
 		"tenant id with slash":      ok(OIDC{TenantID: guid + "/x", Audience: "a"}),
 	}
 	for name, o := range bad {
+		if o.RequiredScope == "" {
+			o.RequiredScope = "charter.access" // keep each case failing for its own reason
+		}
 		if err := o.Validate(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 
 	// Plain HTTP is allowed only for loopback hosts and only with the explicit fixture opt-in.
-	fixture := OIDC{TenantID: "t1", Audience: "a", Issuer: "http://127.0.0.1:9", JWKSURL: "http://127.0.0.1:9/keys", AllowInsecureLoopback: true}
+	fixture := OIDC{TenantID: "t1", Audience: "a", RequiredScope: "charter.access", Issuer: "http://127.0.0.1:9", JWKSURL: "http://127.0.0.1:9/keys", AllowInsecureLoopback: true}
 	if err := fixture.Validate(); err != nil {
 		t.Errorf("loopback fixture with opt-in: %v", err)
 	}

@@ -69,7 +69,7 @@ func newEnv(t *testing.T) *env {
 			t.Fatal(err)
 		}
 	}
-	v, err := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: audience, TenantID: idpTenant,
+	v, err := oidc.NewVerifier(oidc.Config{Issuer: idp.Issuer, Audience: audience, TenantID: idpTenant, RequiredScope: idp.Scope,
 		Keys: &oidc.JWKSFetcher{URL: idp.JWKSURL(), AllowLoopbackHTTP: true}})
 	if err != nil {
 		t.Fatal(err)

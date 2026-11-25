@@ -22,7 +22,9 @@ type OIDC struct {
 	Audience string // application (client) id or api:// URI the token is minted for
 	TenantID string // required value of the tenant claim
 	JWKSURL  string // Entra v2: https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys
-	// RequiredScope optionally pins the token's purpose (scp claim).
+	// RequiredScope is the delegated API scope (a single scope name such as
+	// "charter.access", not the api:// URI) that must appear exactly in the
+	// token's scp claim. Required; there is no default.
 	RequiredScope string
 	// AllowInsecureLoopback permits plain-HTTP issuer/JWKS URLs on loopback
 	// hosts ONLY, for synthetic fixtures. It defaults off and never relaxes
@@ -96,6 +98,8 @@ func (o OIDC) Validate() error {
 		return errors.New("oidc: tenant id has invalid characters")
 	case o.Audience == "":
 		return errors.New("oidc: audience (CHARTER_OIDC_AUDIENCE) is required")
+	case !oidc.ValidScopeToken(o.RequiredScope):
+		return errors.New("oidc: a single valid delegated scope name (CHARTER_OIDC_REQUIRED_SCOPE) is required")
 	case o.Issuer == "" || o.JWKSURL == "":
 		return errors.New("oidc: issuer and JWKS URL must be set together (or both left unset for Entra defaults)")
 	}
