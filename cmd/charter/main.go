@@ -17,7 +17,9 @@ import (
 
 	"github.com/Zutfen-LLC/charter/internal/config"
 	"github.com/Zutfen-LLC/charter/internal/migrate"
+	"github.com/Zutfen-LLC/charter/internal/oidc"
 	"github.com/Zutfen-LLC/charter/internal/server"
+	"github.com/Zutfen-LLC/charter/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -57,7 +59,23 @@ func run(cmd string) error {
 		return nil
 	}
 
-	srv := &http.Server{Addr: cfg.Addr, Handler: server.New(pool, server.TestFixtureBackend()), ReadHeaderTimeout: 5 * time.Second}
+	var opts []server.Option
+	if cfg.OIDC.Configured() {
+		o := cfg.OIDC.EntraDefaults()
+		v, err := buildVerifier(o)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, server.WithAuth(&server.Auth{Verifier: v, Store: &store.Store{DB: pool}}))
+		log.Printf("OIDC enabled: issuer=%s tenant=%s", o.Issuer, o.TenantID)
+		if o.AllowInsecureLoopback {
+			log.Printf("WARNING: plain-HTTP loopback IdP fixture mode enabled; never use outside local testing")
+		}
+	} else {
+		log.Printf("OIDC not configured: only /healthz and /readyz are served (no data API)")
+	}
+
+	srv := &http.Server{Addr: cfg.Addr, Handler: server.New(pool, server.TestFixtureBackend(), opts...), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
@@ -69,4 +87,18 @@ func run(cmd string) error {
 		return err
 	}
 	return nil
+}
+
+// buildVerifier validates the (default-expanded) OIDC configuration and builds
+// the token verifier. Incomplete or unsafe configuration, including a missing
+// delegated scope, is an error: the server then refuses to start rather than
+// serving with weaker token-purpose checks.
+func buildVerifier(o config.OIDC) (*oidc.Verifier, error) {
+	o = o.EntraDefaults()
+	if err := o.Validate(); err != nil {
+		return nil, err
+	}
+	return oidc.NewVerifier(oidc.Config{Issuer: o.Issuer, Audience: o.Audience, TenantID: o.TenantID,
+		RequiredScope: o.RequiredScope,
+		Keys:          &oidc.JWKSFetcher{URL: o.JWKSURL, AllowLoopbackHTTP: o.AllowInsecureLoopback}})
 }
