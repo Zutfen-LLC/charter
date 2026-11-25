@@ -48,7 +48,7 @@ func runtimeTopology(ctx context.Context, tx pgx.Tx, expected, group string) ([]
 	// namespace privileges and assumable ownership. Some owner rights cannot
 	// be detected by has_*_privilege (an owner can revoke its own ordinary ACL).
 	for _, subject := range []string{session, group} {
-		var schemaOwner, dbOwner, schemaCreate, dbCreate, privilegedFunctions bool
+		var schemaOwner, dbOwner, schemaCreate, dbCreate, privilegedFunctions, indirectRelations bool
 		if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_has_role($1::name,n.nspowner,'MEMBER'),
 			pg_catalog.pg_has_role($1::name,d.datdba,'MEMBER'),
 			pg_catalog.has_schema_privilege($1::name,n.oid,'CREATE'),
@@ -56,10 +56,17 @@ func runtimeTopology(ctx context.Context, tx pgx.Tx, expected, group string) ([]
 			EXISTS (SELECT 1 FROM pg_catalog.pg_proc f JOIN pg_catalog.pg_namespace fn ON f.pronamespace=fn.oid
 			WHERE f.prosecdef AND fn.nspname NOT IN ('pg_catalog','information_schema')
 			AND pg_catalog.has_schema_privilege($1::name,fn.oid,'USAGE')
-			AND pg_catalog.has_function_privilege($1::name,f.oid,'EXECUTE'))
+			AND pg_catalog.has_function_privilege($1::name,f.oid,'EXECUTE')),
+			EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace rn ON c.relnamespace=rn.oid
+			WHERE rn.nspname NOT IN ('pg_catalog','information_schema') AND rn.nspname NOT LIKE 'pg\_temp\_%'
+			AND pg_catalog.has_schema_privilege($1::name,rn.oid,'USAGE')
+			AND (c.relkind IN ('v','m','f') OR (c.relkind IN ('r','p') AND EXISTS
+			(SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class=c.oid)))
+			AND (pg_catalog.has_table_privilege($1::name,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+			OR pg_catalog.has_any_column_privilege($1::name,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))
 			FROM pg_catalog.pg_namespace n CROSS JOIN pg_catalog.pg_database d
 			WHERE n.nspname=pg_catalog.current_schema() AND d.datname=pg_catalog.current_database()`, subject).
-			Scan(&schemaOwner, &dbOwner, &schemaCreate, &dbCreate, &privilegedFunctions); err != nil {
+			Scan(&schemaOwner, &dbOwner, &schemaCreate, &dbCreate, &privilegedFunctions, &indirectRelations); err != nil {
 			return nil, err
 		}
 		if schemaOwner {
@@ -76,6 +83,9 @@ func runtimeTopology(ctx context.Context, tx pgx.Tx, expected, group string) ([]
 		}
 		if privilegedFunctions {
 			p = append(p, subject+" can execute application SECURITY DEFINER code")
+		}
+		if indirectRelations {
+			p = append(p, subject+" has table or column access through an application view, foreign table, or relation rule")
 		}
 	}
 	return p, nil
