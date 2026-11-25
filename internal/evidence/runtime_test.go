@@ -127,9 +127,11 @@ func TestRuntimeChecksRejectTransitiveMembershipAndSchemaOwnership(t *testing.T)
 	role := "charter_indirect_" + strings.ReplaceAll(evidence.NewUUID()[:8], "-", "")
 	mid := role + "_mid"
 	for _, q := range []string{"CREATE ROLE " + role + " NOLOGIN", "CREATE ROLE " + mid + " NOLOGIN", "GRANT " + mid + " TO " + c.EvidenceRole, "GRANT " + role + " TO " + mid} {
-		if _, err := f.pool.Exec(ctx, q); err != nil { t.Fatal(err) }
+		if _, err := f.pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
 	}
-	t.Cleanup(func(){
+	t.Cleanup(func() {
 		_, _ = f.pool.Exec(ctx, "REVOKE "+mid+" FROM "+c.EvidenceRole)
 		_, _ = f.pool.Exec(ctx, "REVOKE "+role+" FROM "+mid)
 		_, _ = f.pool.Exec(ctx, "DROP ROLE IF EXISTS "+mid)
@@ -143,8 +145,12 @@ func TestRuntimeChecksRejectTransitiveMembershipAndSchemaOwnership(t *testing.T)
 func TestRuntimeChecksRejectEffectiveColumnPrivilege(t *testing.T) {
 	f := newFx(t, nil)
 	c := testdb.Runtime(t, f.pool)
-	if _, err := f.pool.Exec(context.Background(), `GRANT UPDATE (body) ON evidence_events TO `+c.EvidenceRole); err != nil { t.Fatal(err) }
-	t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), `REVOKE UPDATE (body) ON evidence_events FROM `+c.EvidenceRole) })
+	if _, err := f.pool.Exec(context.Background(), `GRANT UPDATE (body) ON evidence_events TO `+c.EvidenceRole); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(), `REVOKE UPDATE (body) ON evidence_events FROM `+c.EvidenceRole)
+	})
 	if err := evidence.CheckEvidenceRuntime(context.Background(), c.Evidence); err == nil {
 		t.Fatal("checker accepted an effective column-level UPDATE grant")
 	}
