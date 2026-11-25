@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// The control plane serves with two least-privilege logins, never with the
-// credential that owns the schema. These checks run at startup and refuse
-// unsafe configuration; they inspect the ACTUAL connection (current_user), so a
-// URL that happens to authenticate as the owner or a superuser is rejected.
+// The authorization snapshot is checked on one authenticated physical session.
+// Serving credentials may inherit only their designated leaf application role.
+const (
+	evidenceGroup  = "charter_evidence_app"
+	workspaceGroup = "charter_workspace_app"
+)
 
 var evidenceTables = []string{"evidence_turns", "evidence_events", "evidence_objects"}
 
@@ -21,10 +24,10 @@ type roleInfo struct {
 	super, createRole, createDB, bypassRLS, replication bool
 }
 
-func inspectRole(ctx context.Context, db *pgxpool.Pool) (roleInfo, error) {
+func inspectRole(ctx context.Context, db pgx.Tx, user string) (roleInfo, error) {
 	var r roleInfo
-	err := db.QueryRow(ctx, `SELECT current_user, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication
-		FROM pg_roles WHERE rolname = current_user`).Scan(&r.user, &r.super, &r.createRole, &r.createDB, &r.bypassRLS, &r.replication)
+	err := db.QueryRow(ctx, `SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication
+		FROM pg_catalog.pg_roles WHERE rolname = $1`, user).Scan(&r.user, &r.super, &r.createRole, &r.createDB, &r.bypassRLS, &r.replication)
 	return r, err
 }
 
@@ -41,14 +44,14 @@ func (r roleInfo) problems() []string {
 
 // ownerProblems: the credential must not own, or be able to become the owner
 // of, the evidence tables (SET ROLE works for any role it is a member of).
-func ownerProblems(ctx context.Context, db *pgxpool.Pool, tables []string) ([]string, error) {
+func ownerProblems(ctx context.Context, db pgx.Tx, tables []string) ([]string, error) {
 	var p []string
 	for _, t := range tables {
 		var owner string
 		var isOwner, isMember bool
-		err := db.QueryRow(ctx, `SELECT pg_get_userbyid(c.relowner), pg_get_userbyid(c.relowner) = current_user,
-			pg_has_role(current_user, c.relowner, 'MEMBER')
-			FROM pg_class c WHERE c.oid = to_regclass($1)`, t).Scan(&owner, &isOwner, &isMember)
+		err := db.QueryRow(ctx, `SELECT pg_catalog.pg_get_userbyid(c.relowner), pg_catalog.pg_get_userbyid(c.relowner) = current_user,
+			pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')
+			FROM pg_catalog.pg_class c WHERE c.oid = pg_catalog.to_regclass($1)`, t).Scan(&owner, &isOwner, &isMember)
 		if err != nil {
 			return nil, fmt.Errorf("table %s not found (is the database migrated?): %w", t, err)
 		}
@@ -62,16 +65,19 @@ func ownerProblems(ctx context.Context, db *pgxpool.Pool, tables []string) ([]st
 	return p, nil
 }
 
-func hasPriv(ctx context.Context, db *pgxpool.Pool, table, priv string) (bool, error) {
+func hasPriv(ctx context.Context, db pgx.Tx, table, priv string, includeColumns bool) (bool, error) {
 	var ok bool
-	err := db.QueryRow(ctx, `SELECT has_table_privilege(current_user, $1, $2)`, table, priv).Scan(&ok)
+	err := db.QueryRow(ctx, `SELECT pg_catalog.has_table_privilege(current_user, $1, $2)
+  OR CASE WHEN $3::boolean AND $2 IN ('SELECT','INSERT','UPDATE','REFERENCES','SELECT WITH GRANT OPTION','INSERT WITH GRANT OPTION')
+    THEN pg_catalog.has_any_column_privilege(current_user, $1, $2) ELSE false END`, table, priv, includeColumns).Scan(&ok)
 	return ok, err
 }
 
 // workspaceTables are all other tables in the current schema.
-func workspaceTables(ctx context.Context, db *pgxpool.Pool) ([]string, error) {
-	rows, err := db.Query(ctx, `SELECT tablename FROM pg_tables WHERE schemaname = current_schema()
-		AND tablename NOT LIKE 'evidence\_%'`)
+func workspaceTables(ctx context.Context, db pgx.Tx) ([]string, error) {
+	rows, err := db.Query(ctx, `SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname = pg_catalog.current_schema() AND c.relkind IN ('r','p','v','m','f')
+  AND c.relname NOT LIKE 'evidence\_%'`)
 	if err != nil {
 		return nil, err
 	}
@@ -87,83 +93,99 @@ func workspaceTables(ctx context.Context, db *pgxpool.Pool) ([]string, error) {
 	return out, rows.Err()
 }
 
-func canCreateInSchema(ctx context.Context, db *pgxpool.Pool) (bool, error) {
-	var ok bool
-	err := db.QueryRow(ctx, `SELECT has_schema_privilege(current_user, current_schema(), 'CREATE')`).Scan(&ok)
-	return ok, err
-}
-
 // CheckEvidenceRuntime verifies the evidence-writer credential: not a
 // superuser/owner/owner-member, INSERT and SELECT on the evidence tables and
 // nothing destructive, no CREATE in the schema and no access to workspace data.
 func CheckEvidenceRuntime(ctx context.Context, db *pgxpool.Pool) error {
-	r, err := inspectRole(ctx, db)
-	if err != nil {
-		return fmt.Errorf("evidence credential: %w", err)
-	}
-	p := r.problems()
-	op, err := ownerProblems(ctx, db, evidenceTables)
-	if err != nil {
-		return fmt.Errorf("evidence credential: %w", err)
-	}
-	p = append(p, op...)
-	for _, t := range evidenceTables {
-		for _, want := range []string{"SELECT", "INSERT"} {
-			if ok, err := hasPriv(ctx, db, t, want); err != nil || !ok {
-				p = append(p, "role lacks "+want+" on "+t)
-			}
-		}
-		for _, bad := range []string{"UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"} {
-			if ok, err := hasPriv(ctx, db, t, bad); err != nil || ok {
-				p = append(p, "role holds "+bad+" on "+t)
-			}
-		}
-	}
-	if ok, err := canCreateInSchema(ctx, db); err != nil || ok {
-		p = append(p, "role can create objects in the schema")
-	}
-	ws, err := workspaceTables(ctx, db)
-	if err != nil {
-		return fmt.Errorf("evidence credential: %w", err)
-	}
-	for _, t := range ws {
-		for _, priv := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
-			if ok, err := hasPriv(ctx, db, t, priv); err != nil || ok {
-				p = append(p, "role holds "+priv+" on workspace table "+t)
-			}
-		}
-	}
-	return unsafe("evidence", r.user, p)
+	return checkRuntime(ctx, db, "evidence", evidenceGroup)
 }
 
-// CheckWorkspaceRuntime verifies the workspace credential: same exclusions, and
-// no privilege of any kind on the evidence tables, so a workspace bug or SQL
-// injection cannot read, alter or delete evidence.
+// CheckWorkspaceRuntime verifies that neither the authenticated login nor its
+// sole assumable group has any evidence privilege.
 func CheckWorkspaceRuntime(ctx context.Context, db *pgxpool.Pool) error {
-	r, err := inspectRole(ctx, db)
+	return checkRuntime(ctx, db, "workspace", workspaceGroup)
+}
+
+func checkRuntime(ctx context.Context, pool *pgxpool.Pool, kind, group string) error {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return fmt.Errorf("workspace credential: %w", err)
+		return fmt.Errorf("%s credential: %w", kind, err)
 	}
-	p := r.problems()
-	op, err := ownerProblems(ctx, db, evidenceTables)
+	defer tx.Rollback(ctx) //nolint:errcheck
+	user := pool.Config().ConnConfig.User
+	p, err := runtimeTopology(ctx, tx, user, group)
 	if err != nil {
-		return fmt.Errorf("workspace credential: %w", err)
+		return unsafe(kind, user, []string{err.Error()})
 	}
-	p = append(p, op...)
-	for _, t := range evidenceTables {
-		for _, priv := range []string{"SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"} {
-			if ok, err := hasPriv(ctx, db, t, priv); err != nil || ok {
+	ep, version, err := runtimeEvidenceTables(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("%s credential: %w", kind, err)
+	}
+	owners, err := ownerProblems(ctx, tx, ep)
+	if err != nil {
+		return fmt.Errorf("%s credential: %w", kind, err)
+	}
+	p = append(p, owners...)
+	privs := []string{"SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"}
+	if version >= 170000 {
+		privs = append(privs, "MAINTAIN")
+	}
+	for _, t := range ep {
+		for _, priv := range privs {
+			want := kind == "evidence" && (priv == "SELECT" || priv == "INSERT")
+			ok, err := hasPriv(ctx, tx, t, priv, !want)
+			if err != nil {
+				return fmt.Errorf("%s credential: %w", kind, err)
+			}
+			if want && !ok {
+				p = append(p, "role lacks "+priv+" on "+t)
+			}
+			if !want && ok {
 				p = append(p, "role holds "+priv+" on "+t)
+			}
+			if want {
+				ok, err := hasPriv(ctx, tx, t, priv+" WITH GRANT OPTION", true)
+				if err != nil {
+					return fmt.Errorf("%s credential: %w", kind, err)
+				}
+				if ok {
+					p = append(p, "role holds "+priv+" WITH GRANT OPTION on "+t)
+				}
 			}
 		}
 	}
-	if ok, err := canCreateInSchema(ctx, db); err != nil || ok {
-		p = append(p, "role can create objects in the schema")
+	if kind == "evidence" {
+		ws, err := workspaceTables(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("%s credential: %w", kind, err)
+		}
+		for _, t := range ws {
+			for _, priv := range privs {
+				ok, err := hasPriv(ctx, tx, pgx.Identifier{t}.Sanitize(), priv, true)
+				if err != nil {
+					return fmt.Errorf("%s credential: %w", kind, err)
+				}
+				if ok {
+					p = append(p, "role holds "+priv+" on workspace table "+t)
+				}
+			}
+		}
+	} else {
+		ok, err := hasPriv(ctx, tx, "users", "SELECT", false)
+		if err != nil {
+			return fmt.Errorf("%s credential: %w", kind, err)
+		}
+		if !ok {
+			p = append(p, "role cannot read workspace tables")
+		}
 	}
-	if ok, err := hasPriv(ctx, db, "users", "SELECT"); err != nil || !ok {
-		p = append(p, "role cannot read workspace tables")
+	if err := unsafe(kind, user, p); err != nil {
+		return err
 	}
-	return unsafe("workspace", r.user, p)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("%s credential: %w", kind, err)
+	}
+	return nil
 }
 
 func unsafe(kind, user string, problems []string) error {
