@@ -12,7 +12,9 @@ import (
 
 type grantTarget struct {
 	database, schema, table, owner string
-	oid                            uint32
+	address, boot                  string
+	port                           int
+	dbOID, oid                     uint32
 }
 
 type grantTargetLookup interface {
@@ -21,10 +23,13 @@ type grantTargetLookup interface {
 
 func lookupGrantTarget(ctx context.Context, q grantTargetLookup, table string) (grantTarget, error) {
 	var t grantTarget
-	err := q.QueryRow(ctx, `SELECT pg_catalog.current_database(),n.nspname,c.relname,pg_catalog.pg_get_userbyid(c.relowner),c.oid
+	err := q.QueryRow(ctx, `SELECT d.datname,n.nspname,c.relname,pg_catalog.pg_get_userbyid(c.relowner),
+		COALESCE(pg_catalog.inet_server_addr()::text,''), EXTRACT(epoch FROM pg_catalog.pg_postmaster_start_time())::text,
+		COALESCE(pg_catalog.inet_server_port(),0),d.oid,c.oid
 		FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+		JOIN pg_catalog.pg_database d ON d.datname=pg_catalog.current_database()
 		WHERE c.oid=pg_catalog.to_regclass($1) AND n.nspname=pg_catalog.current_schema() AND c.relkind IN ('r','p')`, table).
-		Scan(&t.database, &t.schema, &t.table, &t.owner, &t.oid)
+		Scan(&t.database, &t.schema, &t.table, &t.owner, &t.address, &t.boot, &t.port, &t.dbOID, &t.oid)
 	return t, err
 }
 

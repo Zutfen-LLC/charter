@@ -1,7 +1,7 @@
 // Command charter runs the control-plane API and its migrations.
 //
 //	charter migrate   apply pending migrations and exit
-//	charter serve     migrate, then serve HTTP
+//	charter serve     check credentials, recover, then serve HTTP
 package main
 
 import (

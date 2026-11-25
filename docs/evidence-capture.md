@@ -70,7 +70,7 @@ Migrations run as the schema **owner** (`charter migrate`, bootstrap only). The 
 | workspace (`CHARTER_DATABASE_URL`) | `charter_workspace_app` | read/write workspace tables, read `schema_migrations` | touch any evidence table at all |
 | evidence (`CHARTER_EVIDENCE_DATABASE_URL`) | `charter_evidence_app` | INSERT and SELECT evidence tables | UPDATE/DELETE/TRUNCATE, disable triggers, drop, grant, create objects, read workspace tables, assume the owner |
 
-`charter serve` **refuses to start** if `CHARTER_MIGRATE_DATABASE_URL` is set, the two URLs are missing or identical, either login is a superuser/`CREATEROLE`/`CREATEDB`/`BYPASSRLS`/replication role, owns or is a member of the role that owns the evidence tables, holds privileges beyond the table above, or can create objects in the schema, or the database has unapplied migrations (the server cannot migrate). Provisioning: `scripts/dev.sh up` (dev) or `scripts/provision-runtime-roles.sql` after `charter migrate`. These checks inspect the live connection (`current_user`, catalog privileges), so a URL that merely authenticates as the owner is caught.
+`charter serve` **refuses to start** with migration credentials or an unsafe runtime profile. It verifies both the authenticated and active roles, the restricted role topology, and the effective table, column, schema and database permissions. See the [runtime credential policy](runtime-protection.md). Apply migrations with `charter migrate` and provision the distinct runtime logins with `scripts/dev.sh up` (dev) or `scripts/provision-runtime-roles.sql`. The serving process does not migrate.
 
 ## Protection qualification and the open gap
 
