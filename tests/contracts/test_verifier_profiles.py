@@ -57,7 +57,7 @@ class VerifierProfileControls(unittest.TestCase):
         events, objects = rehashed("unknown-disclosure.json", edit)
         self.assertIn("actor", "\n".join(verify_turn(events, objects)))
 
-    def test_legacy_summary_is_not_exact_input(self):
+    def test_legacy_summary_prose_neither_grants_nor_breaks_exact_verification(self):
         def edit(events): events[0]["payload"]["input_summary"] = "exact input: synthetic prompt"
         events, objects = rehashed("complete-turn.json", edit)
-        self.assertIn("legacy", "\n".join(verify_turn(events, objects)))
+        self.assertEqual(verify_turn(events, objects), [])

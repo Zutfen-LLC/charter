@@ -130,7 +130,6 @@ def negatives():
     add("acceptance-destination-mismatch", "REFS", mutate_steps(complete(), lambda s: s[ix(s, "provider_accepted")][3].update(endpoint_id="other")))
     add("unknown-under-settlement", "REFS", mutate_steps(unknown(), lambda s: s[ix(s, "usage_settled")][3].update(units=1)))
     add("admission-service-actor", "ENVELOPE", mutate_steps(complete(), lambda s: s.__setitem__(0, (s[0][0], s[0][1], SVC, s[0][3]))))
-    add("legacy-summary-claims-exact", "REFS", mutate_steps(complete(), lambda s: s[0][3].update(input_summary="exact input: synthetic prompt")))
     return n
 
 

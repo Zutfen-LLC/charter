@@ -261,8 +261,6 @@ def verify_turn(events, objects=None):
             a = e.get("actor") if isinstance(e.get("actor"), dict) else {}
             if current and (not isinstance(p.get("custodian_id"), str) or not p["custodian_id"] or p["custodian_id"] != a.get("id")):
                 add(i, "ENVELOPE", "admission actor does not match the declared custodian")
-            if isinstance(p.get("input_summary"), str) and "exact input" in p["input_summary"].lower():
-                add(i, "REFS", "legacy input_summary cannot claim exact input bytes")
             if "input" in p:
                 if not _ref(p["input"]):
                     add(i, "REFS", "input must be a {sha256, bytes} reference")

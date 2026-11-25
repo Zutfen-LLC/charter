@@ -26,7 +26,6 @@ func TestVerifierProfileControls(t *testing.T) {
 			i := eventIndex(e, TypeTurnInterrupted)
 			e[i]["actor"] = map[string]any{"kind": "user", "id": "u-custodian-1"}
 		}},
-		{"legacy summary cannot assert exact input", "complete-turn.json", "legacy", func(e []Event) { payload(e[0])["input_summary"] = "exact input: synthetic prompt" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -201,9 +201,6 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 		}
 		switch typ {
 		case "turn_received":
-			if summary, ok := p["input_summary"].(string); ok && strings.Contains(strings.ToLower(summary), "exact input") {
-				add(i, CodeRefs, "legacy input_summary cannot claim exact input bytes")
-			}
 			if in, ok := p["input"]; ok {
 				if _, ok := asRef(in); !ok {
 					add(i, CodeRefs, "input must be a {sha256, bytes} reference")
