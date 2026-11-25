@@ -251,6 +251,33 @@ func TestOutputDurableBeforeReleaseAndGateVeto(t *testing.T) {
 	}
 }
 
+func TestPolicyEvaluationFailureIsDurableDenialWithoutRedispatch(t *testing.T) {
+	f := newFx(t, nil)
+	policyErr := errors.New("policy unavailable")
+	f.rec.Policy = func(context.Context, evidence.Request) (evidence.Decision, error) {
+		return evidence.Decision{}, policyErr
+	}
+	res, err := f.rec.Process(context.Background(), f.req("policy-failure", "in"), f.model("must-not-run"), nil)
+	if !errors.Is(err, policyErr) || len(res.Output) != 0 || f.calls.Load() != 0 {
+		t.Fatalf("res=%+v err=%v calls=%d", res, err, f.calls.Load())
+	}
+	evs := f.verified(f.onlyTurn())
+	if got := types(evs); got != "turn_received,policy_decision,turn_completed" {
+		t.Fatalf("policy failure lifecycle: %s", got)
+	}
+	decision := evs[1]["payload"].(map[string]any)
+	terminal := evs[2]["payload"].(map[string]any)
+	if decision["decision"] != "deny" || decision["reason"] != "policy_evaluation_failed" || terminal["outcome"] != "denied" || evidence.DeriveDisclosure(evs) != evidence.DisclosureNone {
+		t.Fatalf("failure was not durably denied: decision=%v terminal=%v", decision, terminal)
+	}
+	if _, err := f.rec.Process(context.Background(), f.req("policy-failure", "in"), f.model("must-not-run"), nil); !errors.Is(err, evidence.ErrDenied) {
+		t.Fatalf("retry of durable denial: %v", err)
+	}
+	if f.calls.Load() != 0 {
+		t.Fatalf("denied request redispatched: %d", f.calls.Load())
+	}
+}
+
 func TestDenyDisclosesNothing(t *testing.T) {
 	f := newFx(t, nil)
 	f.policy = evidence.Decision{Allow: false, Reason: "model not approved", PolicyVersion: "pol-1"}
