@@ -13,6 +13,10 @@ POSTGRES_DURABLE_LEVEL = "postgres:fsync=on,synchronous_commit=on"
 RETENTION_PROFILE = "charter-s3-compliance-v1"
 RETENTION_DURABLE_LEVEL = "s3:object-lock:COMPLIANCE"
 RETAINED_RECEIPT_DOMAIN = b"CHARTER-RETAINED-RECEIPT-v1\0"
+# Documented default resolution for an omitted model selection
+# (docs/model-routing-and-budget.md). A code constant of this contract
+# version, not mutable routing configuration.
+DEFAULT_REGISTRY_MODEL = "det-a"
 
 
 MAX_SAFE_INT = 2**53 - 1
@@ -685,6 +689,19 @@ def _verify_c06(events, objects):
         if typ == "usage_reserved":
             if p.get("accounting_version") != "charter-budget-v1" or not isinstance(p.get("registry_model"), str) or not ID_RE.fullmatch(p["registry_model"]):
                 add(i, "C06 usage reservation requires C05 governed accounting")
+            elif isinstance(received.get("model_registry_id"), str):
+                # Attributable model identity: the governed accounting
+                # reservation must bind the same registry model the turn
+                # explicitly requested. Registry identifiers are never
+                # provider-native destination model identifiers, so the
+                # policy destination is deliberately not compared here.
+                if p["registry_model"] != received["model_registry_id"]:
+                    add(i, "C06 reserved registry model differs from the explicitly requested registry model")
+            elif "model_registry_id" not in received:
+                # No model was explicitly requested: the reservation must
+                # bind the documented default resolution.
+                if p["registry_model"] != DEFAULT_REGISTRY_MODEL:
+                    add(i, "C06 reserved registry model must be the documented default resolution")
         if typ in ("disclosure_intent", "provider_accepted", "response_released"):
             ts = p.get("source_authorized_at")
             if not timestamp(ts):

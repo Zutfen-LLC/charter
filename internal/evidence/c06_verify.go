@@ -12,6 +12,13 @@ var c06Opaque = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,256}$`)
 
 var c06Timestamp = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$`)
 
+// defaultRegistryModel is the documented default resolution for an omitted
+// model selection (docs/model-routing-and-budget.md: "an optional `model_id`
+// (default `det-a`)"). It is a code constant of this contract version, not
+// mutable project routing configuration, so an offline verifier may hold the
+// same expectation without reconstructing historical routing state.
+const defaultRegistryModel = "det-a"
+
 // verifyC06 implements versioned source-provenance rules without changing the
 // historical contract for turns that do not opt into source binding.
 func verifyC06(events []Event, objects map[string][]byte, full bool) (errs []string) {
@@ -218,8 +225,25 @@ func verifyC06(events []Event, objects map[string][]byte, full bool) (errs []str
 	latestAuth := str(events[sealedAt], "recorded_at")
 	for i, e := range events {
 		typ, ep := str(e, "type"), payload(e)
-		if typ == "usage_reserved" && (str(ep, "accounting_version") != budgetVersion || !idRe.MatchString(str(ep, "registry_model"))) {
-			add(i, "C06 usage reservation requires C05 governed accounting")
+		if typ == "usage_reserved" {
+			if str(ep, "accounting_version") != budgetVersion || !idRe.MatchString(str(ep, "registry_model")) {
+				add(i, "C06 usage reservation requires C05 governed accounting")
+			} else if requested, ok := received["model_registry_id"].(string); ok {
+				// Attributable model identity: the governed accounting
+				// reservation must bind the same registry model the turn
+				// explicitly requested. Registry identifiers are never
+				// provider-native destination model identifiers, so the
+				// policy destination is deliberately not compared here.
+				if str(ep, "registry_model") != requested {
+					add(i, "C06 reserved registry model differs from the explicitly requested registry model")
+				}
+			} else if _, malformed := received["model_registry_id"]; !malformed {
+				// No model was explicitly requested: the reservation must
+				// bind the documented default resolution.
+				if str(ep, "registry_model") != defaultRegistryModel {
+					add(i, "C06 reserved registry model must be the documented default resolution")
+				}
+			}
 		}
 		if typ == "output_recorded" || typ == "response_released" {
 			if str(ep, "source_provenance_sha256") != provenance {
