@@ -3,6 +3,10 @@ package server
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -148,4 +152,123 @@ func TestC05AmbiguousBudgetCommitAcknowledgments(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestC05OverrunCrossStoreRecovery(t *testing.T) {
+	for _, mode := range []string{"floor-before-evidence-failure", "floor-write-rejected", "malformed", "envelope-overflow"} {
+		t.Run(mode, func(t *testing.T) {
+			e := newEnv(t)
+			ctx := context.Background()
+			b := evidence.PG{DB: e.st.DB}
+			cap := int64(1000)
+			if err := b.SetPolicy(ctx, evidence.BudgetPolicy{TenantID: e.tenant, ProjectID: e.p1, ProjectCap: cap, LocalOnly: true, AllowedModels: []string{"local-http"}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.SetPolicy(ctx, evidence.BudgetPolicy{TenantID: e.tenant, ProjectID: e.p2, ProjectCap: cap, LocalOnly: true, AllowedModels: []string{"local-http"}}); err != nil {
+				t.Fatal(err)
+			}
+			var calls, sentBytes atomic.Int64
+			const oversized = "synthetic oversized output"
+			response := `{"output":"` + oversized + `"}`
+			switch mode {
+			case "malformed":
+				response = `{"output":"unclosed`
+			case "envelope-overflow":
+				response = `{"output":"` + strings.Repeat("x", 70000) + `"}`
+			}
+			receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sent, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					http.Error(w, "read failure", 400)
+					return
+				}
+				calls.Add(1)
+				sentBytes.Store(int64(len(sent)))
+				_, _ = io.WriteString(w, response)
+			}))
+			defer receiver.Close()
+			cfg := routing.DefaultConfig()
+			cfg.Endpoint = receiver.URL
+			cfg.MaxOutputBytes = 8
+			backend := evidence.Backend(b)
+			if mode == "floor-before-evidence-failure" {
+				backend = c05EvidenceFailure{Backend: b, event: "usage_settled"}
+			}
+			if mode == "floor-write-rejected" {
+				_, err := e.st.DB.Exec(ctx, `CREATE FUNCTION reject_floor() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic floor write rejected'; END $$;
+      CREATE TRIGGER reject_floor BEFORE UPDATE OF overrun_floor ON evidence_budget_reservations FOR EACH ROW EXECUTE FUNCTION reject_floor()`)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			e.auth.Evidence = &evidence.Recorder{Backend: backend, Governance: routing.Governance(cfg, b, false, nil), Accounting: b.ReconcileBudget}
+			const body = `{"input":"synthetic","model_id":"local-http"}`
+			if code, out, _ := e.post("alice", e.p1, body, "Idempotency-Key", "stable"); code != 503 || strings.Contains(out, oversized) {
+				t.Fatalf("withholding: %d %s", code, out)
+			}
+			read := func(phase string) (floor int64, actual *int64, state string, unknown, frozen bool) {
+				t.Helper()
+				var reserved int64
+				if err := e.st.DB.QueryRow(ctx, `SELECT r.reserved_amount,r.overrun_floor,r.actual_amount,r.status,r.unknown,p.frozen FROM evidence_budget_reservations r JOIN evidence_budget_policy p USING (tenant_id,project_id) WHERE r.project_id=$1 AND r.idempotency_key='stable'`, e.p1).Scan(&reserved, &floor, &actual, &state, &unknown, &frozen); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("phase=%s calls=%d input=%d envelope=%d reserved=%d floor=%d actual=%v state=%s unknown=%t frozen=%t", phase, calls.Load(), sentBytes.Load(), len(response), reserved, floor, fmtActual(actual), state, unknown, frozen)
+				return
+			}
+			wantFloor := sentBytes.Load() + int64(len(oversized))
+			wantCharge := wantFloor
+			floor, actual, state, unknown, frozen := read("before-restart")
+			switch mode {
+			case "floor-before-evidence-failure":
+				if floor != wantFloor || actual != nil || state != "open" || !frozen {
+					t.Error("floor and freeze must survive loss of terminal evidence")
+				}
+			case "floor-write-rejected":
+				if floor != 0 || actual != nil || state != "open" {
+					t.Error("failed floor write must not allow below-floor settlement")
+				}
+				if _, err := e.st.DB.Exec(ctx, `DROP TRIGGER reject_floor ON evidence_budget_reservations`); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				wantFloor = 0
+				wantCharge = sentBytes.Load() + cfg.MaxOutputBytes
+				if !frozen || floor != 0 || !unknown {
+					t.Error("unquantifiable exposure must freeze without inventing a floor or exact cost")
+				}
+			}
+			rr := &evidence.Recorder{Backend: b, Accounting: b.ReconcileBudget}
+			for range 2 {
+				if _, err := rr.Recover(ctx, time.Time{}); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.RecoverBudget(ctx, b); err != nil {
+					t.Fatal(err)
+				}
+			}
+			floor, actual, state, unknown, frozen = read("after-two-reconciliations")
+			if floor != wantFloor || actual == nil || *actual != wantCharge || state != "settled" || !unknown || !frozen {
+				t.Error("incorrect terminal ledger after recovery")
+			}
+			e.auth.Evidence = &evidence.Recorder{Backend: b, Governance: routing.Governance(cfg, b, false, nil), Accounting: b.ReconcileBudget}
+			retry, _, _ := e.post("alice", e.p1, body, "Idempotency-Key", "stable")
+			fresh, _, _ := e.post("alice", e.p1, body, "Idempotency-Key", "fresh")
+			sibling, err := b.Summary(ctx, e.tenant, e.p2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("retry=%d fresh=%d receiver_calls=%d uncapped_sibling_frozen=%t", retry, fresh, calls.Load(), sibling.Frozen)
+			if retry != 409 || fresh != 403 || calls.Load() != 1 || sibling.Frozen {
+				t.Error("recovery or frozen admission dispatched, or freeze exceeded scope")
+			}
+		})
+	}
+}
+
+func fmtActual(n *int64) any {
+	if n == nil {
+		return nil
+	}
+	return *n
 }
