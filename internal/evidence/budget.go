@@ -82,7 +82,7 @@ func (b PG) GetPolicy(ctx context.Context, tenant, project string) (BudgetPolicy
 	var p BudgetPolicy
 	p.TenantID = tenant
 	p.ProjectID = project
-	err := b.DB.QueryRow(ctx, `SELECT local_only,allowed_models,project_cap,tenant_cap,enabled FROM evidence_budget_policy WHERE tenant_id=$1::uuid AND project_id=$2::uuid`, tenant, project).Scan(&p.LocalOnly, &p.AllowedModels, &p.ProjectCap, &p.TenantCap, &p.Enabled)
+	err := b.DB.QueryRow(ctx, `SELECT local_only,allowed_models,project_cap,tenant_cap,enabled AND NOT frozen FROM evidence_budget_policy WHERE tenant_id=$1::uuid AND project_id=$2::uuid`, tenant, project).Scan(&p.LocalOnly, &p.AllowedModels, &p.ProjectCap, &p.TenantCap, &p.Enabled)
 	return p, err
 }
 func validateBudgetReservation(r BudgetReservation) error {
@@ -121,7 +121,7 @@ func (b PG) MarkDispatchPossible(ctx context.Context, id string) error {
 func (b PG) ReleaseUnmarked(ctx context.Context, id string) error {
 	return b.transition(ctx, `SELECT evidence_budget_release_unmarked($1::uuid)`, id)
 }
-func (b PG) transition(ctx context.Context, q, id string) error {
+func (b PG) transition(ctx context.Context, q string, args ...any) error {
 	tx, _, release, err := b.begin(ctx)
 	if err != nil {
 		return err
@@ -129,13 +129,17 @@ func (b PG) transition(ctx context.Context, q, id string) error {
 	defer release()
 	defer tx.Rollback(ctx)
 	var ok bool
-	if err = tx.QueryRow(ctx, q, id).Scan(&ok); err != nil {
+	if err = tx.QueryRow(ctx, q, args...).Scan(&ok); err != nil {
 		return err
 	}
 	if !ok {
 		return ErrBudgetTransition
 	}
 	return tx.Commit(ctx)
+}
+
+func (b PG) NoteOverrun(ctx context.Context, id string, units int64) error {
+	return b.transition(ctx, `SELECT evidence_budget_note_overrun($1::uuid,$2)`, id, units)
 }
 
 // Settle records verified exact usage or conservatively charges max reservation if unknown. Owner/evidence backend only.
@@ -188,7 +192,7 @@ func (b PG) Summary(ctx context.Context, tenant, project string) (BudgetSummary,
 	if err != nil {
 		return s, err
 	}
-	rows, err := tx.Query(ctx, `SELECT model_id,COALESCE(sum(reserved_amount) FILTER (WHERE status='open'),0)::bigint,
+	rows, err := tx.Query(ctx, `SELECT model_id,COALESCE(sum(GREATEST(reserved_amount,overrun_floor)) FILTER (WHERE status='open'),0)::bigint,
       COALESCE(sum(actual_amount) FILTER (WHERE status='settled' AND NOT unknown),0)::bigint,
       COALESCE(sum(actual_amount) FILTER (WHERE status='settled' AND unknown),0)::bigint
       FROM evidence_budget_reservations WHERE tenant_id=$1::uuid AND project_id=$2::uuid AND (period_start=$3 OR status='open')

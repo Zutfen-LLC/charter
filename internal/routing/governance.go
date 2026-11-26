@@ -42,6 +42,7 @@ func Governance(cfg Config, budget evidence.PG, syntheticRetention bool, countSy
 			return evidence.GovernedPlan{}, err
 		}
 		var receipt evidence.BudgetReceipt
+		var reserved int64
 		var adapter Adapter
 		switch m.Kind {
 		case KindDeterministicA, KindDeterministicB:
@@ -76,6 +77,7 @@ func Governance(cfg Config, budget evidence.PG, syntheticRetention bool, countSy
 				if receipt.Replayed {
 					return 0, evidence.ErrTurnInFlight
 				}
+				reserved = max
 				return int(max), nil
 			},
 			Arm: func(ctx context.Context, _ string) error { return budget.MarkDispatchPossible(ctx, receipt.ID) },
@@ -98,15 +100,26 @@ func Governance(cfg Config, budget evidence.PG, syntheticRetention bool, countSy
 				}
 				o, err := adapter.Invoke(ctx, m, sent)
 				out := o.ModelOutcome
-				if err != nil {
-					return out, errors.New("routing: adapter did not complete")
-				}
-				if out.Accepted && !o.UsageMissing && !o.UsageInconsistent && !o.UsageExcessive {
+				if o.ProviderConfirmedNonBillable {
+					zero := int64(0)
+					out.UsageUnits = &zero
+				} else if out.Accepted && !o.UsageMissing && !o.UsageInconsistent && !o.UsageExcessive {
 					if n, ok := cost(m, o.InputBytes, o.OutputBytes); ok {
+						if n > reserved {
+							hold, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Timeout)
+							note := budget.NoteOverrun(hold, receipt.ID, n)
+							cancel()
+							if note != nil {
+								return out, errors.New("routing: budget overrun not durably recorded")
+							}
+						}
 						out.UsageUnits = &n
 					} else {
 						return out, fmt.Errorf("routing: usage exceeds numeric domain")
 					}
+				}
+				if err != nil {
+					return out, errors.New("routing: adapter did not complete")
 				}
 				return out, nil
 			},

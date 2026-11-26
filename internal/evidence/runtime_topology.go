@@ -57,11 +57,12 @@ func runtimeTopology(ctx context.Context, tx pgx.Tx, expected, group string) ([]
 			WHERE f.prosecdef AND fn.nspname NOT IN ('pg_catalog','information_schema')
 			AND pg_catalog.has_schema_privilege($1::name,fn.oid,'USAGE')
 			AND pg_catalog.has_function_privilege($1::name,f.oid,'EXECUTE')
-            AND NOT ($2::boolean AND fn.nspname=pg_catalog.current_schema() AND
+            AND NOT ($2::boolean AND (f.proowner=fn.nspowner OR (fn.nspowner='pg_database_owner'::pg_catalog.regrole AND f.proowner=d.datdba)) AND
+              pg_catalog.format('search_path=pg_catalog, %I, pg_temp',fn.nspname) = ANY(f.proconfig) AND
               (f.proname || '(' || pg_catalog.oidvectortypes(f.proargtypes) || ')') IN (
                 'evidence_budget_reserve(uuid, uuid, uuid, text, text, text, text, text, bigint, bigint)',
                 'evidence_budget_mark_dispatch(uuid)', 'evidence_budget_release_unmarked(uuid)',
-                'evidence_budget_settle(uuid, bigint, boolean)', 'evidence_budget_summary(uuid, uuid)'))),
+                'evidence_budget_settle(uuid, bigint, boolean)', 'evidence_budget_note_overrun(uuid, bigint)', 'evidence_budget_summary(uuid, uuid)'))),
 			EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace rn ON c.relnamespace=rn.oid
 			WHERE rn.nspname NOT IN ('pg_catalog','information_schema') AND rn.nspname NOT LIKE 'pg\_temp\_%'
 			AND pg_catalog.has_schema_privilege($1::name,rn.oid,'USAGE')

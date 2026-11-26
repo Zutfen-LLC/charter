@@ -56,9 +56,10 @@ func (rc *Recorder) reconcile(ctx context.Context, t *turn) error {
 // provider. It only uses a verified terminal evidence log to reduce a possible
 // charge. An unavailable or unverified log leaves the reservation outstanding.
 func (b PG) ReconcileBudget(ctx context.Context, backend Backend, tenant, turnID string) error {
-	var id, status string
+	var id, status, project, model, provider, endpoint, destinationModel string
+	var maximum int64
 	var dispatch bool
-	err := b.DB.QueryRow(ctx, `SELECT reservation_id::text,status,dispatch_possible FROM evidence_budget_reservations WHERE tenant_id=$1::uuid AND turn_id=$2::uuid`, tenant, turnID).Scan(&id, &status, &dispatch)
+	err := b.DB.QueryRow(ctx, `SELECT reservation_id::text,status,dispatch_possible,project_id::text,model_id,provider,endpoint_id,destination_model_id,reserved_amount FROM evidence_budget_reservations WHERE tenant_id=$1::uuid AND turn_id=$2::uuid`, tenant, turnID).Scan(&id, &status, &dispatch, &project, &model, &provider, &endpoint, &destinationModel, &maximum)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -89,6 +90,23 @@ func (b PG) ReconcileBudget(ctx context.Context, backend Backend, tenant, turnID
 	}
 	if len(VerifyFull(evs, objects)) != 0 {
 		return errors.New("budget: terminal evidence failed verification")
+	}
+	if str(evs[0], "tenant_id") != tenant || str(evs[0], "turn_id") != turnID || str(evs[0], "project_id") != project {
+		return errors.New("budget: turn scope mismatch")
+	}
+	if i := last(evs, "usage_reserved"); i >= 0 {
+		p := payload(evs[i])
+		n, ok := integer(p["units"])
+		j := last(evs, "policy_decision")
+		if j < 0 {
+			return errors.New("budget: missing destination policy")
+		}
+		dest, _ := asObj(payload(evs[j])["destination"])
+		if !ok || n != maximum || str(p, "accounting_version") != budgetVersion || str(p, "registry_model") != model || str(dest, "provider") != provider || str(dest, "endpoint_id") != endpoint || str(dest, "model_id") != destinationModel {
+			return errors.New("budget: reservation evidence binding mismatch")
+		}
+	} else if dispatch {
+		return errors.New("budget: armed reservation has no retained reservation evidence")
 	}
 	if !dispatch {
 		if last(evs, "provider_accepted") >= 0 || last(evs, "response_released") >= 0 {

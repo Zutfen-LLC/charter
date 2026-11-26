@@ -10,6 +10,7 @@ Legend: **Y** allowed, **M** metadata only (ids, hashes, timestamps, states; no 
 | Read own workspace chats in projects they belong to | Y | - | - | - | - |
 | Manage project membership, model policy, budgets | - | Y | - | - | - |
 | Create/deactivate users, assign roles (not records/export roles for self) | - | Y | - | - | - |
+| View sanitized project usage | - | - | - | - | Y (explicit membership also required) |
 | View evidence metadata | - | - | Y | M | M |
 | View evidence content | - | - | Y (held matters in scope) | Y (only objects in an approved export) | - |
 | Place / release a hold | - | - | Y | - | - |

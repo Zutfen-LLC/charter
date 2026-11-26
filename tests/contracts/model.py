@@ -231,6 +231,8 @@ def verify_turn(events, objects=None):
     released = decided = denied = False
     declared = {}
     reserved_units = None
+    governed_budget = False
+    non_dispatch = {"route_revoked_before_dispatch", "dispatch_denied", "cancelled_before_dispatch", "dispatch_ownership_lost"}
     policy_destination = intent_destination = None
     types = []
     for i, e in enumerate(events):
@@ -333,6 +335,11 @@ def verify_turn(events, objects=None):
                 add(i, "POLICY", "repeated policy decision")
             decided, denied = True, d == "deny"
         elif typ == "usage_reserved":
+            if "accounting_version" in p:
+                model = p.get("registry_model")
+                governed_budget = p["accounting_version"] == "charter-budget-v1" and isinstance(model, str) and ID_RE.fullmatch(model) is not None
+                if not governed_budget:
+                    add(i, "REFS", "invalid governed budget version or model")
             if not _int(p.get("units")) or p["units"] < 0:
                 add(i, "REFS", "usage_reserved.units must be a non-negative integer")
             else:
@@ -418,6 +425,10 @@ def verify_turn(events, objects=None):
             if not idx or idx[-1] not in acked:
                 add(i, "R1", "provider contacted before acked disclosure_intent")
         elif typ == "output_recorded":
+            if "provider_cost_units" in p:
+                n = p["provider_cost_units"]
+                if not governed_budget or not _int(n) or not 0 <= n <= MAX_SAFE_INT or "provider_accepted" not in types[:i]:
+                    add(i, "REFS", "governed provider cost needs a safe integer and confirmed acceptance")
             intents = [j for j, x in enumerate(events[:i]) if isinstance(x, dict) and x.get("type") == "disclosure_intent"]
             if not intents or intents[-1] not in acked:
                 add(i, "R1", "output recorded without acknowledged disclosure intent")
@@ -432,6 +443,18 @@ def verify_turn(events, objects=None):
                 add(i, "R2", "response released before acked complete output")
             released = True
         elif typ == "usage_settled":
+            if "confirmed_no_dispatch" in p:
+                reason = p["confirmed_no_dispatch"]
+                nxt = events[i+1] if i+1 < len(events) and isinstance(events[i+1], dict) else {}
+                if (not isinstance(reason, str) or reason not in non_dispatch or not governed_budget or
+                        p.get("basis") != "reserved_max" or derive_disclosure(events[:i]) != "unknown" or
+                        "output_recorded" in types[:i] or nxt.get("type") != "turn_interrupted" or _pl(nxt).get("reason") != reason):
+                    add(i, "REFS", "invalid governed non-dispatch accounting evidence")
+            if governed_budget and p.get("basis") == "provider_reported":
+                idx = max((j for j, typ_before in enumerate(types[:i]) if typ_before == "output_recorded"), default=-1)
+                n = _pl(events[idx]).get("provider_cost_units") if idx >= 0 and types[idx+1] == "evidence_ack" else None
+                if not _int(n) or p.get("units") != n:
+                    add(i, "REFS", "provider settlement must match acknowledged governed cost")
             if not _int(p.get("units")) or p["units"] < 0:
                 add(i, "REFS", "usage_settled.units must be a non-negative integer")
             elif p.get("basis") == "reserved_max" and p["units"] != reserved_units:

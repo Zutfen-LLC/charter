@@ -122,10 +122,10 @@ func (c Config) Resolve(id string) (Model, error) {
 			}
 			m.Endpoint = c.Endpoint
 			m.Destination.EndpointID = "local-loopback-" + evidence.SHA256([]byte(c.Endpoint))[7:]
-			if c.MaxRequestBytes > 0 {
+			if c.MaxRequestBytes > 0 && c.MaxRequestBytes <= 1<<20 {
 				m.MaxRequestBytes = c.MaxRequestBytes
 			}
-			if c.MaxOutputBytes > 0 {
+			if c.MaxOutputBytes > 0 && c.MaxOutputBytes <= 1<<20 {
 				m.MaxOutputBytes = c.MaxOutputBytes
 			}
 		}
@@ -181,8 +181,10 @@ type HTTPAdapter struct {
 	BearerToken string
 }
 type responseWire struct {
-	Output string `json:"output"`
-	Usage  *struct {
+	Output   *string `json:"output"`
+	Rejected bool    `json:"rejected"`
+	Billable *bool   `json:"billable"`
+	Usage    *struct {
 		InputBytes  *int64 `json:"input_bytes"`
 		OutputBytes *int64 `json:"output_bytes"`
 	} `json:"usage"`
@@ -198,7 +200,7 @@ func (a HTTPAdapter) Invoke(ctx context.Context, m Model, request []byte) (Outco
 	if int64(len(request)) > m.MaxRequestBytes || m.MaxRequestBytes < 0 {
 		return Outcome{}, errors.New("routing: request exceeds limit")
 	}
-	if m.MaxOutputBytes < 0 || m.MaxOutputBytes > maxSafeInteger || m.RequestByteRate < 0 || m.OutputByteRate < 0 || m.RequestByteRate > maxSafeInteger || m.OutputByteRate > maxSafeInteger {
+	if m.MaxOutputBytes < 0 || m.MaxOutputBytes > 1<<20 || m.RequestByteRate < 0 || m.OutputByteRate < 0 || m.RequestByteRate > maxSafeInteger || m.OutputByteRate > maxSafeInteger {
 		return Outcome{}, errors.New("routing: invalid numeric bounds")
 	}
 	timeout := a.Timeout
@@ -221,10 +223,10 @@ func (a HTTPAdapter) Invoke(ctx context.Context, m Model, request []byte) (Outco
 		return Outcome{}, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if (resp.StatusCode < 200 || resp.StatusCode >= 300) && resp.StatusCode != http.StatusUnprocessableEntity {
 		return Outcome{}, fmt.Errorf("routing: local endpoint status %d", resp.StatusCode)
 	}
-	limit := m.MaxOutputBytes + 65536
+	limit := m.MaxOutputBytes*6 + 65536
 	if limit < 65536 || limit > maxSafeInteger {
 		return Outcome{}, errors.New("routing: invalid response bound")
 	}
@@ -243,10 +245,16 @@ func (a HTTPAdapter) Invoke(ctx context.Context, m Model, request []byte) (Outco
 	if dec.Decode(new(any)) != io.EOF {
 		return Outcome{}, errors.New("routing: trailing response data")
 	}
-	out := []byte(w.Output)
-	if int64(len(out)) > m.MaxOutputBytes {
-		return Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true, Output: out[:m.MaxOutputBytes]}, UsageExcessive: true}, errors.New("routing: output exceeds limit")
+	if resp.StatusCode == http.StatusUnprocessableEntity {
+		if w.Rejected && w.Billable != nil && !*w.Billable && w.Output == nil && w.Usage == nil {
+			return Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true}, ProviderConfirmedNonBillable: true}, errors.New("routing: confirmed rejection without billable work")
+		}
+		return Outcome{}, errors.New("routing: unconfirmed rejection")
 	}
+	if w.Output == nil || w.Rejected || w.Billable != nil {
+		return Outcome{}, errors.New("routing: malformed completion")
+	}
+	out := []byte(*w.Output)
 	o := Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true, Complete: true, Output: out}, InputBytes: int64(len(request)), OutputBytes: int64(len(out))}
 	if w.Usage == nil || w.Usage.InputBytes == nil || w.Usage.OutputBytes == nil {
 		o.UsageMissing = true
@@ -259,6 +267,11 @@ func (a HTTPAdapter) Invoke(ctx context.Context, m Model, request []byte) (Outco
 		if o.InputBytes < 0 || o.OutputBytes < 0 || o.InputBytes > maxSafeInteger || o.OutputBytes > maxSafeInteger {
 			o.UsageExcessive = true
 		}
+	}
+	if int64(len(out)) > m.MaxOutputBytes {
+		o.ModelOutcome.Output = out[:m.MaxOutputBytes]
+		o.ModelOutcome.Complete = false
+		return o, errors.New("routing: output exceeds limit")
 	}
 	return o, nil
 }
