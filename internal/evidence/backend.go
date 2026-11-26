@@ -24,9 +24,10 @@ var (
 // receipt. Level records the durability actually in force for that write
 // (ADR 0001 section 8: the pilot must record the level actually tested).
 type Receipt struct {
-	Backend string `json:"backend"`
-	Level   string `json:"level"`
-	ID      string `json:"id"`
+	Backend  string                 `json:"backend"`
+	Level    string                 `json:"level"`
+	ID       string                 `json:"id"`
+	Retained *retainedObjectReceipt `json:"retained,omitempty"`
 }
 
 // BackendInfo describes a backend honestly. RetentionEnforced must be true only

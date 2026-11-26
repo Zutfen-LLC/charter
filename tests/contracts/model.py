@@ -5,10 +5,14 @@ executable statement of the rules, not the product implementation.
 """
 import hashlib
 import json
+from datetime import datetime
 
 SCHEMA_VERSION = "1.0.0"
 CURRENT_PROFILE = "charter-postgres-v1"
 POSTGRES_DURABLE_LEVEL = "postgres:fsync=on,synchronous_commit=on"
+RETENTION_PROFILE = "charter-s3-compliance-v1"
+RETENTION_DURABLE_LEVEL = "s3:object-lock:COMPLIANCE"
+RETAINED_RECEIPT_DOMAIN = b"CHARTER-RETAINED-RECEIPT-v1\0"
 
 
 MAX_SAFE_INT = 2**53 - 1
@@ -166,6 +170,46 @@ def verify_current_full(events, objects):
     return verify_turn(events, objects)
 
 
+def verify_retention_full(events, objects):
+    """Require the retained profile and object bytes, not live storage proof."""
+    if not events or _pl(events[0]).get("evidence_profile") != RETENTION_PROFILE:
+        return ["[ENVELOPE] retention evidence profile is required"]
+    if objects is None:
+        return ["[OBJECT] retention full verification requires the referenced objects"]
+    return verify_turn(events, objects)
+
+
+def _retained_ack(p, target):
+    r = p.get("retained_receipt")
+    if not isinstance(r, dict) or set(r) != {
+        "deployment", "tenant", "evidence_id", "bucket", "key", "version", "sha256", "length",
+        "mode", "retain_until", "seq", "event_hash",
+    }:
+        return None
+    d, b, v, until = (r[k] for k in ("deployment", "bucket", "version", "retain_until"))
+    if not isinstance(d, str) or ID_RE.fullmatch(d) is None or not isinstance(b, str) or ID_RE.fullmatch(b) is None:
+        return None
+    if not isinstance(v, str) or v in ("", "null") or not isinstance(until, str) or r["mode"] != "COMPLIANCE":
+        return None
+    h, tenant, turn, seq = (target.get(k) for k in ("event_hash", "tenant_id", "turn_id", "seq"))
+    if not _int(seq) or seq <= 0 or not _int(r["seq"]) or r["seq"] != seq or not _int(r["length"]):
+        return None
+    if r["key"] != f"charter/v1/{d}/{tenant}/data/events/{turn}/{h}" or r["tenant"] != tenant or r["event_hash"] != h or r["evidence_id"] != h:
+        return None
+    try:
+        parsed = datetime.strptime(until, "%Y-%m-%dT%H:%M:%SZ")
+        if parsed.isoformat(timespec="seconds") + "Z" != until:
+            return None
+        body = canonical(target)
+        if r["sha256"] != sha256_bytes(body) or r["length"] != len(body):
+            return None
+        if p.get("receipt") != sha256_bytes(RETAINED_RECEIPT_DOMAIN + canonical(r)):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return d, b
+
+
 def verify_turn(events, objects=None):
     """Return violation strings, each "seq N: [CODE] text" or "[CODE] text".
     Same rules and codes as the Go verifier (internal/evidence/verify.go).
@@ -178,9 +222,11 @@ def verify_turn(events, objects=None):
         return ["[ENVELOPE] empty log"]
     first = events[0]
     first_payload = _pl(first)
-    current = first_payload.get("evidence_profile") == CURRENT_PROFILE
+    retained = first_payload.get("evidence_profile") == RETENTION_PROFILE
+    current = first_payload.get("evidence_profile") == CURRENT_PROFILE or retained
     if "evidence_profile" in first_payload and not current:
         add(0, "ENVELOPE", "unknown evidence profile")
+    retention_identity = None
     acked, sealed, sealed_req, state = set(), None, None, "start"
     released = decided = denied = False
     declared = {}
@@ -335,8 +381,11 @@ def verify_turn(events, objects=None):
             if not isinstance(receipt, str) or RECEIPT_RE.fullmatch(receipt) is None:
                 add(i, "REFS", "evidence_ack.receipt is required and must be a valid identifier")
             level = p.get("storage_level")
-            if (current or "storage_level" in p) and level != POSTGRES_DURABLE_LEVEL:
+            if ((retained and level != RETENTION_DURABLE_LEVEL) or
+                    (not retained and (current or "storage_level" in p) and level != POSTGRES_DURABLE_LEVEL)):
                 add(i, "REFS", "evidence_ack.storage_level must identify a supported durable storage class")
+            if not retained and "retained_receipt" in p:
+                add(i, "REFS", "retained receipt requires a retention profile")
             ak = p.get("acked_seq")
             if not _int(ak) or ak < 0 or ak >= i or not isinstance(events[ak], dict) \
                     or events[ak].get("event_hash") != p.get("acked_event_hash") or not p.get("acked_event_hash"):
@@ -351,6 +400,12 @@ def verify_turn(events, objects=None):
                         expected = None
                     if receipt != expected:
                         add(i, "REFS", "evidence_ack receipt does not bind the storage level and target event")
+                if retained:
+                    identity = _retained_ack(p, target)
+                    if identity is None or (retention_identity is not None and identity != retention_identity):
+                        add(i, "REFS", "retained receipt does not bind the event bytes and storage identity")
+                    else:
+                        retention_identity = identity
                 if current and (ak != i - 1 or target.get("type") not in ("disclosure_intent", "output_recorded")):
                     add(i, "REFS", "current evidence_ack must target its immediately preceding intent or output event")
                 acked.update(range(ak + 1))

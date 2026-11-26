@@ -1,0 +1,3588 @@
+[
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:672951e2827938cc9fa13f0fc4d94f44125f3d2fc002c296242f83ef6ec59bd5",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:02f2792a2f420ad101f2819e3a073657aad3f65e07cd31e3f1fe4a88d039b41b",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:cf6079d074bf243820a3cccf438e337fe2bacd446b8f7e962841b31b36420385",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "length": 603,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 4,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8e3d700a033f7212f86194d4539a9a97e04f9f3a4a2e628be438ab71547e127c",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:672951e2827938cc9fa13f0fc4d94f44125f3d2fc002c296242f83ef6ec59bd5",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:a2866261dd3e698de3e3be5502fafc42eaf47f7a8f6576b918b41eb9bcce042f",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:8e3d700a033f7212f86194d4539a9a97e04f9f3a4a2e628be438ab71547e127c",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:6324b78978762999f1716b0406b57bcab918cbf9f38a0858f0e071bb9bdb8eaa",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:a2866261dd3e698de3e3be5502fafc42eaf47f7a8f6576b918b41eb9bcce042f",
+          "acked_seq": 7,
+          "receipt": "sha256:0ca737700d213aabc11907c90a389e606deaf01a5410d59b0b553adec55208ea",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:a2866261dd3e698de3e3be5502fafc42eaf47f7a8f6576b918b41eb9bcce042f",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:6c0e3de4938f2b8b7a5d8b175d7a4382c001712ad193b97ca61b5b55e38663ab",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:a2866261dd3e698de3e3be5502fafc42eaf47f7a8f6576b918b41eb9bcce042f",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:a2866261dd3e698de3e3be5502fafc42eaf47f7a8f6576b918b41eb9bcce042f"
+          }
+        },
+        "prev_hash": "sha256:a2866261dd3e698de3e3be5502fafc42eaf47f7a8f6576b918b41eb9bcce042f",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:ff1fd33db28560ce5700042a6f4540acbdb54c621eac19c3794594feb99f83a9",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:6324b78978762999f1716b0406b57bcab918cbf9f38a0858f0e071bb9bdb8eaa",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:952e2a8109aa3bac436ba8938bfaa3f2ae9b83024f31605ad4da326ceda9d3fe",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:ff1fd33db28560ce5700042a6f4540acbdb54c621eac19c3794594feb99f83a9",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8745ae72d6ba1a5516262b93f99e2456e7bf209b8d820ef43058a6700808aba9",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:952e2a8109aa3bac436ba8938bfaa3f2ae9b83024f31605ad4da326ceda9d3fe",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "positive",
+    "expect_code": ""
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:0704d46bd29e286d3c3f6fa42fbf667ea04aeb1c1bbe3b7e352184c4079c48db",
+        "matter_id": "m-0001",
+        "payload": {
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8431e1743634550b237adfe63b9f03a6e1eb46d8e6c5759d11b2399614f60281",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:0704d46bd29e286d3c3f6fa42fbf667ea04aeb1c1bbe3b7e352184c4079c48db",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:82075bb5858ba30e37aec6da6008d117964b6dd73e9ae593a501d8f8610fcbe6",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:8431e1743634550b237adfe63b9f03a6e1eb46d8e6c5759d11b2399614f60281",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:38a0334f43f039c234ffed74560b1505290aabe646307a623ff8873dd904c2ca",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:82075bb5858ba30e37aec6da6008d117964b6dd73e9ae593a501d8f8610fcbe6",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:6129ef21a1966fa1f5cddedfeee621bd9f321d49fefaf5f7023af8fa96cd78de",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:38a0334f43f039c234ffed74560b1505290aabe646307a623ff8873dd904c2ca",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:ef4bbf91a4468946a3e128d6a1b69bfb2b75808857d2576d2a0cc3c5fc17cd02",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:6129ef21a1966fa1f5cddedfeee621bd9f321d49fefaf5f7023af8fa96cd78de",
+          "acked_seq": 4,
+          "receipt": "sha256:4d77f82c4826c7a2f60c7d78f3f19699af96d2cfcf77e536127723579d1a27ec",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:6129ef21a1966fa1f5cddedfeee621bd9f321d49fefaf5f7023af8fa96cd78de",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:487b917683137fb78e423df84fc380ccc7a5885ed0bca9bc4cb1f03a7b0d45d1",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:6129ef21a1966fa1f5cddedfeee621bd9f321d49fefaf5f7023af8fa96cd78de",
+            "length": 603,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 4,
+            "event_hash": "sha256:6129ef21a1966fa1f5cddedfeee621bd9f321d49fefaf5f7023af8fa96cd78de"
+          }
+        },
+        "prev_hash": "sha256:6129ef21a1966fa1f5cddedfeee621bd9f321d49fefaf5f7023af8fa96cd78de",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:1777dc2920451e85fd9437fc2ec952b4497e976b00ca6f8d6cb3d84bc93ad5f7",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:ef4bbf91a4468946a3e128d6a1b69bfb2b75808857d2576d2a0cc3c5fc17cd02",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8c86e1e2b399ad88a7090277c0a270ade9f1c782a2c94d1d3cd5ff808a1fc640",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:1777dc2920451e85fd9437fc2ec952b4497e976b00ca6f8d6cb3d84bc93ad5f7",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:16c7bcd7967421b0b9e6825bfc8c5658e0ba9a97671e776748a097d4cf7f252e",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:8c86e1e2b399ad88a7090277c0a270ade9f1c782a2c94d1d3cd5ff808a1fc640",
+          "acked_seq": 7,
+          "receipt": "sha256:0c5e138141e5b24501223fd7a24bd988a6a25efeffe5c0f794c6eb7f59daab41",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:8c86e1e2b399ad88a7090277c0a270ade9f1c782a2c94d1d3cd5ff808a1fc640",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:73638b238467e3c7a1b624590f6612686219befe19cab495fd3be7a1b3489079",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:8c86e1e2b399ad88a7090277c0a270ade9f1c782a2c94d1d3cd5ff808a1fc640",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:8c86e1e2b399ad88a7090277c0a270ade9f1c782a2c94d1d3cd5ff808a1fc640"
+          }
+        },
+        "prev_hash": "sha256:8c86e1e2b399ad88a7090277c0a270ade9f1c782a2c94d1d3cd5ff808a1fc640",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:d80da388947f6a9f228f92f8ebb37dc088f0c0c7f186ef98adf3f4147e5acd13",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:16c7bcd7967421b0b9e6825bfc8c5658e0ba9a97671e776748a097d4cf7f252e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:98f6a9d160ecfc32e5b138cfaba1fd269ee628554177cb17d4d7180cb7022043",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:d80da388947f6a9f228f92f8ebb37dc088f0c0c7f186ef98adf3f4147e5acd13",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:14c595c04edfcdbfa1e039b895a07e136b7abf1c96f8feae17fe81090522639f",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:98f6a9d160ecfc32e5b138cfaba1fd269ee628554177cb17d4d7180cb7022043",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "profile-absent",
+    "expect_code": "ENVELOPE"
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:72b8c858ee9ebb7ada018ceaec00bc4a9be3072719db706e1d7d4f8713c70e26",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:d8e17ba17f014d957a41c3c3907a525f6e0462c07c4bbca59c7aa69b32ea5bdf",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "someone-else",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:cf6079d074bf243820a3cccf438e337fe2bacd446b8f7e962841b31b36420385",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "length": 603,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 4,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:66c7b85c7235914ea25a4ec276e5d7d9377de3d02aebc6b05b412771aa8050b2",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:72b8c858ee9ebb7ada018ceaec00bc4a9be3072719db706e1d7d4f8713c70e26",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:701247a7351cd70622067a495594691450a89b4f6c3ea90c5b6d702db4a8c1ad",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:66c7b85c7235914ea25a4ec276e5d7d9377de3d02aebc6b05b412771aa8050b2",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:0629198f116d9f51c977836b27d89a542b699e862e5433479c7fe213b5482074",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:701247a7351cd70622067a495594691450a89b4f6c3ea90c5b6d702db4a8c1ad",
+          "acked_seq": 7,
+          "receipt": "sha256:db0ca40a45a722bce1fedf423cf4781db3be8355110c01638ae299bc1eabd65a",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:701247a7351cd70622067a495594691450a89b4f6c3ea90c5b6d702db4a8c1ad",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:88d6434e10fbef298b271d1435852325277d3b42e79feee1b7c2b7a25f432cd1",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:701247a7351cd70622067a495594691450a89b4f6c3ea90c5b6d702db4a8c1ad",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:701247a7351cd70622067a495594691450a89b4f6c3ea90c5b6d702db4a8c1ad"
+          }
+        },
+        "prev_hash": "sha256:701247a7351cd70622067a495594691450a89b4f6c3ea90c5b6d702db4a8c1ad",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:f69ba8a22d593fd0e678c36c1b2fefb4b9271664655b44baa6f2c1e46af470bb",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:0629198f116d9f51c977836b27d89a542b699e862e5433479c7fe213b5482074",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:9275ace3a5f2f516ed94f56f22f68cddecb38010457cf6a9e8d269802da0c7aa",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:f69ba8a22d593fd0e678c36c1b2fefb4b9271664655b44baa6f2c1e46af470bb",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:a895fe310cd4f235752e444a94a82df0766bf5a1b3e76db960fb9c82c2d09f17",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:9275ace3a5f2f516ed94f56f22f68cddecb38010457cf6a9e8d269802da0c7aa",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "rehash-wrong-tenant",
+    "expect_code": "REFS"
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:22a6c5b71713748d86304de8f84965e8ec931ded9a7f36e983f16ea219952fca",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:8833401a7e1447de8c04d52cffab05d8de428ea7d3d7004d1b85e02b3c7902ac",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:cf6079d074bf243820a3cccf438e337fe2bacd446b8f7e962841b31b36420385",
+            "key": "unrelated",
+            "length": 603,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 4,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:9e3dda524c4074242d75a37c15b1319f3b500e3435120b141ad65a6ac3c41b5e",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:22a6c5b71713748d86304de8f84965e8ec931ded9a7f36e983f16ea219952fca",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:f5d37a84e701aff23f1a88d75e22a7b949091e4f9e508a85d3b3404ddd233a05",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:9e3dda524c4074242d75a37c15b1319f3b500e3435120b141ad65a6ac3c41b5e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:9ce734048e6f85ea808fbab4e1b68a99e0636b30f6b20332ba219e8d5aaeb94e",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:f5d37a84e701aff23f1a88d75e22a7b949091e4f9e508a85d3b3404ddd233a05",
+          "acked_seq": 7,
+          "receipt": "sha256:059268b25cb5c1a408e4c188e16c12011c14551b4b90de9588ccd87426679fbb",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:f5d37a84e701aff23f1a88d75e22a7b949091e4f9e508a85d3b3404ddd233a05",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:667300ee7e9b1ab59bea570ab8f25f0c18eb8d251229a7005ba29ed1f58c7acc",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:f5d37a84e701aff23f1a88d75e22a7b949091e4f9e508a85d3b3404ddd233a05",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:f5d37a84e701aff23f1a88d75e22a7b949091e4f9e508a85d3b3404ddd233a05"
+          }
+        },
+        "prev_hash": "sha256:f5d37a84e701aff23f1a88d75e22a7b949091e4f9e508a85d3b3404ddd233a05",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:85d7e9a8eed66fb375f484a7aeae1002cc5e358fc6d71079d80b794ffe623bc8",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:9ce734048e6f85ea808fbab4e1b68a99e0636b30f6b20332ba219e8d5aaeb94e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:e4dd9005a3c0a005ca221eba1b4377724817503d4ed34e7d7d0bc1fb4d3a189a",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:85d7e9a8eed66fb375f484a7aeae1002cc5e358fc6d71079d80b794ffe623bc8",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8591c9e86192c0f0c43e80bad4283ba5259ee28cfc30eee98ba4faf0d83517e1",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:e4dd9005a3c0a005ca221eba1b4377724817503d4ed34e7d7d0bc1fb4d3a189a",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "rehash-wrong-key",
+    "expect_code": "REFS"
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:5fcaab53441b057fa6a82c3c88b0cefca2082cc2e40ce6fab8297e721207030a",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:48c30d6f8bbbb61783604f4a028a5133fae5c9f9bffbe1c8d7115258d120c8c4",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "null",
+            "sha256": "sha256:cf6079d074bf243820a3cccf438e337fe2bacd446b8f7e962841b31b36420385",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "length": 603,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 4,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:99d102d562733e572d68d69e7f0fab5fee7ad59d64699be8d26f93fd27530a2e",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:5fcaab53441b057fa6a82c3c88b0cefca2082cc2e40ce6fab8297e721207030a",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:0cce666c65494a2333926090a7282b2736c5cd921397e2620feb706d339b2059",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:99d102d562733e572d68d69e7f0fab5fee7ad59d64699be8d26f93fd27530a2e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:fad4b751545f2c175106051329cf42e2e21c41cf84d6f7180f369e4df8d76e78",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:0cce666c65494a2333926090a7282b2736c5cd921397e2620feb706d339b2059",
+          "acked_seq": 7,
+          "receipt": "sha256:de27f6ddada00f6eaa3759923fa3824fcb81c76de8a4f178431de0c0b8832b9d",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:0cce666c65494a2333926090a7282b2736c5cd921397e2620feb706d339b2059",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:08cb401e76581b1be8bffd93afee2ce84556a57b4f7cf39c0634b2d9837fbc66",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:0cce666c65494a2333926090a7282b2736c5cd921397e2620feb706d339b2059",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:0cce666c65494a2333926090a7282b2736c5cd921397e2620feb706d339b2059"
+          }
+        },
+        "prev_hash": "sha256:0cce666c65494a2333926090a7282b2736c5cd921397e2620feb706d339b2059",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:18bc1a995e50799047010422521389be768530f01a2b265e662cf8392b36214f",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:fad4b751545f2c175106051329cf42e2e21c41cf84d6f7180f369e4df8d76e78",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:38c66584f07566c4b0f3aebfbbc4f04d009557ce1f3d85e08d83f36166d77b94",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:18bc1a995e50799047010422521389be768530f01a2b265e662cf8392b36214f",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8cdf43a51e886edf184e1120a3e4798bb3c355ed6ae3c6f9677fb755717c676f",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:38c66584f07566c4b0f3aebfbbc4f04d009557ce1f3d85e08d83f36166d77b94",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "rehash-wrong-version",
+    "expect_code": "REFS"
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:61a09a1f33524db599b157577f02862427e8471951f02a36402ab67561441d2e",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:6102243cad3ee31536daf728e59d786bf25ae41e1555d0cf17634e1cc559cc5c",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:e2247e2d0a18ae64dddde4817edc2667df1a8edc117b95edbe27cd640cd7d64f",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "length": 603,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 4,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:46158f04495f3d16c53214444b4e4ce9888976247232b4adbfaad0ab338d08ed",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:61a09a1f33524db599b157577f02862427e8471951f02a36402ab67561441d2e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:e22744b50287b14351d7230ce647a577a495255b3793244627cf5ea0a3f2a557",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:46158f04495f3d16c53214444b4e4ce9888976247232b4adbfaad0ab338d08ed",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:e10cfbf994e277dfb177cb14b65cd2b29ff29e0ec6111173cb7c34c408e8aefe",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:e22744b50287b14351d7230ce647a577a495255b3793244627cf5ea0a3f2a557",
+          "acked_seq": 7,
+          "receipt": "sha256:d425adf86feb418a65a447797a29b3eed633d8b3c9f9c7e8ecdc7b569cbd862e",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:e22744b50287b14351d7230ce647a577a495255b3793244627cf5ea0a3f2a557",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:7c5a14111b984db1ccd1b779c0bcd8176f547b48de9557814263430a39589afd",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:e22744b50287b14351d7230ce647a577a495255b3793244627cf5ea0a3f2a557",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:e22744b50287b14351d7230ce647a577a495255b3793244627cf5ea0a3f2a557"
+          }
+        },
+        "prev_hash": "sha256:e22744b50287b14351d7230ce647a577a495255b3793244627cf5ea0a3f2a557",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:837e7ccf284c84220ee27e3877f3a7cb7e78955ff9afb83813fe9315b764aab0",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:e10cfbf994e277dfb177cb14b65cd2b29ff29e0ec6111173cb7c34c408e8aefe",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:e5e1c223931651c6199e1d630354fd414501ad70f7bb720a7d26349bc1713504",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:837e7ccf284c84220ee27e3877f3a7cb7e78955ff9afb83813fe9315b764aab0",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:359f55bde78ebc769b504b6b9475a7878f97b829c3410ef8b348db8bd746c689",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:e5e1c223931651c6199e1d630354fd414501ad70f7bb720a7d26349bc1713504",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "rehash-wrong-sha256",
+    "expect_code": "REFS"
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:42296bf863580263d792374af7a9d8ca0464f5a9d25a1318cc197d4b9a098970",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:432aa3f585456f625f3b7c2c294afa95e5a2c2db2301ea7f990b4e45160835c2",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:cf6079d074bf243820a3cccf438e337fe2bacd446b8f7e962841b31b36420385",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "length": 0,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 4,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:1095cfec51e54806abf5a6790f962bacc5f8043f9e6327d75d80e6794bca69d5",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:42296bf863580263d792374af7a9d8ca0464f5a9d25a1318cc197d4b9a098970",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:4aa7f24cbfbb37a3b7ee05cf96a4bfc22a333501f31aa81f42ebd12200ad5a1b",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:1095cfec51e54806abf5a6790f962bacc5f8043f9e6327d75d80e6794bca69d5",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:c4118b0f5b431eb9c89bca2ec86114619b3912bb0a411a1c50488db41c7cea16",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:4aa7f24cbfbb37a3b7ee05cf96a4bfc22a333501f31aa81f42ebd12200ad5a1b",
+          "acked_seq": 7,
+          "receipt": "sha256:2ceb877d4e88a99a49e0a412c55dd20ebedadd04f4f485cf017c92089153654b",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:4aa7f24cbfbb37a3b7ee05cf96a4bfc22a333501f31aa81f42ebd12200ad5a1b",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:ee8e719af47c883534979fef4a81f405660aa1c45f21167a9c5802037f15ab8c",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:4aa7f24cbfbb37a3b7ee05cf96a4bfc22a333501f31aa81f42ebd12200ad5a1b",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:4aa7f24cbfbb37a3b7ee05cf96a4bfc22a333501f31aa81f42ebd12200ad5a1b"
+          }
+        },
+        "prev_hash": "sha256:4aa7f24cbfbb37a3b7ee05cf96a4bfc22a333501f31aa81f42ebd12200ad5a1b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:b890354248a92ae19047f177f9d0f458db5e019c1f281ef7b2fb435f0a6b1bee",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:c4118b0f5b431eb9c89bca2ec86114619b3912bb0a411a1c50488db41c7cea16",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:1acdf28eb26ea1be1a04f31caeb808d2d38abb46049938abe76d53331303eb94",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:b890354248a92ae19047f177f9d0f458db5e019c1f281ef7b2fb435f0a6b1bee",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:40c67116678dddfb8654334503b549fbcd4e4def7bb59f8a40ce50ba83a86d94",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:1acdf28eb26ea1be1a04f31caeb808d2d38abb46049938abe76d53331303eb94",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "rehash-wrong-length",
+    "expect_code": "REFS"
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:1637367f424bd5126415a8b939c20ff5bf43e895c056f87fab1e0101d700f0bf",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:9ef3e987ffcf0a5052f6256c2f4e0ada410f463f0fedc33d24ffc9ce4f8a6494",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:cf6079d074bf243820a3cccf438e337fe2bacd446b8f7e962841b31b36420385",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "length": 603,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 123,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:51528ebd46faac5380f678b1a73be60aba0a3d425d13223eddf6239cccb1269d",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:1637367f424bd5126415a8b939c20ff5bf43e895c056f87fab1e0101d700f0bf",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:4e6ba354098864642f22924490a375bda9a8548a15f58eaa72aecb2ffb40b139",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:51528ebd46faac5380f678b1a73be60aba0a3d425d13223eddf6239cccb1269d",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:033ad8c179da7731ee96ce4fd996ae64212ef6500a9b0cb20bdc764552e0437a",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:4e6ba354098864642f22924490a375bda9a8548a15f58eaa72aecb2ffb40b139",
+          "acked_seq": 7,
+          "receipt": "sha256:f8511bdd46a3d4e7a0a051a721dd4c810eba40c76612dee92a64e279b6ea5baf",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:4e6ba354098864642f22924490a375bda9a8548a15f58eaa72aecb2ffb40b139",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:21683f79133846cd84dde27ee571eb449946646b9918e954dc95ba9ccb60a13d",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:4e6ba354098864642f22924490a375bda9a8548a15f58eaa72aecb2ffb40b139",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:4e6ba354098864642f22924490a375bda9a8548a15f58eaa72aecb2ffb40b139"
+          }
+        },
+        "prev_hash": "sha256:4e6ba354098864642f22924490a375bda9a8548a15f58eaa72aecb2ffb40b139",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:ae550ddefda706811098abeb3f8152285b67550b794494f3b6a12947b88382ae",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:033ad8c179da7731ee96ce4fd996ae64212ef6500a9b0cb20bdc764552e0437a",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:7eac64f59db502d28ede185e0b0d5b6335eaccc423f73f8fbb068f146ae9e849",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:ae550ddefda706811098abeb3f8152285b67550b794494f3b6a12947b88382ae",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:6fb19fe08b9428664331014c6921fece132d8ae8f7116f358f24ffffba85bc40",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:7eac64f59db502d28ede185e0b0d5b6335eaccc423f73f8fbb068f146ae9e849",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "rehash-wrong-seq",
+    "expect_code": "REFS"
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:0bfc9db8a2cad07f6928e31a48bf1aff3fd5ec64b0d1c9f17c759569647c52fd",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:9c886df350bc03c70ddf9408dbca7e5955059070220f90a00b3f74be002a1659",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:cf6079d074bf243820a3cccf438e337fe2bacd446b8f7e962841b31b36420385",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "length": 603,
+            "mode": "GOVERNANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 4,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:d50c3a10064c19e43aa088cf33e6e8bd495034b31b8a7310b9ed0058a1980cfa",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:0bfc9db8a2cad07f6928e31a48bf1aff3fd5ec64b0d1c9f17c759569647c52fd",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:d1f47bc0f8ba4321c99188589de87d63b675634d1daf720745876ffd8e3458f3",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:d50c3a10064c19e43aa088cf33e6e8bd495034b31b8a7310b9ed0058a1980cfa",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:0e2b110c3f7b8e805979e303c9a4266d967b21d1beeaecdb5f228bca8e230d91",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:d1f47bc0f8ba4321c99188589de87d63b675634d1daf720745876ffd8e3458f3",
+          "acked_seq": 7,
+          "receipt": "sha256:837c41a9910bc26f3ce17bfda808ded0fee7cdba3da3e0ae403c88a321040ec8",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:d1f47bc0f8ba4321c99188589de87d63b675634d1daf720745876ffd8e3458f3",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:c55bff3dcd032b405c481d120580677b99cc1ad856a9031b68ec87adba843c13",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:d1f47bc0f8ba4321c99188589de87d63b675634d1daf720745876ffd8e3458f3",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:d1f47bc0f8ba4321c99188589de87d63b675634d1daf720745876ffd8e3458f3"
+          }
+        },
+        "prev_hash": "sha256:d1f47bc0f8ba4321c99188589de87d63b675634d1daf720745876ffd8e3458f3",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:3bfecab63c2e28bcfa3af157ed5fa240c2b41db9f6663691cfdccc7a4a011328",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:0e2b110c3f7b8e805979e303c9a4266d967b21d1beeaecdb5f228bca8e230d91",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:bf44fc150715133b8bb622243db0e149f08f439de5be9358ff31317920fb3774",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:3bfecab63c2e28bcfa3af157ed5fa240c2b41db9f6663691cfdccc7a4a011328",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:b2f0866e11d62ee277ecb6542ba2d5bad0d18170db5adbadd768d42a2910b446",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:bf44fc150715133b8bb622243db0e149f08f439de5be9358ff31317920fb3774",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "rehash-wrong-mode",
+    "expect_code": "REFS"
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:f6a6a169c39e466eab5c128e5109add92006885877e87a93d473f006b8320ce4",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:c2bf159e8d0ffa7953c10c9fdc287a130946c5d44c77c9bdd534eee1e2499670",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:cf6079d074bf243820a3cccf438e337fe2bacd446b8f7e962841b31b36420385",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "length": 603,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00+00:00",
+            "seq": 4,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:d6560431ec1861893026bbbdd699ff4be6a6a96caab917216dfcee6f790e6d4d",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:f6a6a169c39e466eab5c128e5109add92006885877e87a93d473f006b8320ce4",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:55d4f29b0a89d7220f09506c3199acf6b13fcb00972f651bc6e05fe26829a6a2",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:d6560431ec1861893026bbbdd699ff4be6a6a96caab917216dfcee6f790e6d4d",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:6bd1ea441d469dbe383fe2e9813529dff3bc014c6eec9f7c0c9d83dfa93a4a17",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:55d4f29b0a89d7220f09506c3199acf6b13fcb00972f651bc6e05fe26829a6a2",
+          "acked_seq": 7,
+          "receipt": "sha256:6f4b7e3614d146fd12f4ff0bcd66f641f24e8b666b0b0e78f9ff4f2c76c943b4",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:55d4f29b0a89d7220f09506c3199acf6b13fcb00972f651bc6e05fe26829a6a2",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:6dd7e0e9c8a4699b988d9f917c9f38ae12e850d1c40fbad0318c259afcada9f2",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:55d4f29b0a89d7220f09506c3199acf6b13fcb00972f651bc6e05fe26829a6a2",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:55d4f29b0a89d7220f09506c3199acf6b13fcb00972f651bc6e05fe26829a6a2"
+          }
+        },
+        "prev_hash": "sha256:55d4f29b0a89d7220f09506c3199acf6b13fcb00972f651bc6e05fe26829a6a2",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:c193901742eea85f95347c952f6c3fcdd71b5fc7a2512a6d90bbfc8e3f98a0c2",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:6bd1ea441d469dbe383fe2e9813529dff3bc014c6eec9f7c0c9d83dfa93a4a17",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8b9c11aba505263209e68293f1dfa485d03e43a9ce90ff12528ce1a8a9d4b227",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:c193901742eea85f95347c952f6c3fcdd71b5fc7a2512a6d90bbfc8e3f98a0c2",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:0eed46b219d87723e1364ad005f86436954802f40c243a8c8481c015fa78fa6c",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:8b9c11aba505263209e68293f1dfa485d03e43a9ce90ff12528ce1a8a9d4b227",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "rehash-wrong-retain_until",
+    "expect_code": "REFS"
+  },
+  {
+    "description": "complete-turn",
+    "events": [
+      {
+        "actor": {
+          "id": "u-custodian-1",
+          "kind": "user"
+        },
+        "event_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "matter_id": "m-0001",
+        "payload": {
+          "evidence_profile": "charter-s3-compliance-v1",
+          "request_id": "synthetic-request",
+          "custodian_id": "u-custodian-1",
+          "input": {
+            "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+            "bytes": 30
+          },
+          "objects": [
+            {
+              "sha256": "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6",
+              "bytes": 30
+            }
+          ]
+        },
+        "prev_hash": null,
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:00.000Z",
+        "schema_version": "1.0.0",
+        "seq": 0,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_received"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "matter_id": "m-0001",
+        "payload": {
+          "decision": "allow",
+          "policy_version": "pol-1",
+          "route": "ep-1",
+          "destination": {
+            "provider": "test-a",
+            "endpoint_id": "ep-1",
+            "model_id": "test-model-a"
+          }
+        },
+        "prev_hash": "sha256:a5a4518d57a1a07bf563c55c234fa6e4e4f170f5cd33261ed209c4c8ba547224",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:01.000Z",
+        "schema_version": "1.0.0",
+        "seq": 1,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "policy_decision"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "matter_id": "m-0001",
+        "payload": {
+          "units": 1000
+        },
+        "prev_hash": "sha256:2c6a0687ca8880a6354bebfa3f8defd11278a25a35a55a2119414556957c091e",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:02.000Z",
+        "schema_version": "1.0.0",
+        "seq": 2,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_reserved"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "matter_id": "m-0001",
+        "payload": {
+          "objects": [
+            {
+              "bytes": 33,
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114"
+            },
+            {
+              "bytes": 94,
+              "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+            }
+          ],
+          "request_sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339",
+          "sources": [
+            {
+              "sha256": "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114",
+              "source_id": "doc-1",
+              "version": 2
+            }
+          ]
+        },
+        "prev_hash": "sha256:8791fa0328bbb17d07ea3c22679c8f9e1f280efe4b160e5add36c68c4320af9b",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:03.000Z",
+        "schema_version": "1.0.0",
+        "seq": 3,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "context_sealed"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "request": {
+            "bytes": 94,
+            "sha256": "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339"
+          },
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:200c40ee2ecdf8842ddf46e5e526addc17e1f1c018b974feb1f0c125170c59bc",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:04.000Z",
+        "schema_version": "1.0.0",
+        "seq": 4,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "disclosure_intent"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:9ea6a0578aa87bf4993b6f7f21a083690715a640e1e6844b4019b49de9e4d3a9",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+          "acked_seq": 4,
+          "receipt": "sha256:0758ccf28e4ef47ce0f03fbbcef88de85a4bad19feccf8b6bbe672bdef7af013",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-5",
+            "sha256": "sha256:cf6079d074bf243820a3cccf438e337fe2bacd446b8f7e962841b31b36420385",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "length": 603,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 4,
+            "event_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+            "unexpected": "unknown field"
+          }
+        },
+        "prev_hash": "sha256:59b08bdd56b5ba8ae66d8bc65d3dc4a25bcf11d35dada87da36db67485ba6820",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:05.000Z",
+        "schema_version": "1.0.0",
+        "seq": 5,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:5b5aeee6f01c8074f729abff5919c1962ea697be995aadbcb76f111d84ab49ca",
+        "matter_id": "m-0001",
+        "payload": {
+          "endpoint_id": "ep-1",
+          "provider": "test-a",
+          "model_id": "test-model-a"
+        },
+        "prev_hash": "sha256:9ea6a0578aa87bf4993b6f7f21a083690715a640e1e6844b4019b49de9e4d3a9",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:06.000Z",
+        "schema_version": "1.0.0",
+        "seq": 6,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "provider_accepted"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:ec2c3698aaffd778ac1a37b9d8c2577c69fdea545cb3585dbcec29578c3c8240",
+        "matter_id": "m-0001",
+        "payload": {
+          "complete": true,
+          "objects": [
+            {
+              "bytes": 40,
+              "sha256": "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8"
+            }
+          ]
+        },
+        "prev_hash": "sha256:5b5aeee6f01c8074f729abff5919c1962ea697be995aadbcb76f111d84ab49ca",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:07.000Z",
+        "schema_version": "1.0.0",
+        "seq": 7,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "output_recorded"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:3e444cab75a8ce162c2ca682b37b51c5a1f247882229a13623cabfc051cf9d70",
+        "matter_id": "m-0001",
+        "payload": {
+          "acked_event_hash": "sha256:ec2c3698aaffd778ac1a37b9d8c2577c69fdea545cb3585dbcec29578c3c8240",
+          "acked_seq": 7,
+          "receipt": "sha256:e82a827c31eb9997b06e3239ac19b364387521a5aa73b02d81d4e57145d2b5a8",
+          "storage_level": "s3:object-lock:COMPLIANCE",
+          "retained_receipt": {
+            "deployment": "synthetic-deployment",
+            "tenant": "t-0001",
+            "evidence_id": "sha256:ec2c3698aaffd778ac1a37b9d8c2577c69fdea545cb3585dbcec29578c3c8240",
+            "bucket": "charter-c04-synthetic",
+            "version": "synthetic-v-8",
+            "sha256": "sha256:a91e9c0dafe8dc57468e0aa0e3e3050ea0de41e9dd6777886987ac2b7d9c33e8",
+            "key": "charter/v1/synthetic-deployment/t-0001/data/events/turn-0001/sha256:ec2c3698aaffd778ac1a37b9d8c2577c69fdea545cb3585dbcec29578c3c8240",
+            "length": 552,
+            "mode": "COMPLIANCE",
+            "retain_until": "2030-01-01T00:00:00Z",
+            "seq": 7,
+            "event_hash": "sha256:ec2c3698aaffd778ac1a37b9d8c2577c69fdea545cb3585dbcec29578c3c8240"
+          }
+        },
+        "prev_hash": "sha256:ec2c3698aaffd778ac1a37b9d8c2577c69fdea545cb3585dbcec29578c3c8240",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:08.000Z",
+        "schema_version": "1.0.0",
+        "seq": 8,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "evidence_ack"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:2725ff0c1e2d48b649649b99e75b6b7430de8e6b780b002b4be49013ab0d6364",
+        "matter_id": "m-0001",
+        "payload": {},
+        "prev_hash": "sha256:3e444cab75a8ce162c2ca682b37b51c5a1f247882229a13623cabfc051cf9d70",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:09.000Z",
+        "schema_version": "1.0.0",
+        "seq": 9,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "response_released"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:f3568eb0ee723d63d8ffce71ccdfc9e89ef67d3f099a62704897fe6e8f4f8ea2",
+        "matter_id": "m-0001",
+        "payload": {
+          "basis": "provider_reported",
+          "units": 420
+        },
+        "prev_hash": "sha256:2725ff0c1e2d48b649649b99e75b6b7430de8e6b780b002b4be49013ab0d6364",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:10.000Z",
+        "schema_version": "1.0.0",
+        "seq": 10,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "usage_settled"
+      },
+      {
+        "actor": {
+          "id": "charter-control-plane",
+          "kind": "service"
+        },
+        "event_hash": "sha256:44b89dd4a082aac909b7c7a37e9b8e5a4b6aeacbddb014f5639b3cee1812a82f",
+        "matter_id": "m-0001",
+        "payload": {
+          "outcome": "completed"
+        },
+        "prev_hash": "sha256:f3568eb0ee723d63d8ffce71ccdfc9e89ef67d3f099a62704897fe6e8f4f8ea2",
+        "project_id": "p-alpha",
+        "recorded_at": "2026-01-15T10:00:11.000Z",
+        "schema_version": "1.0.0",
+        "seq": 11,
+        "tenant_id": "t-0001",
+        "turn_id": "turn-0001",
+        "type": "turn_completed"
+      }
+    ],
+    "objects": {
+      "sha256:0b9b87c899533b6f5adde0f0e16065c6298db63df7374173c36d317d08806339": "{\"model\":\"test-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize SYNTHETIC-DOC-1 v2\"}]}",
+      "sha256:827e7942780eaec4ac02ac0f62bc430d1755bea1bee797e90b2421a7c059d964": "Synthetic summary of SYNTH",
+      "sha256:8423a722250bb19bb8d7013d3cc83fc814fb681aa051fc4360e0826223a86114": "SYNTHETIC-DOC-1 version 2 content",
+      "sha256:db49a80f840333005dda0000cc4fa927a629dbed1f1ca1dcf4db5096375c92c8": "Synthetic summary of SYNTHETIC-DOC-1 v2.",
+      "sha256:94f2862b3aa4020f8fca122fa3e6f6d3087be327c84f9f524976f51a4961d9b6": "synthetic exact original input"
+    },
+    "synthetic": true,
+    "name": "rehash-wrong-unexpected",
+    "expect_code": "REFS"
+  }
+]
