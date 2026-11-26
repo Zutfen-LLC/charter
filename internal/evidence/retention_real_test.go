@@ -487,7 +487,9 @@ func runRealRetainedOverrun(t *testing.T, ctx context.Context, pg, budget PG, ow
 				}
 				return b
 			}
-			ledger := budget.WithFence(f)
+			// Match serving: the fence owns evidence I/O, while the ledger uses
+			// its distinct restricted budget login and never borrows the evidence session.
+			ledger := budget
 			const maximum, floor = 67, 85
 			req := Request{TenantID: tenant, ProjectID: project, MatterID: project, CustodianID: "synthetic-custodian", IdempotencyKey: "stable", RequestID: "synthetic-request", Input: []byte("synthetic"), ModelID: "det-a"}
 			var turn string
@@ -527,7 +529,7 @@ func runRealRetainedOverrun(t *testing.T, ctx context.Context, pg, budget PG, ow
 			successor := acquire()
 			options.Fence, options.Store = successor, s3
 			retained := makeBackend(options)
-			nextLedger := budget.WithFence(successor)
+			nextLedger := budget
 			next := &Recorder{Backend: retained, Fence: successor, Governance: plan, Accounting: nextLedger.ReconcileBudget}
 			for range 2 {
 				if _, err := next.Recover(ctx, time.Time{}); err != nil {
