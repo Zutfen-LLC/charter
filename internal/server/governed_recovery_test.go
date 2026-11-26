@@ -13,6 +13,7 @@ import (
 
 	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/routing"
+	"github.com/Zutfen-LLC/charter/internal/testdb"
 )
 
 type c05EvidenceFailure struct {
@@ -154,8 +155,21 @@ func TestC05AmbiguousBudgetCommitAcknowledgments(t *testing.T) {
 	}
 }
 
+type c05LostOverrunAck struct {
+	evidence.PG
+	injected *atomic.Int32
+}
+
+func (b c05LostOverrunAck) NoteOverrun(ctx context.Context, id string, units int64) error {
+	if err := b.PG.NoteOverrun(ctx, id, units); err != nil {
+		return err
+	}
+	b.injected.Add(1)
+	return errors.New("synthetic lost acknowledgment after committed overrun")
+}
+
 func TestC05OverrunCrossStoreRecovery(t *testing.T) {
-	for _, mode := range []string{"floor-before-evidence-failure", "floor-write-rejected", "malformed", "envelope-overflow"} {
+	for _, mode := range []string{"floor-before-evidence-failure", "floor-write-rejected", "committed-ack-lost", "malformed", "envelope-overflow"} {
 		t.Run(mode, func(t *testing.T) {
 			e := newEnv(t)
 			ctx := context.Background()
@@ -192,7 +206,7 @@ func TestC05OverrunCrossStoreRecovery(t *testing.T) {
 			cfg.Endpoint = receiver.URL
 			cfg.MaxOutputBytes = 8
 			backend := evidence.Backend(b)
-			if mode == "floor-before-evidence-failure" {
+			if mode == "floor-before-evidence-failure" || mode == "committed-ack-lost" {
 				backend = c05EvidenceFailure{Backend: b, event: "usage_settled"}
 			}
 			if mode == "floor-write-rejected" {
@@ -202,7 +216,12 @@ func TestC05OverrunCrossStoreRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			e.auth.Evidence = &evidence.Recorder{Backend: backend, Governance: routing.Governance(cfg, b, false, nil), Accounting: b.ReconcileBudget}
+			var injected atomic.Int32
+			var ledger routing.Budget = b
+			if mode == "committed-ack-lost" {
+				ledger = c05LostOverrunAck{PG: b, injected: &injected}
+			}
+			e.auth.Evidence = &evidence.Recorder{Backend: backend, Governance: routing.Governance(cfg, ledger, false, nil), Accounting: b.ReconcileBudget}
 			const body = `{"input":"synthetic","model_id":"local-http"}`
 			if code, out, _ := e.post("alice", e.p1, body, "Idempotency-Key", "stable"); code != 503 || strings.Contains(out, oversized) {
 				t.Fatalf("withholding: %d %s", code, out)
@@ -220,13 +239,16 @@ func TestC05OverrunCrossStoreRecovery(t *testing.T) {
 			wantCharge := wantFloor
 			floor, actual, state, unknown, frozen := read("before-restart")
 			switch mode {
-			case "floor-before-evidence-failure":
+			case "floor-before-evidence-failure", "committed-ack-lost":
 				if floor != wantFloor || actual != nil || state != "open" || !frozen {
 					t.Error("floor and freeze must survive loss of terminal evidence")
 				}
 			case "floor-write-rejected":
-				if floor != 0 || actual != nil || state != "open" {
-					t.Error("failed floor write must not allow below-floor settlement")
+				if floor != 0 || actual != nil || state != "open" || !frozen {
+					t.Error("failed floor write must freeze with no below-floor settlement")
+				}
+				if code, _, _ := e.post("alice", e.p1, body, "Idempotency-Key", "while-floor-unavailable"); code != 403 {
+					t.Errorf("new admission allowed during failed floor persistence: %d", code)
 				}
 				if _, err := e.st.DB.Exec(ctx, `DROP TRIGGER reject_floor ON evidence_budget_reservations`); err != nil {
 					t.Fatal(err)
@@ -238,12 +260,21 @@ func TestC05OverrunCrossStoreRecovery(t *testing.T) {
 					t.Error("unquantifiable exposure must freeze without inventing a floor or exact cost")
 				}
 			}
-			rr := &evidence.Recorder{Backend: b, Accounting: b.ReconcileBudget}
+			wantLost := int32(0)
+			if mode == "committed-ack-lost" {
+				wantLost = 1
+			}
+			if injected.Load() != wantLost {
+				t.Fatalf("committed-ack injection count=%d", injected.Load())
+			}
+			t.Logf("committed_overrun_ack_losses=%d", injected.Load())
+			restarted := evidence.PG{DB: testdb.Clone(t, e.st.DB)}
+			rr := &evidence.Recorder{Backend: restarted, Accounting: restarted.ReconcileBudget}
 			for range 2 {
 				if _, err := rr.Recover(ctx, time.Time{}); err != nil {
 					t.Fatal(err)
 				}
-				if err := b.RecoverBudget(ctx, b); err != nil {
+				if err := restarted.RecoverBudget(ctx, restarted); err != nil {
 					t.Fatal(err)
 				}
 			}
