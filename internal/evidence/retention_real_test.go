@@ -282,7 +282,7 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 				if err := <-first; err != nil {
 					t.Fatal(err)
 				}
-				if r, err := rec.Process(ctx, req, model, nil); err != nil || !r.Replayed || dispatch.Load() != 1 || string(r.Output) != string(out) {
+				if r, err := rec.Process(ctx, req, model, func(context.Context) error { return nil }); err != nil || !r.Replayed || dispatch.Load() != 1 || string(r.Output) != string(out) {
 					t.Fatalf("delivery-only replay: calls=%d err=%v", dispatch.Load(), err)
 				}
 				return
@@ -352,6 +352,9 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 					}
 					if errs := VerifyRetentionFull(events, objects); len(errs) != 0 || string(objects[SHA256(out)]) != string(out) {
 						t.Fatalf("recovery retained evidence did not verify: %v", errs)
+					}
+					if result, err := clean.Process(ctx, req, model, nil); !errors.Is(err, ErrFailClosed) || len(result.Output) != 0 || result.Replayed || dispatch.Load() != 1 {
+						t.Fatalf("missing delivery authorization did not fail closed: calls=%d err=%v", dispatch.Load(), err)
 					}
 					revoked := errors.New("fixture membership revoked")
 					for _, replay := range []struct {

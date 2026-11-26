@@ -93,7 +93,10 @@ func TestRetainedRecorderReconstructsAndIgnoresLatestSubstitution(t *testing.T) 
 	if n != 0 || err != nil {
 		t.Fatalf("startup recovery: %d %v", n, err)
 	}
-	r, err = rec.Process(ctx, req, call, nil)
+	if withheld, err := rec.Process(ctx, req, call, nil); !errors.Is(err, ErrFailClosed) || len(withheld.Output) != 0 || withheld.Replayed || calls.Load() != 1 {
+		t.Fatalf("retained replay without a delivery gate: calls=%d output_bytes=%d err=%v", calls.Load(), len(withheld.Output), err)
+	}
+	r, err = rec.Process(ctx, req, call, func(context.Context) error { return nil })
 	if err != nil || !r.Replayed || string(r.Output) != string(out) || calls.Load() != 1 {
 		t.Fatalf("unexpected replay: calls=%d err=%v", calls.Load(), err)
 	}

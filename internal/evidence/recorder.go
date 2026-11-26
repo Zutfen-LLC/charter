@@ -445,6 +445,9 @@ func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(
 	if err := rc.verifyRetained(ctx, t, evs); err != nil {
 		return bad("retained readback: %v", err)
 	}
+	if retainedProfile && gate == nil {
+		return bad("fresh delivery authorization is required")
+	}
 	if err := rc.finalGate(ctx, gate, "delivery"); err != nil {
 		return Result{}, err
 	}
