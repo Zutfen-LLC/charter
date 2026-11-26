@@ -36,6 +36,18 @@ controls = {
 for labels in controls.values():
     assert all(results[x]['passed'] for x in labels)
 
+if len(sys.argv) > 1 and sys.argv[1] in ('unsafe-default', 'restore-default'):
+    # Change only the bucket default in this disposable lab. No object version
+    # is edited. The admin restores the qualified default before any turn runs.
+    mode = 'GOVERNANCE' if sys.argv[1] == 'unsafe-default' else 'COMPLIANCE'
+    body = p['xml']('ObjectLockConfiguration',
+        '<ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention>'
+        f'<Mode>{mode}</Mode><Days>1</Days></DefaultRetention></Rule>')
+    result = ad.call('PUT', protected, query={'object-lock':''}, data=body)
+    observed = rt.call('GET', protected, query={'object-lock':''})
+    assert result.status in (200, 204) and observed.status == 200 and p['field'](observed.raw, 'Mode') == mode
+    sys.exit(0)
+
 if len(sys.argv) > 1 and sys.argv[1] == 'substitute':
     run_dir = rd.parent / ('drill-' + p['RUN'])
     items = json.loads((run_dir / 'exact-version-inventory.json').read_bytes())

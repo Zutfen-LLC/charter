@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -111,13 +112,31 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 		}
 	}
 	env = append(env, "CHARTER_OIDC_ISSUER="+idp.Issuer, "CHARTER_OIDC_JWKS_URL="+idp.JWKSURL(), "CHARTER_OIDC_AUDIENCE=charter-retention-drill", "CHARTER_OIDC_TENANT_ID=synthetic-a", "CHARTER_OIDC_REQUIRED_SCOPE=charter.access", "CHARTER_OIDC_INSECURE_LOOPBACK_FIXTURE=1")
+	sorted := func(items []string) []string { return slices.Sorted(slices.Values(items)) }
+	newServer := func(settings []string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, absent("CHARTER_DRILL_BINARY"), "serve")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
+		cmd.Env = settings
+		return cmd
+	}
+	for _, tc := range []struct{ key, value, expected string }{
+		{"CHARTER_EVIDENCE_BACKEND", "", "evidence backend conflicts with the database binding"},
+		{"CHARTER_S3_SYNTHETIC_OPT_IN", "", "incomplete or unsafe synthetic S3 storage configuration"},
+		{"CHARTER_S3_ENDPOINT", "http://storage.invalid:7481", "requires a literal loopback storage endpoint"},
+		{"CHARTER_S3_RUNTIME_ACCESS_KEY", "wrong-synthetic-identity", "qualification is missing, expired, invalid"},
+		{"CHARTER_S3_ADMIN_ACCESS_KEY", "synthetic-not-a-secret", "administrative or ambient credential present"},
+	} {
+		settings := append(append([]string(nil), env...), tc.key+"="+tc.value)
+		out, err := newServer(settings).CombinedOutput()
+		if err == nil || !bytes.Contains(out, []byte(tc.expected)) {
+			t.Fatalf("startup refusal for %s did not reach the expected guard: %v\n%s", tc.key, err, out)
+		}
+	}
 	starter := func(label string) func() {
 		t.Helper()
 		f, e := os.OpenFile(filepath.Join(root, label+".log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		must(e)
-		cmd := exec.CommandContext(ctx, absent("CHARTER_DRILL_BINARY"), "serve")
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
-		cmd.Env = env
+		cmd := newServer(env)
 		cmd.Stdout = f
 		cmd.Stderr = f
 		must(cmd.Start())
@@ -136,6 +155,20 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 			if e == nil {
 				_ = r.Body.Close()
 				if r.StatusCode == 200 {
+					proc := fmt.Sprintf("/proc/%d/", cmd.Process.Pid)
+					actual, e := os.ReadFile(proc + "environ")
+					must(e)
+					if !slices.Equal(sorted(strings.Split(strings.TrimSuffix(string(actual), "\x00"), "\x00")), sorted(env)) {
+						t.Fatal("serving process environment differs from the qualified runtime configuration")
+					}
+					statement, e := loadQualification(ctx, sc, time.Now())
+					must(e)
+					var envKeys []string
+					for _, row := range env {
+						name, _, _ := strings.Cut(row, "=")
+						envKeys = append(envKeys, name)
+					}
+					dump(label+"-identity.json", map[string]any{"uid": cmd.SysProcAttr.Credential.Uid, "environment_keys": sorted(envKeys), "deployment": statement.Deployment, "bucket": statement.Bucket, "endpoint": statement.Endpoint, "runtime_access_key_sha256": statement.Credential, "qualification_report_sha256": statement.EvidenceReport})
 					return stop
 				}
 			}
@@ -163,10 +196,42 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 			t.Fatalf("turn status %d want %d: %s", resp.StatusCode, want, b)
 		}
 		must(json.Unmarshal(b, &data))
+		if _, hasOutput := data["output"]; want != 200 && hasOutput {
+			t.Fatal("rejected request returned an output field")
+		}
 		return data
+	}
+	checkReadiness := func(want int) map[string]any {
+		t.Helper()
+		r, err := client.Get(addr + "/readyz")
+		must(err)
+		defer r.Body.Close()
+		if r.StatusCode != want {
+			t.Fatalf("readiness status %d, want %d", r.StatusCode, want)
+		}
+		var body map[string]any
+		must(json.NewDecoder(r.Body).Decode(&body))
+		return body
+	}
+	lab := func(action string) {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "python3", "/mnt/rgw-payload/lab-qualification.py", action)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("native control %s: %v: %s", action, err, out)
+		}
 	}
 	stop := starter("first-server")
 	alice := idp.Token("alice")
+	ready := checkReadiness(200)
+	profile, _ := ready["evidence_backend"].(map[string]any)
+	if profile["retention_enforced"] != true || profile["kind"] != evidence.RetentionProfile || profile["retention_status"] != "storage-native-qualified-synthetic" {
+		t.Fatal("readiness did not report the qualified synthetic backend")
+	}
+	lab("unsafe-default")
+	dump("unsafe-storage-readiness.json", checkReadiness(503))
+	dump("unsafe-storage-response.json", post(alice, 503))
+	lab("restore-default")
+	dump("restored-storage-readiness.json", checkReadiness(200))
 	pid, err := strconv.Atoi(absent("CHARTER_DRILL_STORAGE_PID"))
 	must(err)
 	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
@@ -176,12 +241,16 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	}
 	must(syscall.Kill(pid, syscall.SIGSTOP))
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGCONT) })
-	r, err := client.Get(addr + "/readyz")
+	dump("unavailable-readiness.json", checkReadiness(503))
+	live, err := client.Get(addr + "/healthz")
 	must(err)
-	_ = r.Body.Close()
-	if r.StatusCode != 503 {
-		t.Fatalf("readiness claims healthy while real storage is stopped: %d", r.StatusCode)
+	var health map[string]any
+	must(json.NewDecoder(live.Body).Decode(&health))
+	must(live.Body.Close())
+	if live.StatusCode != 200 || health["status"] != "ok" || !reflect.DeepEqual(health["evidence_backend"], ready["evidence_backend"]) {
+		t.Fatal("liveness confused startup qualification with current readiness")
 	}
+	dump("live-during-outage.json", health)
 	dump("unavailable-response.json", post(alice, 503))
 	must(syscall.Kill(pid, syscall.SIGCONT))
 	first := post(alice, 200)
@@ -256,7 +325,14 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	_, err = owner.Exec(ctx, `INSERT INTO artifacts(id,tenant_id,project_id,title,body) VALUES($1,$2,$3,$4,$5)`, artifact, tenant, project, "synthetic exhibit", original)
 	must(err)
 	stop = starter("restarted-server")
-	replay := post(alice, 200)
+	dump("anonymous-replay-response.json", post("", 401))
+	expired := idp.Mint(syntheticidp.Claims{Subject: "alice", IssuedAt: time.Now().Add(-time.Hour), Lifetime: time.Minute})
+	dump("expired-replay-response.json", post(expired, 401))
+	_, err = owner.Exec(ctx, `DELETE FROM project_members WHERE project_id=$1 AND user_id=$2`, project, actor)
+	must(err)
+	dump("revoked-replay-response.json", post(alice, 404))
+	must(st.SeedMember(ctx, tenant, project, actor))
+	replay := post(idp.Token("alice"), 200)
 	dump("replay-response.json", replay)
 	if replay["turn_id"] != turn || replay["output"] != output || replay["replayed"] != true {
 		t.Fatal("restart did not preserve delivery-only replay")

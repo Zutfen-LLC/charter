@@ -10,6 +10,11 @@ cd "$P"
 mkdir -m 0711 /run/charter-c04-serving
 export C04_SERVING_FILES=/run/charter-c04-serving
 exec > >(tee -a "$E/drill-$C04_RUN.log") 2>&1
+# Record a source pin when the exact-head runner includes one. Payload hashes
+# are verified by seaweed-run.sh before this file is invoked.
+if [[ -f "$P/charter.head" ]]; then
+  grep -Ex '[0-9a-f]{40}' "$P/charter.head" > "$E/charter-head-$C04_RUN"
+fi
 python3 "$P/lab-qualification.py"
 source "$C04_PRIVATE/serving.env"
 [[ "$CHARTER_S3_DEPLOYMENT" == "lab-$C04_RUN" ]]
