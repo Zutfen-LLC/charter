@@ -21,7 +21,7 @@ func TestC05GovernedHTTPReceiverAccountingAndReplay(t *testing.T) {
 	var calls atomic.Int32
 	actual := make(chan []byte, 4)
 	var fail atomic.Bool
-	var missing atomic.Bool
+	var missing, nonbillable atomic.Bool
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -33,6 +33,11 @@ func TestC05GovernedHTTPReceiverAccountingAndReplay(t *testing.T) {
 		actual <- b
 		if fail.Load() {
 			w.WriteHeader(503)
+			return
+		}
+		if nonbillable.Load() {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"rejected":true,"billable":false}`)
 			return
 		}
 		if missing.Load() {
@@ -114,8 +119,16 @@ func TestC05GovernedHTTPReceiverAccountingAndReplay(t *testing.T) {
 	fail.Store(false)
 	missing.Store(true)
 	post("alice", e.p1, "missing-usage", req, 200)
+	nonbillable.Store(true)
+	post("alice", e.p1, "nonbillable", req, 503)
+	post("alice", e.p1, "nonbillable", req, 409)
+	var charge int64
+	var unknown bool
+	if err := e.st.DB.QueryRow(ctx, `SELECT actual_amount,unknown FROM evidence_budget_reservations WHERE project_id=$1 AND idempotency_key='nonbillable'`, e.p1).Scan(&charge, &unknown); err != nil || charge != 0 || unknown || calls.Load() != 4 {
+		t.Fatalf("nonbillable rejection: charge=%d unknown=%t calls=%d err=%v", charge, unknown, calls.Load(), err)
+	}
 	sum, err := b.Summary(ctx, e.tenant, e.p1)
-	if err != nil || sum.Outstanding != 0 || sum.Unknown == 0 || sum.Settled == 0 || len(sum.Models) != 3 {
+	if err != nil || sum.Outstanding != 0 || sum.Frozen || sum.Unknown == 0 || sum.Settled == 0 || len(sum.Models) != 3 {
 		t.Fatalf("bad summary %+v %v", sum, err)
 	}
 	usage := "/v1/projects/" + e.p1 + "/usage"
