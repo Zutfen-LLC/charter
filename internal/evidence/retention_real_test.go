@@ -116,8 +116,8 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 		{"pre_admission", 0, false, false}, {"partial_admission", 0, false, false}, {"lost_blob_response", 1, false, true}, {"lost_admission_response", 0, true, false},
 		{"pg_commit_after_admission", 0, true, false}, {"intent_body", 0, true, false}, {"intent_ack", 0, true, false}, {"outage_during_model", 1, true, false},
 		{"output_bytes", 1, true, false}, {"finalization", 1, true, false}, {"bad_read_mode", 0, false, false}, {"short_read", 0, false, false}, {"wrong_bytes", 0, false, false},
-		{"cancel_during_write", 0, false, false}, {"deadline_during_storage", 0, false, false}, {"revoked_final_gate", 1, false, false},
-		{"concurrent_admissions", 1, false, true},
+		{"cancel_during_write", 0, false, false}, {"deadline_during_storage", 0, false, false}, {"revoked_final_gate", 1, false, false}, {"concurrent_admissions", 1, false, true},
+		{"missing_fresh_gate", 0, false, false}, {"denied_fresh_gate", 0, false, false}, {"revoked_during_persistence", 0, false, false},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -205,6 +205,10 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 					return nil
 				}
 				switch tc.name {
+				case "revoked_during_persistence":
+					if strings.Contains(key, "/data/events/") && suffix(data, "disclosure_intent") {
+						hit.Store(true)
+					}
 				case "lost_blob_response":
 					if strings.Contains(key, "/data/objects/") {
 						hit.Store(true)
@@ -249,6 +253,14 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 				dispatch.Add(1)
 				return ModelOutcome{Accepted: true, Complete: true, Output: out}, nil
 			}
+			if tc.name == "missing_fresh_gate" {
+				got, err := rec.Process(ctx, req, model, nil)
+				versions, listErr := s3.Versions(ctx, "charter/v1/"+dep+"/")
+				if !errors.Is(err, ErrFailClosed) || len(got.Output) != 0 || got.TurnID != "" || dispatch.Load() != 0 || listErr != nil || len(versions) != 0 {
+					t.Fatalf("missing fresh gate: err=%v output=%d provider=%d retained_versions=%d list_error=%v", err, len(got.Output), dispatch.Load(), len(versions), listErr)
+				}
+				return
+			}
 			if tc.name == "concurrent_admissions" {
 				entered, release := make(chan struct{}), make(chan struct{})
 				defer close(release)
@@ -288,12 +300,19 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 				return
 			}
 			authorize := func(context.Context) error {
+				if tc.name == "denied_fresh_gate" || tc.name == "revoked_during_persistence" && hit.Load() {
+					hit.Store(true)
+					return ErrDenied
+				}
 				if tc.name == "revoked_final_gate" && dispatch.Load() > 0 {
 					return fail()
 				}
 				return nil
 			}
 			got, e := rec.Process(runCtx, req, model, authorize)
+			if (tc.name == "denied_fresh_gate" || tc.name == "revoked_during_persistence") && !errors.Is(e, ErrDenied) {
+				t.Fatalf("expected fixture authorization refusal: %v", e)
+			}
 			if !hit.Load() || dispatch.Load() != tc.calls {
 				t.Fatalf("fixture did not reach expected fault/model boundary; injected=%t calls=%d want=%d err=%v", hit.Load(), dispatch.Load(), tc.calls, e)
 			}
