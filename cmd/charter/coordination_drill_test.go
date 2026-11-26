@@ -84,7 +84,7 @@ func TestRetainedCoordinationAuthorityDrill(t *testing.T) {
 	turn := open[0].TurnID
 	before, err := b.Load(ctx, req.TenantID, turn)
 	must(err)
-	if len(before) == 0 || before[len(before)-1]["type"] != "disclosure_intent" {
+	if len(before) < 2 || before[len(before)-2]["type"] != "disclosure_intent" || before[len(before)-1]["type"] != "evidence_ack" {
 		t.Fatal("paused turn is not at durable pre-dispatch intent")
 	}
 
