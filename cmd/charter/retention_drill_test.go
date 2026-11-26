@@ -344,9 +344,66 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 		t.Fatal("C06 replay changed output")
 	}
 	// C06 correction regressions against the actual retained serving
-	// composition. First: context eligibility precedes sealing. Revoke the
-	// delegated grant between the completed selection read and the first
-	// revalidation; nothing may be sealed into model context.
+	// composition. Turn identity is discovered from the retained admission
+	// registry (S3), the authority the retained composition actually uses.
+	admissionTurns := func() (map[string]string, error) {
+		refs, err := storage.Versions(ctx, "charter/v1/"+sc.Deployment+"/"+tenant+"/admissions/")
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]string{}
+		for _, ref := range refs {
+			v, err := storage.Read(ctx, ref.Key, ref.VersionID)
+			if err != nil {
+				return nil, err
+			}
+			// Admissions are signed envelopes whose payload is the canonical
+			// retained-commit JSON; only the turn identity is needed here.
+			var envelope struct {
+				Payload string `json:"payload"`
+			}
+			var commit struct {
+				Turn string `json:"turn"`
+			}
+			if err := json.Unmarshal(v.Data, &envelope); err != nil {
+				return nil, err
+			}
+			if err := json.Unmarshal([]byte(envelope.Payload), &commit); err != nil {
+				return nil, err
+			}
+			if commit.Turn == "" {
+				return nil, fmt.Errorf("admission without turn identity: %s", ref.Key)
+			}
+			out[ref.Key] = commit.Turn
+		}
+		return out, nil
+	}
+	newTurn := func(before map[string]string) (string, error) {
+		after, err := admissionTurns()
+		if err != nil {
+			return "", err
+		}
+		found := ""
+		for k, turn := range after {
+			if _, ok := before[k]; ok {
+				continue
+			}
+			if found != "" {
+				return "", errors.New("ambiguous new admission")
+			}
+			found = turn
+		}
+		if found == "" {
+			return "", errors.New("no new admission was recorded")
+		}
+		return found, nil
+	}
+	// First: context eligibility precedes sealing. Revoke the delegated grant
+	// between the completed selection read and the first revalidation (the
+	// request's second connector read); nothing may be sealed into model
+	// context.
+	eligibilityBefore, err := admissionTurns()
+	must(err)
 	eligibilityBase := sourceFixture.ReadCalls.Load()
 	sourceFixture.BeforeRead = func() {
 		if sourceFixture.ReadCalls.Load() == eligibilityBase+2 {
@@ -356,8 +413,8 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	dump("c06-eligibility-response.json", postRequest(alice, sourceBody, "c06-context-eligibility-drill", 404))
 	sourceFixture.BeforeRead = nil
 	sourceFixture.Grant("sp-original-doc", "synthetic-delegate", true)
-	var eligibilityTurn string
-	must(owner.QueryRow(ctx, `SELECT turn_id::text FROM evidence_turns WHERE idempotency_key=$1`, "c06-context-eligibility-drill").Scan(&eligibilityTurn))
+	eligibilityTurn, err := newTurn(eligibilityBefore)
+	must(err)
 	eligibilityEvents, err := readonly.Load(ctx, tenant, eligibilityTurn)
 	must(err)
 	for _, ev := range eligibilityEvents {
@@ -376,8 +433,11 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	dump("c06-eligibility-events.json", eligibilityEvents)
 	// Second: route authorization is re-resolved after the final delegated
 	// source revalidation. Commit an allowlist change that disallows the
-	// pinned model during that revalidation, with source ACLs, version,
-	// bytes and membership still valid, and require zero invocations.
+	// pinned model during that revalidation (the request's fourth connector
+	// read), with source ACLs, version, bytes and membership still valid,
+	// and require zero invocations.
+	routeBefore, err := admissionTurns()
+	must(err)
 	routeBase := sourceFixture.ReadCalls.Load()
 	var routeHookErr error
 	sourceFixture.AfterRead = func() {
@@ -392,8 +452,8 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	if bytes.Count(sourceLogs.Bytes(), []byte("synthetic retention provider invoked")) != 1 {
 		t.Fatal("retained: eligibility refusal or route revocation dispatched the model")
 	}
-	var routeTurn string
-	must(owner.QueryRow(ctx, `SELECT turn_id::text FROM evidence_turns WHERE idempotency_key=$1`, "c06-route-revocation-drill").Scan(&routeTurn))
+	routeTurn, err := newTurn(routeBefore)
+	must(err)
 	routeEvents, err := readonly.Load(ctx, tenant, routeTurn)
 	must(err)
 	for _, ev := range routeEvents {
