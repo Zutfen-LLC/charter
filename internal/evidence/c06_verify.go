@@ -61,6 +61,12 @@ func verifyC06(events []Event, objects map[string][]byte, full bool) (errs []str
 			add(0, "model_registry_id must be an explicit model identifier")
 		}
 	}
+	// Reservation identity is attributable without a sealed context: a
+	// legitimate partial or interrupted turn can hold usage_reserved before
+	// context_sealed exists, so every reservation is checked before the seal
+	// guard below. Sealed turns share the same helper, so the diagnostics
+	// cannot diverge between the sealed and pre-seal paths.
+	verifyC06Reservations(events, received, add)
 	sealedAt := -1
 	for i, e := range events {
 		if str(e, "type") == "context_sealed" {
@@ -225,26 +231,6 @@ func verifyC06(events []Event, objects map[string][]byte, full bool) (errs []str
 	latestAuth := str(events[sealedAt], "recorded_at")
 	for i, e := range events {
 		typ, ep := str(e, "type"), payload(e)
-		if typ == "usage_reserved" {
-			if str(ep, "accounting_version") != budgetVersion || !idRe.MatchString(str(ep, "registry_model")) {
-				add(i, "C06 usage reservation requires C05 governed accounting")
-			} else if requested, ok := received["model_registry_id"].(string); ok {
-				// Attributable model identity: the governed accounting
-				// reservation must bind the same registry model the turn
-				// explicitly requested. Registry identifiers are never
-				// provider-native destination model identifiers, so the
-				// policy destination is deliberately not compared here.
-				if str(ep, "registry_model") != requested {
-					add(i, "C06 reserved registry model differs from the explicitly requested registry model")
-				}
-			} else if _, malformed := received["model_registry_id"]; !malformed {
-				// No model was explicitly requested: the reservation must
-				// bind the documented default resolution.
-				if str(ep, "registry_model") != defaultRegistryModel {
-					add(i, "C06 reserved registry model must be the documented default resolution")
-				}
-			}
-		}
 		if typ == "output_recorded" || typ == "response_released" {
 			if str(ep, "source_provenance_sha256") != provenance {
 				add(i, "output and release must bind the complete sealed source provenance")
@@ -264,4 +250,38 @@ func verifyC06(events []Event, objects map[string][]byte, full bool) (errs []str
 		}
 	}
 	return errs
+}
+
+// verifyC06Reservations enforces the governed accounting reservation identity
+// on every usage_reserved event of a C06-bound turn. The checks do not depend
+// on context sealing, so they run on partial and interrupted turns as well:
+// a turn can legitimately reserve usage before any context_sealed exists, and
+// the reservation must still bind the accounted model identity.
+func verifyC06Reservations(events []Event, received map[string]any, add func(i int, s string)) {
+	for i, e := range events {
+		if str(e, "type") != "usage_reserved" {
+			continue
+		}
+		ep := payload(e)
+		if str(ep, "accounting_version") != budgetVersion || !idRe.MatchString(str(ep, "registry_model")) {
+			add(i, "C06 usage reservation requires C05 governed accounting")
+			continue
+		}
+		if requested, ok := received["model_registry_id"].(string); ok {
+			// Attributable model identity: the governed accounting
+			// reservation must bind the same registry model the turn
+			// explicitly requested. Registry identifiers are never
+			// provider-native destination model identifiers, so the
+			// policy destination is deliberately not compared here.
+			if str(ep, "registry_model") != requested {
+				add(i, "C06 reserved registry model differs from the explicitly requested registry model")
+			}
+		} else if _, malformed := received["model_registry_id"]; !malformed {
+			// No model was explicitly requested: the reservation must
+			// bind the documented default resolution.
+			if str(ep, "registry_model") != defaultRegistryModel {
+				add(i, "C06 reserved registry model must be the documented default resolution")
+			}
+		}
+	}
 }

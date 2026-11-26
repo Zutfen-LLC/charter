@@ -574,6 +574,31 @@ def _verify_c06(events, objects):
     if "model_registry_id" in received and (not isinstance(received["model_registry_id"], str) or
                                                not ID_RE.fullmatch(received["model_registry_id"])):
         add(0, "model_registry_id must be an explicit model identifier")
+    # Reservation identity is attributable without a sealed context: a
+    # legitimate partial or interrupted turn can hold usage_reserved before
+    # context_sealed exists, so every reservation is checked before the seal
+    # guard below. Sealed turns share the same loop, so the diagnostics cannot
+    # diverge between the sealed and pre-seal paths.
+    for i, e in enumerate(events):
+        if not isinstance(e, dict) or e.get("type") != "usage_reserved":
+            continue
+        p = _pl(e)
+        if p.get("accounting_version") != "charter-budget-v1" or not isinstance(p.get("registry_model"), str) or not ID_RE.fullmatch(p["registry_model"]):
+            add(i, "C06 usage reservation requires C05 governed accounting")
+            continue
+        if isinstance(received.get("model_registry_id"), str):
+            # Attributable model identity: the governed accounting
+            # reservation must bind the same registry model the turn
+            # explicitly requested. Registry identifiers are never
+            # provider-native destination model identifiers, so the
+            # policy destination is deliberately not compared here.
+            if p["registry_model"] != received["model_registry_id"]:
+                add(i, "C06 reserved registry model differs from the explicitly requested registry model")
+        elif "model_registry_id" not in received:
+            # No model was explicitly requested: the reservation must
+            # bind the documented default resolution.
+            if p["registry_model"] != DEFAULT_REGISTRY_MODEL:
+                add(i, "C06 reserved registry model must be the documented default resolution")
     sealed_i = next((i for i, e in enumerate(events) if isinstance(e, dict) and e.get("type") == "context_sealed"), -1)
     if sealed_i < 0:
         # A partial prefix may not yet have a sealed snapshot.
@@ -686,22 +711,6 @@ def _verify_c06(events, objects):
         typ, p = e.get("type"), _pl(e)
         if typ in ("output_recorded", "response_released") and p.get("source_provenance_sha256") != provenance:
             add(i, "output and release must bind the complete sealed source provenance")
-        if typ == "usage_reserved":
-            if p.get("accounting_version") != "charter-budget-v1" or not isinstance(p.get("registry_model"), str) or not ID_RE.fullmatch(p["registry_model"]):
-                add(i, "C06 usage reservation requires C05 governed accounting")
-            elif isinstance(received.get("model_registry_id"), str):
-                # Attributable model identity: the governed accounting
-                # reservation must bind the same registry model the turn
-                # explicitly requested. Registry identifiers are never
-                # provider-native destination model identifiers, so the
-                # policy destination is deliberately not compared here.
-                if p["registry_model"] != received["model_registry_id"]:
-                    add(i, "C06 reserved registry model differs from the explicitly requested registry model")
-            elif "model_registry_id" not in received:
-                # No model was explicitly requested: the reservation must
-                # bind the documented default resolution.
-                if p["registry_model"] != DEFAULT_REGISTRY_MODEL:
-                    add(i, "C06 reserved registry model must be the documented default resolution")
         if typ in ("disclosure_intent", "provider_accepted", "response_released"):
             ts = p.get("source_authorized_at")
             if not timestamp(ts):
