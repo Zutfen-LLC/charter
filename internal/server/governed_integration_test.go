@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -162,5 +163,78 @@ func TestC05HTTPMeasuredOverrunWithholdsOutputAndFreezes(t *testing.T) {
 	}
 	if status, _, _ := e.post("alice", e.p1, body, "Idempotency-Key", "after-overrun"); status != 403 || calls.Load() != 1 {
 		t.Fatal("overrun did not freeze future dispatches")
+	}
+}
+
+// A real receiver supplies usage independently of the bytes it actually receives and returns.
+func TestC05HTTPUnknownMeasuredOverrun(t *testing.T) {
+	for _, tc := range []struct{ name, usage string }{
+		{"absent", ""},
+		{"partial", `,"usage":{"input_bytes":%d}`},
+		{"understated", `,"usage":{"input_bytes":%d,"output_bytes":1}`},
+		{"negative", `,"usage":{"input_bytes":%d,"output_bytes":-1}`},
+		{"outside-safe-domain", `,"usage":{"input_bytes":%d,"output_bytes":9007199254740992}`},
+		{"outside-int64", `,"usage":{"input_bytes":%d,"output_bytes":9223372036854775808}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			ctx := context.Background()
+			b := evidence.PG{DB: e.st.DB}
+			tenantCap := int64(100000)
+			for _, project := range []string{e.p1, e.p2} {
+				if err := b.SetPolicy(ctx, evidence.BudgetPolicy{TenantID: e.tenant, ProjectID: project, ProjectCap: 50000, TenantCap: &tenantCap, LocalOnly: true, AllowedModels: []string{"local-http"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const output = "synthetic oversized output"
+			const maxOutput = 8
+			var calls, inputBytes atomic.Int64
+			receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sent, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					http.Error(w, "read failure", 400)
+					return
+				}
+				calls.Add(1)
+				inputBytes.Store(int64(len(sent)))
+				usage := tc.usage
+				if usage != "" {
+					usage = fmt.Sprintf(usage, len(sent))
+				}
+				_, _ = fmt.Fprintf(w, `{"output":%q%s}`, output, usage)
+			}))
+			defer receiver.Close()
+			cfg := routing.DefaultConfig()
+			cfg.Endpoint = receiver.URL
+			cfg.MaxOutputBytes = maxOutput
+			e.auth.Evidence = &evidence.Recorder{Backend: b, Governance: routing.Governance(cfg, b, false, nil), Accounting: b.ReconcileBudget}
+			const body = `{"input":"synthetic","model_id":"local-http"}`
+			status, response, _ := e.post("alice", e.p1, body, "Idempotency-Key", "overrun")
+			if status != 503 || strings.Contains(response, "oversized output") {
+				t.Fatalf("response not withheld: %d %s", status, response)
+			}
+			var reserved, actual, floor int64
+			var unknown, overrun bool
+			var state string
+			if err := e.st.DB.QueryRow(ctx, `SELECT reserved_amount,actual_amount,overrun_floor,unknown,overrun,status FROM evidence_budget_reservations WHERE project_id=$1 AND idempotency_key='overrun'`, e.p1).Scan(&reserved, &actual, &floor, &unknown, &overrun, &state); err != nil {
+				t.Fatal(err)
+			}
+			project, err := b.Summary(ctx, e.tenant, e.p1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sibling, err := b.Summary(ctx, e.tenant, e.p2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retry, _, _ := e.post("alice", e.p1, body, "Idempotency-Key", "overrun")
+			newProject, _, _ := e.post("alice", e.p1, body, "Idempotency-Key", "new-project")
+			newTenant, _, _ := e.post("bob", e.p2, body, "Idempotency-Key", "new-tenant")
+			t.Logf("receiver_calls=%d request_bytes=%d output_bytes=%d reservation=%d ledger=%d overrun_floor=%d overrun=%t unknown=%t ledger_status=%s project_frozen=%t sibling_frozen=%t retry=%d new_project=%d new_tenant=%d", calls.Load(), inputBytes.Load(), len(output), reserved, actual, floor, overrun, unknown, state, project.Frozen, sibling.Frozen, retry, newProject, newTenant)
+			if want := inputBytes.Load() + int64(len(output)); reserved != inputBytes.Load()+maxOutput || actual != want || floor != want || !overrun || !unknown || state != "settled" || project.Settled != 0 || project.Unknown != want || !project.Frozen || !sibling.Frozen || project.Remaining != 0 || sibling.Remaining != 0 || retry != 409 || newProject != 403 || newTenant != 403 || calls.Load() != 1 {
+				t.Errorf("unknown overrun not accounted at floor=%d; project=%+v sibling=%+v", want, project, sibling)
+			}
+		})
 	}
 }
