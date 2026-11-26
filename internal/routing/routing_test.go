@@ -3,8 +3,10 @@ package routing
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,11 +36,13 @@ func TestResolvePolicyAndDeterministicSwitch(t *testing.T) {
 
 func TestHTTPAdapterSendsExactBytesOnce(t *testing.T) {
 	body := []byte{0, 1, 2, '\n', 0xff}
-	calls := 0
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		got := make([]byte, len(body))
-		_, _ = r.Body.Read(got)
+		calls.Add(1)
+		got, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
 		if !bytes.Equal(got, body) {
 			t.Errorf("body mismatch: %v", got)
 		}
@@ -48,8 +52,8 @@ func TestHTTPAdapterSendsExactBytesOnce(t *testing.T) {
 	defer srv.Close()
 	m := Model{ID: "local-http", Kind: KindLocalHTTP, Class: ClassLocal, Destination: evidenceDestination("test", "local", "local-model"), Endpoint: srv.URL, MaxRequestBytes: 10, MaxOutputBytes: 100, RequestByteRate: 1, OutputByteRate: 1}
 	out, err := (HTTPAdapter{Timeout: time.Second}).Invoke(context.Background(), m, body)
-	if err != nil || calls != 1 || string(out.ModelOutcome.Output) != "ok" || out.InputBytes != 5 || out.OutputBytes != 2 {
-		t.Fatalf("out=%+v calls=%d err=%v", out, calls, err)
+	if err != nil || calls.Load() != 1 || string(out.ModelOutcome.Output) != "ok" || out.InputBytes != 5 || out.OutputBytes != 2 {
+		t.Fatalf("out=%+v calls=%d err=%v", out, calls.Load(), err)
 	}
 }
 

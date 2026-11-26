@@ -130,6 +130,12 @@ func TestC05BudgetRuntimePrivilegesAndOverrun(t *testing.T) {
 	if _, err := b.Reserve(ctx, r(p2, "after", 0)); err == nil {
 		t.Fatal("tenant overrun freeze bypassed")
 	}
+	if _, err := creds.Workspace.Exec(ctx, `DELETE FROM projects WHERE id=$1`, p1); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := b.Summary(ctx, tenant, p1); err != nil || s.Settled != 110 {
+		t.Fatal("workspace deletion erased the obligation")
+	}
 	if _, err := b.Summary(ctx, evidence.NewUUID(), p1); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("cross scope summary: %v", err)
 	}

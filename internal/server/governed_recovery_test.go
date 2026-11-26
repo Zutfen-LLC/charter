@@ -94,3 +94,58 @@ func TestC05RecoveryDoesNotDispatchAndReconcilesAcrossStores(t *testing.T) {
 		})
 	}
 }
+
+func TestC05AmbiguousBudgetCommitAcknowledgments(t *testing.T) {
+	for _, step := range []string{"reserve", "arm"} {
+		t.Run(step, func(t *testing.T) {
+			f := newEnv(t)
+			ctx := context.Background()
+			b := evidence.PG{DB: f.st.DB}
+			if err := b.SetPolicy(ctx, evidence.BudgetPolicy{TenantID: f.tenant, ProjectID: f.p1, ProjectCap: 2000000, LocalOnly: true, AllowedModels: []string{"det-a"}}); err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			delegate := routing.Governance(routing.DefaultConfig(), b, true, func() { calls.Add(1) })
+			governance := func(ctx context.Context, req evidence.Request) (evidence.GovernedPlan, error) {
+				p, err := delegate(ctx, req)
+				if err != nil {
+					return p, err
+				}
+				if step == "reserve" {
+					real := p.Reserve
+					p.Reserve = func(ctx context.Context, turn string, body []byte) (int, error) {
+						n, err := real(ctx, turn, body)
+						if err != nil {
+							return n, err
+						}
+						return 0, errors.New("synthetic lost reservation response after actual commit")
+					}
+				} else {
+					real := p.Arm
+					p.Arm = func(ctx context.Context, turn string) error {
+						if err := real(ctx, turn); err != nil {
+							return err
+						}
+						return errors.New("synthetic lost arm response after actual commit")
+					}
+				}
+				return p, nil
+			}
+			f.auth.Evidence = &evidence.Recorder{Backend: b, Governance: governance, Accounting: b.ReconcileBudget}
+			const request = `{"input":"synthetic","model_id":"det-a"}`
+			if code, _, _ := f.post("alice", f.p1, request, "Idempotency-Key", "stable"); code != 503 {
+				t.Fatalf("unexpected code %d", code)
+			}
+			if code, _, _ := f.post("alice", f.p1, request, "Idempotency-Key", "stable"); code != 409 {
+				t.Fatalf("unexpected repeat code %d", code)
+			}
+			if err := b.RecoverBudget(ctx, b); err != nil {
+				t.Fatal(err)
+			}
+			s, err := b.Summary(ctx, f.tenant, f.p1)
+			if err != nil || calls.Load() != 0 || s.Outstanding != 0 || s.Settled != 0 || (s.Unknown > 0) != (step == "arm") {
+				t.Fatalf("calls=%d budget=%+v err=%v", calls.Load(), s, err)
+			}
+		})
+	}
+}

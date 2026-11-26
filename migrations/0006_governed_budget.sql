@@ -4,8 +4,7 @@ CREATE TABLE evidence_budget_policy (
  allowed_models text[] NOT NULL, project_cap bigint NOT NULL CHECK(project_cap BETWEEN 1 AND 9007199254740991),
  tenant_cap bigint CHECK(tenant_cap BETWEEN 1 AND 9007199254740991), enabled boolean NOT NULL DEFAULT true,
  frozen boolean NOT NULL DEFAULT false, PRIMARY KEY(tenant_id,project_id),
- CHECK(array_position(allowed_models,NULL) IS NULL),
- FOREIGN KEY(project_id,tenant_id) REFERENCES projects(id,tenant_id) ON DELETE RESTRICT
+ CHECK(array_position(allowed_models,NULL) IS NULL)
 );
 CREATE TABLE evidence_budget_reservations (
  reservation_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, project_id uuid NOT NULL,
@@ -25,6 +24,7 @@ REVOKE ALL ON evidence_budget_policy,evidence_budget_reservations FROM PUBLIC;
 CREATE FUNCTION evidence_budget_set_policy(t uuid,p uuid,l boolean,a text[],pc bigint,tc bigint)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 BEGIN
+ IF NOT EXISTS (SELECT 1 FROM projects WHERE tenant_id=t AND id=p) THEN RAISE EXCEPTION 'invalid policy scope'; END IF;
  IF pc IS NULL OR pc<1 OR pc>9007199254740991 OR (tc IS NOT NULL AND (tc<1 OR tc>9007199254740991)) OR array_position(a,NULL) IS NOT NULL THEN RAISE EXCEPTION 'invalid budget policy'; END IF;
  PERFORM pg_advisory_xact_lock(hashtextextended(t::text,0));
  INSERT INTO evidence_budget_policy(tenant_id,project_id,local_only,allowed_models,project_cap,tenant_cap,enabled,frozen)
@@ -100,8 +100,20 @@ REVOKE ALL ON FUNCTION evidence_budget_note_overrun(uuid,bigint) FROM PUBLIC;
 
 CREATE FUNCTION evidence_budget_summary(t uuid,p uuid) RETURNS TABLE(period_start timestamptz,project_cap bigint,tenant_cap bigint,outstanding bigint,settled bigint,unknown bigint,remaining bigint,frozen boolean)
 LANGUAGE sql SECURITY DEFINER SET search_path FROM CURRENT AS $$
- WITH pol AS (SELECT * FROM evidence_budget_policy WHERE tenant_id=t AND project_id=p), d AS (SELECT date_trunc('day',clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' v), sums AS (SELECT COALESCE(sum(CASE WHEN status='open' THEN GREATEST(reserved_amount,overrun_floor) ELSE 0 END),0) o,COALESCE(sum(CASE WHEN status='settled' AND NOT unknown THEN actual_amount ELSE 0 END),0) s,COALESCE(sum(CASE WHEN status='settled' AND unknown THEN actual_amount ELSE 0 END),0) u FROM evidence_budget_reservations,d WHERE tenant_id=t AND project_id=p AND (evidence_budget_reservations.period_start=d.v OR status='open'))
- SELECT d.v,pol.project_cap,pol.tenant_cap,sums.o::bigint,sums.s::bigint,sums.u::bigint,(CASE WHEN pol.frozen OR NOT pol.enabled THEN 0 ELSE GREATEST(0,pol.project_cap-sums.o-sums.s-sums.u) END)::bigint,pol.frozen FROM pol,d,sums $$;
+ WITH pol AS (
+   SELECT q.project_cap,q.enabled,q.frozen,
+     (SELECT min(x.tenant_cap) FROM evidence_budget_policy x WHERE x.tenant_id=t) AS effective_tenant_cap
+   FROM evidence_budget_policy q WHERE q.tenant_id=t AND q.project_id=p
+ ), d AS (SELECT date_trunc('day',clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' v), sums AS (
+   SELECT COALESCE(sum(GREATEST(reserved_amount,overrun_floor)) FILTER (WHERE status='open' AND project_id=p),0) o,
+     COALESCE(sum(actual_amount) FILTER (WHERE status='settled' AND NOT unknown AND project_id=p),0) s,
+     COALESCE(sum(actual_amount) FILTER (WHERE status='settled' AND unknown AND project_id=p),0) u,
+     COALESCE(sum(CASE WHEN status='open' THEN GREATEST(reserved_amount,overrun_floor) WHEN status='settled' THEN actual_amount ELSE 0 END),0) tenant_exposure
+   FROM evidence_budget_reservations,d WHERE tenant_id=t AND (evidence_budget_reservations.period_start=d.v OR status='open')
+ )
+ SELECT d.v,pol.project_cap,pol.effective_tenant_cap,sums.o::bigint,sums.s::bigint,sums.u::bigint,
+    (CASE WHEN pol.frozen OR NOT pol.enabled THEN 0 ELSE GREATEST(0,LEAST(pol.project_cap-sums.o-sums.s-sums.u,pol.effective_tenant_cap-sums.tenant_exposure)) END)::bigint,
+    pol.frozen FROM pol,d,sums $$;
 REVOKE ALL ON FUNCTION evidence_budget_summary(uuid,uuid) FROM PUBLIC;
 DO $$
 DECLARE fn record;
