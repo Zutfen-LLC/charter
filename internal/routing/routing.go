@@ -264,7 +264,7 @@ func (a HTTPAdapter) Invoke(ctx context.Context, m Model, request []byte) (Outco
 	}
 	if resp.StatusCode == http.StatusUnprocessableEntity {
 		if w.Rejected && w.Billable != nil && !*w.Billable && w.Output == nil && (w.Usage == nil || bytes.Equal(w.Usage, []byte("null"))) {
-			return Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true}, ProviderConfirmedNonBillable: true}, errors.New("routing: confirmed rejection without billable work")
+			return Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true, Output: []byte{}}, ProviderConfirmedNonBillable: true}, errors.New("routing: confirmed rejection without billable work")
 		}
 		return unquantified, errors.New("routing: unconfirmed rejection")
 	}

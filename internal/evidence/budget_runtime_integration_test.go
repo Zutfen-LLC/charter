@@ -92,7 +92,7 @@ func TestC05BudgetRuntimePrivilegesAndOverrun(t *testing.T) {
 		t.Fatal("uncapped sibling bypassed tenant cap")
 	}
 	for _, pool := range []*pgxpool.Pool{creds.Workspace, creds.Evidence} {
-		for _, q := range []string{"SELECT * FROM evidence_budget_reservations", "DELETE FROM evidence_budget_reservations", "SELECT evidence_budget_settle($1::uuid,0,false)"} {
+		for _, q := range []string{"SELECT * FROM evidence_budget_reservations", "DELETE FROM evidence_budget_reservations", "SELECT evidence_budget_settle($1::uuid,0,false)", "SELECT evidence_budget_hold_exposure($1::uuid)"} {
 			var err error
 			if strings.Contains(q, "$1") {
 				_, err = pool.Exec(ctx, q, receipt.ID)
@@ -130,6 +130,17 @@ func TestC05BudgetRuntimePrivilegesAndOverrun(t *testing.T) {
 	if _, err := b.Reserve(ctx, r(p2, "after", 0)); err == nil {
 		t.Fatal("tenant overrun freeze bypassed")
 	}
+	createdLater := create()
+	if err := a.SetPolicy(ctx, evidence.BudgetPolicy{TenantID: tenant, ProjectID: createdLater, AllowedModels: []string{"det-a"}, ProjectCap: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := b.Summary(ctx, tenant, createdLater); err != nil || !s.Frozen || s.Remaining != 0 {
+		t.Fatalf("new project bypassed tenant freeze: %+v %v", s, err)
+	}
+	if _, err := b.Reserve(ctx, r(createdLater, "new-policy", 0)); err == nil {
+		t.Fatal("new policy bypassed tenant-wide freeze")
+	}
+	t.Log("tenant froze both existing and subsequently provisioned project policies")
 	if _, err := creds.Workspace.Exec(ctx, `DELETE FROM projects WHERE id=$1`, p1); err != nil {
 		t.Fatal(err)
 	}

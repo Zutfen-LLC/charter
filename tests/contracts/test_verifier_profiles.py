@@ -3,6 +3,7 @@ import json
 import os
 import unittest
 
+from gen_current_profile import by_type, current, seal
 from model import build_turn, verify_turn
 
 FX = os.path.join(os.path.dirname(__file__), "..", "..", "fixtures", "contracts")
@@ -61,3 +62,32 @@ class VerifierProfileControls(unittest.TestCase):
         def edit(events): events[0]["payload"]["input_summary"] = "exact input: synthetic prompt"
         events, objects = rehashed("complete-turn.json", edit)
         self.assertEqual(verify_turn(events, objects), [])
+
+
+class GovernedExposureContracts(unittest.TestCase):
+    def check_variant(self, reserve, settlement, source="unknown-disclosure.json"):
+        f = current(source)
+        if reserve:
+            by_type(f, "usage_reserved")["payload"].update(accounting_version="charter-budget-v1", registry_model="local-http")
+        by_type(f, "usage_settled")["payload"] = settlement
+        seal(f)
+        return verify_turn(f["events"], {k: v.encode() for k, v in f["objects"].items()})
+
+    def test_observed_minimum_is_not_exact_usage(self):
+        good = dict(basis="observed_minimum", units=1010, observed_overrun_floor=1010)
+        self.assertEqual(self.check_variant(True, good), [])
+        for bad in (dict(good, units=1000), dict(good, units=1000, observed_overrun_floor=1000),
+                    dict(good, basis="provider_reported"), dict(good, unquantified_exposure=True),
+                    dict(good, confirmed_no_dispatch="dispatch_denied"),
+                    dict(basis="observed_minimum", units=1010)):
+            with self.subTest(bad=bad):
+                self.assertTrue(self.check_variant(True, bad))
+        self.assertTrue(self.check_variant(False, good))
+        self.assertTrue(self.check_variant(True, good, "complete-turn.json"))
+
+    def test_unquantified_exposure_does_not_invent_a_floor(self):
+        good = dict(basis="reserved_max", units=1000, unquantified_exposure=True)
+        self.assertEqual(self.check_variant(True, good), [])
+        self.assertTrue(self.check_variant(True, dict(good, unquantified_exposure=False)))
+        self.assertTrue(self.check_variant(True, dict(good, units=0)))
+        self.assertTrue(self.check_variant(False, good))

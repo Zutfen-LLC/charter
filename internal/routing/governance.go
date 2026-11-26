@@ -17,6 +17,7 @@ type Budget interface {
 	MarkDispatchPossible(context.Context, string) error
 	NoteOverrun(context.Context, string, int64) error
 	NoteUnquantifiedExposure(context.Context, string) error
+	HoldBudgetExposure(context.Context, string) error
 }
 
 // Governance pins one resolved model for this turn. Configuration is immutable
@@ -142,6 +143,14 @@ func Governance(cfg Config, budget Budget, syntheticRetention bool, countSynthet
 					// Never authorize release for an incident. If the transaction was not
 					// confirmed, the immutable terminal evidence can still supply it.
 					if note != nil {
+						// Use a separate transaction and write path. A committed-but-unacknowledged
+						// incident is already held; otherwise block admissions and settlement
+						// until reconciliation establishes the incident from retained evidence.
+						fallback, done := context.WithTimeout(context.WithoutCancel(ctx), cfg.Timeout)
+						defer done()
+						if budget.HoldBudgetExposure(fallback, receipt.ID) != nil {
+							return out, errors.New("routing: neither budget exposure nor fallback hold was confirmed")
+						}
 						return out, errors.New("routing: budget exposure not durably confirmed")
 					}
 					return out, errors.New("routing: budget exposure exceeded or unverifiable")

@@ -1,6 +1,7 @@
 -- Record unquantifiable exposure without manufacturing a charge; retain
 -- tenant-scoped incidents so a later project policy cannot bypass a freeze.
 ALTER TABLE evidence_budget_reservations
+ ADD COLUMN exposure_pending boolean NOT NULL DEFAULT false,
  ADD COLUMN unquantified_exposure boolean NOT NULL DEFAULT false,
  ADD COLUMN tenant_frozen boolean NOT NULL DEFAULT false;
 CREATE INDEX evidence_budget_tenant_frozen_idx ON evidence_budget_reservations(tenant_id) WHERE tenant_frozen;
@@ -26,7 +27,7 @@ BEGIN
  SELECT EXISTS (SELECT 1 FROM evidence_budget_policy q WHERE q.tenant_id=x.tenant_id AND q.tenant_cap IS NOT NULL) INTO freeze_tenant;
  UPDATE evidence_budget_reservations SET overrun=(overrun OR amount IS NOT NULL),
    overrun_floor=GREATEST(overrun_floor,amount), unquantified_exposure=(unquantified_exposure OR amount IS NULL),
-   tenant_frozen=(tenant_frozen OR freeze_tenant) WHERE reservation_id=r;
+   tenant_frozen=(tenant_frozen OR freeze_tenant), exposure_pending=false WHERE reservation_id=r;
  UPDATE evidence_budget_policy SET frozen=true WHERE tenant_id=x.tenant_id AND (project_id=x.project_id OR freeze_tenant);
  RETURN true;
 END $$;
@@ -39,7 +40,7 @@ DECLARE x evidence_budget_reservations%ROWTYPE; amount bigint; tenant uuid; BEGI
  SELECT * INTO x FROM evidence_budget_reservations WHERE reservation_id=r FOR UPDATE;
  IF NOT FOUND THEN RETURN false; END IF;
  IF x.status='settled' THEN RETURN x.unknown=is_unknown AND x.actual_amount IS NOT DISTINCT FROM (CASE WHEN is_unknown THEN GREATEST(x.reserved_amount,x.overrun_floor) ELSE exact_amount END); END IF;
- IF x.status<>'open' OR NOT x.dispatch_possible OR (is_unknown AND exact_amount IS NOT NULL) OR (NOT is_unknown AND (exact_amount IS NULL OR exact_amount<0 OR exact_amount>9007199254740991)) THEN RETURN false; END IF;
+ IF x.status<>'open' OR NOT x.dispatch_possible OR x.exposure_pending OR (is_unknown AND exact_amount IS NOT NULL) OR (NOT is_unknown AND (exact_amount IS NULL OR exact_amount<0 OR exact_amount>9007199254740991)) THEN RETURN false; END IF;
  IF NOT is_unknown AND (x.unquantified_exposure OR exact_amount<x.overrun_floor) THEN RETURN false; END IF;
  amount:=CASE WHEN is_unknown THEN GREATEST(x.reserved_amount,x.overrun_floor) ELSE exact_amount END;
  UPDATE evidence_budget_reservations SET status='settled',actual_amount=amount,unknown=is_unknown,overrun=(amount>reserved_amount),settled_at=clock_timestamp() WHERE reservation_id=r;
@@ -53,12 +54,31 @@ DECLARE x evidence_budget_reservations%ROWTYPE; amount bigint; tenant uuid; BEGI
  RETURN true;
 END $$;
 
+CREATE FUNCTION evidence_budget_hold_exposure(r uuid) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE x evidence_budget_reservations%ROWTYPE; tenant uuid; freeze_tenant boolean;
+BEGIN
+ SELECT tenant_id INTO tenant FROM evidence_budget_reservations WHERE reservation_id=r;
+ IF NOT FOUND THEN RETURN false; END IF;
+ PERFORM pg_advisory_xact_lock(hashtextextended(tenant::text,0));
+ SELECT * INTO x FROM evidence_budget_reservations WHERE reservation_id=r FOR UPDATE;
+ IF NOT FOUND OR x.status<>'open' OR NOT x.dispatch_possible THEN RETURN false; END IF;
+ IF x.overrun_floor>x.reserved_amount OR x.unquantified_exposure THEN RETURN true; END IF;
+ SELECT EXISTS (SELECT 1 FROM evidence_budget_policy q WHERE q.tenant_id=x.tenant_id AND q.tenant_cap IS NOT NULL) INTO freeze_tenant;
+ -- Deliberately omit amount columns, so a fault specific to the floor write
+ -- does not prevent the independent fallback hold from committing.
+ UPDATE evidence_budget_reservations SET exposure_pending=true,tenant_frozen=(tenant_frozen OR freeze_tenant) WHERE reservation_id=r;
+ UPDATE evidence_budget_policy SET frozen=true WHERE tenant_id=x.tenant_id AND (project_id=x.project_id OR freeze_tenant);
+ RETURN true;
+END $$;
+REVOKE ALL ON FUNCTION evidence_budget_hold_exposure(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION evidence_budget_hold_exposure(uuid) TO charter_budget_app;
+
 -- Reassert the restricted search paths after replacement; grants carry over.
 DO $$ DECLARE fn record;
 BEGIN
  FOR fn IN SELECT p.oid::regprocedure AS sig FROM pg_proc p
    WHERE p.pronamespace=current_schema()::regnamespace AND p.proname IN
-   ('evidence_budget_set_policy','evidence_budget_note_overrun','evidence_budget_settle') LOOP
+   ('evidence_budget_set_policy','evidence_budget_note_overrun','evidence_budget_settle','evidence_budget_hold_exposure') LOOP
    EXECUTE format('ALTER FUNCTION %s SET search_path TO pg_catalog,%I,pg_temp',fn.sig,current_schema());
  END LOOP;
 END $$;

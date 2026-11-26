@@ -62,7 +62,7 @@ func runtimeTopology(ctx context.Context, tx pgx.Tx, expected, group string) ([]
               (f.proname || '(' || pg_catalog.oidvectortypes(f.proargtypes) || ')') IN (
                 'evidence_budget_reserve(uuid, uuid, uuid, text, text, text, text, text, bigint, bigint)',
                 'evidence_budget_mark_dispatch(uuid)', 'evidence_budget_release_unmarked(uuid)',
-                'evidence_budget_settle(uuid, bigint, boolean)', 'evidence_budget_note_overrun(uuid, bigint)', 'evidence_budget_summary(uuid, uuid)'))),
+                'evidence_budget_settle(uuid, bigint, boolean)', 'evidence_budget_note_overrun(uuid, bigint)', 'evidence_budget_hold_exposure(uuid)', 'evidence_budget_summary(uuid, uuid)'))),
 			EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace rn ON c.relnamespace=rn.oid
 			WHERE rn.nspname NOT IN ('pg_catalog','information_schema') AND rn.nspname NOT LIKE 'pg\_temp\_%'
 			AND pg_catalog.has_schema_privilege($1::name,rn.oid,'USAGE')

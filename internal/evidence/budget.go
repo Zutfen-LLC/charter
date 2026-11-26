@@ -147,6 +147,11 @@ func (b PG) NoteUnquantifiedExposure(ctx context.Context, id string) error {
 	return b.transition(ctx, `SELECT evidence_budget_note_overrun($1::uuid,NULL::bigint)`, id)
 }
 
+// HoldBudgetExposure preserves a pending incident without assigning a cost.
+func (b PG) HoldBudgetExposure(ctx context.Context, id string) error {
+	return b.transition(ctx, `SELECT evidence_budget_hold_exposure($1::uuid)`, id)
+}
+
 // Settle records exact usage, or max(reservation, durable floor) as unknown.
 func (b PG) Settle(ctx context.Context, id string, exact *int64) error {
 	if exact != nil && !safeBudgetAmount(*exact) {

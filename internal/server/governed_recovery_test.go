@@ -169,7 +169,7 @@ func (b c05LostOverrunAck) NoteOverrun(ctx context.Context, id string, units int
 }
 
 func TestC05OverrunCrossStoreRecovery(t *testing.T) {
-	for _, mode := range []string{"floor-before-evidence-failure", "floor-write-rejected", "committed-ack-lost", "malformed", "envelope-overflow"} {
+	for _, mode := range []string{"floor-before-evidence-failure", "floor-write-rejected", "floor-and-evidence-rejected", "committed-ack-lost", "malformed", "envelope-overflow"} {
 		t.Run(mode, func(t *testing.T) {
 			e := newEnv(t)
 			ctx := context.Background()
@@ -206,10 +206,10 @@ func TestC05OverrunCrossStoreRecovery(t *testing.T) {
 			cfg.Endpoint = receiver.URL
 			cfg.MaxOutputBytes = 8
 			backend := evidence.Backend(b)
-			if mode == "floor-before-evidence-failure" || mode == "committed-ack-lost" {
+			if mode == "floor-before-evidence-failure" || mode == "committed-ack-lost" || mode == "floor-and-evidence-rejected" {
 				backend = c05EvidenceFailure{Backend: b, event: "usage_settled"}
 			}
-			if mode == "floor-write-rejected" {
+			if mode == "floor-write-rejected" || mode == "floor-and-evidence-rejected" {
 				_, err := e.st.DB.Exec(ctx, `CREATE FUNCTION reject_floor() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic floor write rejected'; END $$;
       CREATE TRIGGER reject_floor BEFORE UPDATE OF overrun_floor ON evidence_budget_reservations FOR EACH ROW EXECUTE FUNCTION reject_floor()`)
 				if err != nil {
@@ -243,7 +243,7 @@ func TestC05OverrunCrossStoreRecovery(t *testing.T) {
 				if floor != wantFloor || actual != nil || state != "open" || !frozen {
 					t.Error("floor and freeze must survive loss of terminal evidence")
 				}
-			case "floor-write-rejected":
+			case "floor-write-rejected", "floor-and-evidence-rejected":
 				if floor != 0 || actual != nil || state != "open" || !frozen {
 					t.Error("failed floor write must freeze with no below-floor settlement")
 				}
@@ -274,12 +274,21 @@ func TestC05OverrunCrossStoreRecovery(t *testing.T) {
 				if _, err := rr.Recover(ctx, time.Time{}); err != nil {
 					t.Fatal(err)
 				}
-				if err := restarted.RecoverBudget(ctx, restarted); err != nil {
+				err := restarted.RecoverBudget(ctx, restarted)
+				if mode == "floor-and-evidence-rejected" {
+					if !errors.Is(err, evidence.ErrBudgetConflict) {
+						t.Fatalf("lost observation should retain pending hold: %v", err)
+					}
+				} else if err != nil {
 					t.Fatal(err)
 				}
 			}
 			floor, actual, state, unknown, frozen = read("after-two-reconciliations")
-			if floor != wantFloor || actual == nil || *actual != wantCharge || state != "settled" || !unknown || !frozen {
+			if mode == "floor-and-evidence-rejected" {
+				if floor != 0 || actual != nil || state != "open" || !frozen {
+					t.Error("lost accounting observation must remain frozen and outstanding")
+				}
+			} else if floor != wantFloor || actual == nil || *actual != wantCharge || state != "settled" || !unknown || !frozen {
 				t.Error("incorrect terminal ledger after recovery")
 			}
 			e.auth.Evidence = &evidence.Recorder{Backend: b, Governance: routing.Governance(cfg, b, false, nil), Accounting: b.ReconcileBudget}
