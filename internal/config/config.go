@@ -12,13 +12,20 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/oidc"
 )
 
-// Evidence backend kinds. Both names select the PostgreSQL append-only evidence
-// tables; NEITHER is retention-enforced storage (docs/evidence-capture.md).
-// "test-fixture" is kept as an alias so existing environments keep working.
+// Evidence backend kinds. PostgreSQL remains the non-retention default.
 const (
 	EvidenceBackendTestFixture    = "test-fixture"
 	EvidenceBackendPostgresAppend = "postgres-append-only"
+	EvidenceBackendRetentionS3    = "s3-object-lock"
 )
+
+// RetentionS3 is the opt-in synthetic lab profile. Only the runtime storage
+// credential is accepted; the qualification signing key is never a server input.
+type RetentionS3 struct {
+	Endpoint, Region, Bucket, Deployment, AccessKey                 string
+	SecretFile, SignerSeedFile, CommitKey                           string
+	QualificationFile, QualificationKey, MinSeconds, SyntheticOptIn string
+}
 
 // OIDC settings. Entra mode needs the designated test tenant's id; nothing
 // tenant-specific is committed to the repository.
@@ -49,6 +56,7 @@ type Config struct {
 	EvidenceDatabaseURL string
 	MigrateDatabaseURL  string
 	EvidenceBackend     string
+	RetentionS3         RetentionS3
 	OIDC                OIDC
 }
 
@@ -59,6 +67,14 @@ func Load() Config {
 		EvidenceDatabaseURL: os.Getenv("CHARTER_EVIDENCE_DATABASE_URL"),
 		MigrateDatabaseURL:  os.Getenv("CHARTER_MIGRATE_DATABASE_URL"),
 		EvidenceBackend:     get("CHARTER_EVIDENCE_BACKEND", EvidenceBackendPostgresAppend),
+		RetentionS3: RetentionS3{
+			Endpoint: os.Getenv("CHARTER_S3_ENDPOINT"), Region: os.Getenv("CHARTER_S3_REGION"),
+			Bucket: os.Getenv("CHARTER_S3_BUCKET"), Deployment: os.Getenv("CHARTER_S3_DEPLOYMENT"),
+			AccessKey: os.Getenv("CHARTER_S3_RUNTIME_ACCESS_KEY"), SecretFile: os.Getenv("CHARTER_S3_RUNTIME_SECRET_FILE"),
+			SignerSeedFile: os.Getenv("CHARTER_S3_COMMIT_SEED_FILE"), CommitKey: os.Getenv("CHARTER_S3_COMMIT_PUBLIC_KEY"),
+			QualificationFile: os.Getenv("CHARTER_S3_QUALIFICATION_FILE"), QualificationKey: os.Getenv("CHARTER_S3_QUALIFICATION_PUBLIC_KEY"),
+			MinSeconds: os.Getenv("CHARTER_S3_RETENTION_SECONDS"), SyntheticOptIn: os.Getenv("CHARTER_S3_SYNTHETIC_OPT_IN"),
+		},
 		OIDC: OIDC{
 			Issuer:   os.Getenv("CHARTER_OIDC_ISSUER"),
 			Audience: os.Getenv("CHARTER_OIDC_AUDIENCE"),

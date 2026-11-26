@@ -23,10 +23,16 @@ import (
 
 const maxObjectBytes = 64 << 20
 
-type Config struct{ Endpoint, Region, Bucket, AccessKeyID, SecretAccessKey string }
+type Config struct {
+	Endpoint, Region, Bucket, AccessKeyID, SecretAccessKey string
+	// UseBucketDefault leaves object ACL/retention mutation permissions out of
+	// the writer credential. The backend verifies the actual resulting duration.
+	UseBucketDefault bool
+}
 type Client struct {
-	api    *s3.Client
-	bucket string
+	api              *s3.Client
+	bucket           string
+	useBucketDefault bool
 }
 type Version struct {
 	ID    string
@@ -77,7 +83,7 @@ func New(c Config) (*Client, error) {
 		o.UsePathStyle = true
 		o.Retryer = aws.NopRetryer{}
 	})
-	return &Client{api: api, bucket: c.Bucket}, nil
+	return &Client{api: api, bucket: c.Bucket, useBucketDefault: c.UseBucketDefault}, nil
 }
 func validBucket(s string) bool {
 	if len(s) < 3 || len(s) > 63 || s[0] == '-' || s[len(s)-1] == '-' || strings.Contains(s, "..") {
@@ -133,7 +139,11 @@ func (c *Client) Create(ctx context.Context, key string, data []byte, until time
 	star := "*"
 	digest := sha256.Sum256(data)
 	checksum := base64.StdEncoding.EncodeToString(digest[:])
-	out, e := c.api.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key), Body: bytes.NewReader(data), ContentLength: aws.Int64(int64(len(data))), ChecksumSHA256: aws.String(checksum), IfNoneMatch: &star, ObjectLockMode: types.ObjectLockModeCompliance, ObjectLockRetainUntilDate: &until})
+	in := &s3.PutObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key), Body: bytes.NewReader(data), ContentLength: aws.Int64(int64(len(data))), ChecksumSHA256: aws.String(checksum), IfNoneMatch: &star}
+	if !c.useBucketDefault {
+		in.ObjectLockMode, in.ObjectLockRetainUntilDate = types.ObjectLockModeCompliance, &until
+	}
+	out, e := c.api.PutObject(ctx, in)
 	if e != nil {
 		return "", createError(e)
 	}

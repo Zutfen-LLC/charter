@@ -20,6 +20,7 @@ type Pinger interface {
 type EvidenceBackend struct {
 	Kind              string `json:"kind"`
 	RetentionEnforced bool   `json:"retention_enforced"`
+	RetentionStatus   string `json:"retention_status,omitempty"`
 	Notice            string `json:"notice"`
 }
 

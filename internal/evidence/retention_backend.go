@@ -31,6 +31,7 @@ type RetentionOptions struct {
 	Signer             ed25519.PrivateKey
 	RetainFor          time.Duration
 	Fence              *Fence
+	Probe              func(context.Context) error
 }
 type RetentionBackend struct {
 	store                      retentionTransport
@@ -40,6 +41,7 @@ type RetentionBackend struct {
 	signer                     ed25519.PrivateKey
 	retainFor                  time.Duration
 	fence                      *Fence
+	probe                      func(context.Context) error
 }
 
 func NewRetentionBackend(o RetentionOptions) (*RetentionBackend, error) {
@@ -52,7 +54,7 @@ func NewRetentionBackend(o RetentionOptions) (*RetentionBackend, error) {
 	if len(o.Signer) != 0 && (len(o.Signer) != ed25519.PrivateKeySize || !bytes.Equal(ed25519.NewKeyFromSeed(o.Signer[:ed25519.SeedSize]), o.Signer) || !bytes.Equal(o.Signer.Public().(ed25519.PublicKey), o.TrustedCommitKey) || o.Fence == nil || o.RetainFor < time.Minute) {
 		return nil, errors.New("evidence: unsafe retained write configuration")
 	}
-	return &RetentionBackend{store: o.Store, deployment: o.Deployment, bucket: o.Bucket, prefix: "charter/v1/" + o.Deployment + "/", trustedKey: bytes.Clone(o.TrustedCommitKey), minimumRetention: o.MinimumRetention.UTC(), signer: bytes.Clone(o.Signer), retainFor: o.RetainFor, fence: o.Fence}, nil
+	return &RetentionBackend{store: o.Store, deployment: o.Deployment, bucket: o.Bucket, prefix: "charter/v1/" + o.Deployment + "/", trustedKey: bytes.Clone(o.TrustedCommitKey), minimumRetention: o.MinimumRetention.UTC(), signer: bytes.Clone(o.Signer), retainFor: o.RetainFor, fence: o.Fence, probe: o.Probe}, nil
 }
 func (*RetentionBackend) Info() BackendInfo {
 	return BackendInfo{Kind: RetentionProfile, RetentionEnforced: false, Notice: "S3 Object Lock candidate; real-storage qualification has not been demonstrated."}
@@ -329,6 +331,11 @@ func (b *RetentionBackend) LoadRetainedObjects(ctx context.Context, tenant, turn
 	return out, nil
 }
 func (b *RetentionBackend) VerifyRetainedTurn(ctx context.Context, tenant, turn string, expected []Event) error {
+	if b.probe != nil {
+		if err := b.probe(ctx); err != nil {
+			return err
+		}
+	}
 	objs, err := b.LoadRetainedObjects(ctx, tenant, turn, expected)
 	if err != nil {
 		return err

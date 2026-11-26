@@ -1,6 +1,6 @@
 # Retention candidate: persistence and recovery
 
-This is an unwired C04 candidate. `charter serve` still uses PostgreSQL and does not claim retention. Neither the Go/Python profile nor the test transport is storage qualification.
+PostgreSQL remains the default and does not claim retention. Explicit `CHARTER_EVIDENCE_BACKEND=s3-object-lock` is a separate synthetic-only deployment. Startup requires a fresh signed storage-native qualification for the selected installation and current live readback of its pinned authority version. The Go/Python offline profile and simulated transport tests are not qualification.
 
 ## Authority
 
@@ -23,7 +23,9 @@ This is an unwired C04 candidate. `charter serve` still uses PostgreSQL and does
 | Intent acknowledgment exists without provider acceptance | Conservatively unknown, reserved-max settlement on recovery. |
 | Output acknowledgment exists but policy or storage fails afterward | No output is returned. If release authorization was committed, recovery completes it and permits only a freshly authorized delivery replay. |
 
-Gate readbacks run before last-mile authorization, cancellation and ownership checks. No storage writes sit between the last delivery check and output. The retained profile adds fresh authorization before dispatch as well. Real delivery/dispatch recovery, conditional creation across concurrent versioned PUTs, exact version and policy behavior, and actual runtime/admin probes still require real qualification.
+Gate readbacks run before last-mile authorization, cancellation and ownership checks. No storage writes sit between the last delivery check and output. The retained profile adds fresh authorization before dispatch as well. An exact-version readback must verify active COMPLIANCE protection at or beyond the signed deployment floor. New objects inherit the locked bucket's default rather than giving the runtime credential permission to set or mutate retention. PostgreSQL and storage are verified on readiness; mandatory storage is not a fallback tier.
+
+The database owner binds the synthetic database to this profile and deployment, separately from provisioning. A legacy database with evidence already present cannot be relabeled by startup. The profile has no mutable authoritative PostgreSQL index to rebuild: a fresh read-only instance supplied with the trusted public key, deployment namespace and qualified storage can reconstruct from commit/version inventory without opening PostgreSQL. Workspace authorization remains a separate dependency for live delivery.
 
 ## No holds or purge
 

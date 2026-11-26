@@ -20,17 +20,33 @@ func (b *RetentionBackend) lockedWrite(ctx context.Context, work func() error) e
 		return ErrNotDurable
 	}
 	pg := PG{fence: b.fence}
-	tx, _, release, err := pg.begin(ctx)
-	if err != nil {
-		return err
-	}
-	err = work()
-	if err == nil {
-		err = tx.Commit(ctx)
-	}
-	_ = tx.Rollback(ctx)
-	release()
-	if err != nil {
+	if err := func() error {
+		tx, _, release, err := pg.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer func() {
+			// The evidence deadline may have been consumed by S3. Rollback must
+			// still reach PostgreSQL; pgx otherwise closes the owning session on
+			// a cancelled rollback and falsely converts a storage outage to fence loss.
+			clean, cancel := context.WithTimeout(context.Background(), fenceTimeout)
+			defer cancel()
+			_ = tx.Rollback(clean)
+		}()
+		if b.probe != nil {
+			if err = b.probe(ctx); err != nil {
+				return err
+			}
+		}
+		if err = work(); err != nil {
+			return err
+		}
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}(); err != nil {
 		return err
 	}
 	return b.fence.Check(ctx)
