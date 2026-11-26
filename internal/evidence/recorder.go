@@ -565,6 +565,19 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 			return fail("policy_error", errors.New("invalid governed plan"))
 		}
 		if err == nil {
+			if external {
+				// C06 context eligibility: revalidate delegated source
+				// authorization and membership BEFORE any source-derived
+				// request construction, object persistence or context
+				// sealing, so a source that is revoked or unavailable after
+				// selection can never become sealed model context. The
+				// admission event remains lawfully captured evidence of the
+				// request; the never-eligible context is never built.
+				if gerr := gate(ctx); gerr != nil {
+					rc.abort(ctx, t, "context_eligibility_denied")
+					return Result{}, gerr
+				}
+			}
 			sent, err = plan.Build(req)
 			if err != nil {
 				return fail("render_failed", err)
@@ -679,18 +692,30 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		if err := plan.Arm(ctx, t.id); err != nil {
 			return fail("dispatch_arm_unconfirmed", err)
 		}
-		if err := plan.CheckRoute(ctx); err != nil {
-			rc.abort(ctx, t, "route_revoked_before_dispatch")
-			return Result{}, err
-		}
 	}
 	if _, retained := rc.Backend.(retainedTurnBackend); (retained || rc.Governance != nil) && gate != nil {
+		// Final delegated source authorization: sequential connector
+		// metadata/read/metadata operations that can materially extend the
+		// interval since the last local check.
 		if err := gate(ctx); err != nil {
 			rc.abort(ctx, t, "dispatch_denied")
 			return Result{}, err
 		}
 		if external {
 			dispatchAuthorization = rc.stamp()
+		}
+	}
+	if rc.Governance != nil {
+		// C05/C06 route authorization is re-resolved AFTER the final
+		// delegated source revalidation above and as close to actual
+		// invocation as practicable: only local checks (caller liveness and
+		// the ownership fence) sit between this verification and the call.
+		// Invoke itself does not resolve route authorization, so a policy
+		// change committed during the connector operations must be seen
+		// here, never at the model.
+		if err := plan.CheckRoute(ctx); err != nil {
+			rc.abort(ctx, t, "route_revoked_before_dispatch")
+			return Result{}, err
 		}
 	}
 

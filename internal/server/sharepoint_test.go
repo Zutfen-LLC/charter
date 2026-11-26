@@ -179,18 +179,24 @@ func TestC06ConcurrentSameKeyAndUnauthorizedCaller(t *testing.T) {
 }
 
 func TestC06RevocationAtEachBoundary(t *testing.T) {
+	// Connector reads per successful single-source turn, in order:
+	// 1 selection, 2 context eligibility (before request construction and
+	// sealing), 3 disclosure intent, 4 dispatch, 5 release, 6 recorder
+	// delivery, 7 HTTP delivery. Revoking after read N fails boundary N+1.
 	for _, tc := range []struct {
 		name        string
 		phase       int64
 		invocations int32
 		released    bool
+		reserved    bool
 	}{
-		{"selection", 1, 0, false},
-		{"context-eligibility", 2, 0, false},
-		{"dispatch", 3, 0, false},
-		{"release", 4, 1, false},
-		{"delivery", 5, 1, true},
-		{"http-delivery", 6, 1, true},
+		{"selection", 1, 0, false, false},
+		{"context-eligibility", 2, 0, false, false},
+		{"disclosure-intent", 3, 0, false, true},
+		{"dispatch", 4, 0, false, true},
+		{"release", 5, 1, false, true},
+		{"delivery", 6, 1, true, true},
+		{"http-delivery", 7, 1, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, f, calls := c06Fixture(t)
@@ -214,19 +220,36 @@ func TestC06RevocationAtEachBoundary(t *testing.T) {
 				t.Fatal("expected one admitted turn")
 			}
 			evs := e.verify(turns[0])
-			released := false
+			released, sealed := false, false
 			for _, ev := range evs {
-				if ev["type"] == "response_released" {
+				switch ev["type"] {
+				case "response_released":
 					released = true
+				case "context_sealed":
+					sealed = true
 				}
 			}
 			if released != tc.released {
 				t.Fatalf("release authorization=%t", released)
 			}
+			if tc.phase == 2 && sealed {
+				// The context-eligibility boundary precedes request
+				// construction and sealing: a source revoked before it can
+				// never become sealed model context.
+				t.Fatal("source revoked before context eligibility was sealed")
+			}
+			if tc.phase > 2 && !sealed {
+				t.Fatal("later boundaries expect a sealed context")
+			}
 			var charge int64
 			err := e.st.DB.QueryRow(context.Background(), `SELECT actual_amount FROM evidence_budget_reservations WHERE project_id=$1 AND idempotency_key='revoke'`, e.p1).Scan(&charge)
-			if err != nil || (charge > 0) != (tc.invocations != 0) {
-				t.Fatalf("charge=%d err=%v", charge, err)
+			if tc.reserved {
+				if err != nil || (charge > 0) != (tc.invocations != 0) {
+					t.Fatalf("charge=%d err=%v", charge, err)
+				}
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				// Pre-sealing refusal: the reservation itself never exists.
+				t.Fatalf("reservation exists before sealing: charge=%d err=%v", charge, err)
 			}
 			c06Post(t, e, "alice", e.p1, "revoke", c06Body, 404)
 			f.Grant("sp-document", "provider-alice", true)
