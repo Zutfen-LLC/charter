@@ -44,8 +44,11 @@ def bind(f):
         for key in ("decision", "observed_at"):
             row["external"].pop(key, None)
     identity = {k: first[k] for k in ("matter_id", "tenant_id", "project_id")}
+    # The v3 fingerprint binds the model selection as recorded on admission:
+    # the explicitly requested registry model, or the empty string when the
+    # selection was omitted (default resolution happens server-side).
     identity.update(v=3, custodian_id=received["custodian_id"], input=received["input"],
-                    sources=stable, model_id=received["model_registry_id"])
+                    sources=stable, model_id=received.get("model_registry_id", ""))
     received["request_fingerprint"] = sha256_bytes(canonical(identity))
     for typ in ("output_recorded", "response_released"):
         p(f, typ)["source_provenance_sha256"] = sha256_bytes(canonical(sources))
@@ -75,6 +78,10 @@ def build():
 
 
 def cases():
+    # "det-a" is the documented default resolution for an omitted model
+    # selection (docs/model-routing-and-budget.md). Registry identifiers are
+    # never provider-native model identifiers: the rendered request keeps
+    # binding the destination model (ROUTE["model_id"]).
     for name, diagnostic, mutation, coherent in (
         ("positive", "", lambda f: None, False),
         ("wrong-excerpt", "exact rendered request", lambda f: render(f, "wrong text"), True),
@@ -85,6 +92,12 @@ def cases():
         ("wrong-fingerprint", "v3 request fingerprint", lambda f: p(f, "turn_received").update(request_fingerprint=sha256_bytes(b"other")), False),
         ("impossible-observation", "source observation date is invalid", lambda f: binding(f).update(observed_at="2026-01-00T00:00:00.000Z"), True),
         ("stale-dispatch-proof", "source_authorized_at is out of order", lambda f: p(f, "provider_accepted").update(source_authorized_at=f["events"][0]["recorded_at"]), False),
+        ("mismatched-registry-model", "reserved registry model differs from the explicitly requested registry model",
+         lambda f: p(f, "usage_reserved").update(registry_model="registry-b"), True),
+        ("omitted-model-default", "",
+         lambda f: (p(f, "turn_received").pop("model_registry_id"), p(f, "usage_reserved").update(registry_model="det-a")), True),
+        ("omitted-model-nondefault", "reserved registry model must be the documented default resolution",
+         lambda f: (p(f, "turn_received").pop("model_registry_id"), p(f, "usage_reserved").update(registry_model="registry-b")), True),
     ):
         f = build()
         mutation(f)

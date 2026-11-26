@@ -13,6 +13,7 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/routing"
 	"github.com/Zutfen-LLC/charter/internal/sharepoint"
+	"github.com/jackc/pgx/v5"
 	"testing"
 )
 
@@ -295,6 +296,154 @@ func TestC06DurabilityFailuresWithholdOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+// c06IntentAckObserver records when the disclosure intent has been durably
+// acknowledged so a test can commit policy state during the final delegated
+// source revalidation that follows it, deterministically, at any head.
+type c06IntentAckObserver struct {
+	evidence.Backend
+	seenIntent bool
+	acked      atomic.Bool
+}
+
+func (b *c06IntentAckObserver) Append(ctx context.Context, e evidence.Event) (evidence.Receipt, error) {
+	if typ, ok := e["type"].(string); ok {
+		switch typ {
+		case "disclosure_intent":
+			b.seenIntent = true
+		case "evidence_ack":
+			if b.seenIntent {
+				b.acked.Store(true)
+			}
+		}
+	}
+	return b.Backend.Append(ctx, e)
+}
+
+// TestC06RouteRevocationDuringFinalSourceRevalidation pins the dispatch
+// ordering: a project routing-policy change committed while the final
+// delegated source revalidation is in flight (after the intent is durable,
+// with source ACLs, version, bytes and membership still valid) must prevent
+// the model invocation. Route authorization is re-resolved after the
+// connector operations, as close to invocation as practicable.
+func TestC06RouteRevocationDuringFinalSourceRevalidation(t *testing.T) {
+	e, f, calls := c06Fixture(t)
+	b := evidence.PG{DB: e.st.DB}
+	observer := &c06IntentAckObserver{Backend: e.auth.Evidence.Backend}
+	e.auth.Evidence.Backend = observer
+	revoked := false
+	f.AfterRead = func() {
+		if observer.acked.Load() && !revoked {
+			revoked = true
+			if err := b.SetPolicy(context.Background(), evidence.BudgetPolicy{
+				TenantID: e.tenant, ProjectID: e.p1, LocalOnly: true,
+				AllowedModels: []string{"det-b"}, ProjectCap: 10000000,
+			}); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	c06Post(t, e, "alice", e.p1, "route-revoke", c06Body, http.StatusForbidden)
+	if !revoked {
+		t.Fatal("routing-policy change was never committed during source revalidation")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("model invoked despite committed route revocation: %d invocations", calls.Load())
+	}
+	turns := e.turns()
+	if len(turns) != 1 {
+		t.Fatalf("expected one admitted turn, got %d", len(turns))
+	}
+	evs := e.verify(turns[0])
+	for _, ev := range evs {
+		switch ev["type"] {
+		case "provider_accepted", "output_recorded", "response_released":
+			t.Fatalf("output or release authorization followed the route revocation: %v", ev["type"])
+		}
+	}
+	last := evs[len(evs)-1]
+	if last["type"] != evidence.TypeTurnInterrupted {
+		t.Fatalf("turn did not end interrupted: %v", last["type"])
+	}
+	if reason := last["payload"].(map[string]any)["reason"]; reason != "route_revoked_before_dispatch" {
+		t.Fatalf("interrupt reason = %v", reason)
+	}
+	// Proven non-dispatch: zero settled charge, no stranded reservation, no
+	// unknown exposure, and no fallback or alternate-model dispatch (calls
+	// counts every synthetic adapter invocation).
+	sum, err := b.Summary(context.Background(), e.tenant, e.p1)
+	if err != nil || sum.Outstanding != 0 || sum.Unknown != 0 {
+		t.Fatalf("accounting after non-dispatch: %+v %v", sum, err)
+	}
+	var charge int64
+	if err := e.st.DB.QueryRow(context.Background(),
+		`SELECT actual_amount FROM evidence_budget_reservations WHERE project_id=$1 AND idempotency_key='route-revoke'`, e.p1).Scan(&charge); err != nil || charge != 0 {
+		t.Fatalf("charge=%d err=%v", charge, err)
+	}
+	t.Logf("route revoked during final revalidation: reads=%d model invocations=%d charge=%d", f.ReadCalls.Load(), calls.Load(), charge)
+}
+
+// TestC06ContextEligibilityPrecedesSealing pins the context-eligibility
+// ordering: a source revoked after the initial selection read completed, but
+// before the first context-eligibility revalidation, can never become sealed
+// model context. The full evidence chain and referenced objects are inspected,
+// not only the HTTP status and invocation count.
+func TestC06ContextEligibilityPrecedesSealing(t *testing.T) {
+	e, f, calls := c06Fixture(t)
+	// Revoke the delegated source grant between the completed selection read
+	// and the first context-eligibility revalidation: BeforeRead fires inside
+	// the second connector read, after the selection read fully completed.
+	f.BeforeRead = func() {
+		if f.ReadCalls.Load() == 2 {
+			f.Grant("sp-document", "provider-alice", false)
+		}
+	}
+	c06Post(t, e, "alice", e.p1, "eligibility", c06Body, http.StatusNotFound)
+	if calls.Load() != 0 {
+		t.Fatalf("ineligible source dispatched: %d invocations", calls.Load())
+	}
+	turns := e.turns()
+	if len(turns) != 1 {
+		t.Fatalf("expected one admitted turn, got %d", len(turns))
+	}
+	evs := e.verify(turns[0])
+	for _, ev := range evs {
+		switch ev["type"] {
+		case "context_sealed":
+			t.Fatal("revoked source became sealed model context")
+		case "disclosure_intent":
+			t.Fatal("disclosure intent recorded for an ineligible source")
+		}
+	}
+	last := evs[len(evs)-1]
+	if last["type"] != evidence.TypeTurnInterrupted {
+		t.Fatalf("turn did not end interrupted: %v", last["type"])
+	}
+	p := last["payload"].(map[string]any)
+	if p["disclosure"] != "none" {
+		t.Fatalf("disclosure = %v", p["disclosure"])
+	}
+	if reason := p["reason"]; reason != "context_eligibility_denied" {
+		t.Fatalf("interrupt reason = %v", reason)
+	}
+	// Admission evidence (turn_received and its exact input object) is lawfully
+	// captured; nothing else may exist. No reservation, charge or exposure.
+	for _, ev := range evs[1 : len(evs)-1] {
+		t.Fatalf("unexpected event between admission and interruption: %v", ev["type"])
+	}
+	var charge int64
+	err := e.st.DB.QueryRow(context.Background(),
+		`SELECT actual_amount FROM evidence_budget_reservations WHERE project_id=$1 AND idempotency_key='eligibility'`, e.p1).Scan(&charge)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("reservation exists after pre-sealing refusal: charge=%d err=%v", charge, err)
+	}
+	ledger := evidence.PG{DB: e.st.DB}
+	sum, err := ledger.Summary(context.Background(), e.tenant, e.p1)
+	if err != nil || sum.Outstanding != 0 || sum.Unknown != 0 {
+		t.Fatalf("accounting after pre-sealing refusal: %+v %v", sum, err)
+	}
+	t.Logf("source revoked before eligibility: reads=%d events=%d invocations=%d", f.ReadCalls.Load(), len(evs), calls.Load())
 }
 
 func TestC06RestartWithUnfinalizedReleaseAndDeletedSource(t *testing.T) {
