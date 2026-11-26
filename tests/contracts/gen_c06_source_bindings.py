@@ -83,6 +83,7 @@ def cases():
         ("missing-native-version", "external source identifier", lambda f: binding(f).update(provider_version=""), True),
         ("missing-release-provenance", "output and release must bind", lambda f: p(f, "response_released").pop("source_provenance_sha256"), False),
         ("wrong-fingerprint", "v3 request fingerprint", lambda f: p(f, "turn_received").update(request_fingerprint=sha256_bytes(b"other")), False),
+        ("impossible-observation", "source observation date is invalid", lambda f: binding(f).update(observed_at="2026-01-00T00:00:00.000Z"), True),
         ("stale-dispatch-proof", "source_authorized_at is out of order", lambda f: p(f, "provider_accepted").update(source_authorized_at=f["events"][0]["recorded_at"]), False),
     ):
         f = build()

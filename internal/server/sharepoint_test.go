@@ -109,6 +109,9 @@ func TestC06MixedSourcesReplayAndWorkspaceIsolation(t *testing.T) {
 	e.want("alice", "POST", "/v1/artifacts/"+turn+"/share", 404)
 	c06Post(t, e, "alice", e.p2, "mixed", body, 404)
 	for _, u := range []string{"carol", "dave", "frank"} {
+		if err := e.st.SeedMember(context.Background(), e.tenant, e.p1, e.users[u]); err != nil {
+			t.Fatal(err)
+		}
 		c06Post(t, e, u, e.p1, "mixed", body, 404)
 	}
 	for _, u := range []string{"alice", "bob"} {
@@ -321,4 +324,35 @@ func TestC06RestartWithUnfinalizedReleaseAndDeletedSource(t *testing.T) {
 	c06Post(t, e, "alice", e.p1, "restart", c06Body, 503)
 	f.SetOutage(nil)
 	c06Post(t, e, "alice", e.p1, "restart", c06Body, 404)
+}
+
+func TestC06ConcurrentSourceAccessAndRevocation(t *testing.T) {
+	e, f, calls := c06Fixture(t)
+	reading, revoked := make(chan struct{}), make(chan struct{})
+	f.AfterRead = func() {
+		if f.ReadCalls.Load() == 1 {
+			close(reading)
+			<-revoked
+		}
+	}
+	go func() { <-reading; f.Grant("sp-document", "provider-alice", false); close(revoked) }()
+	c06Post(t, e, "alice", e.p1, "race-revoke", c06Body, 404)
+	if len(e.turns()) != 0 || calls.Load() != 0 {
+		t.Fatal("revoked selection admitted or dispatched")
+	}
+	f.Grant("sp-document", "provider-alice", true)
+	c06Post(t, e, "alice", e.p1, "race-revoke", c06Body, 200)
+	for _, m := range []sharepoint.Metadata{
+		{TenantID: "other-tenant", SiteID: "site", LibraryID: "library"},
+		{TenantID: "external-tenant", SiteID: "site", LibraryID: "other-library"},
+	} {
+		m.DocumentID = "sp-document"
+		m.Version = "1.0"
+		m.ETag = "etag-1"
+		f.Put(sharepoint.Document{Metadata: m, Content: []byte("abcRESTRICT!xyz")})
+		c06Post(t, e, "alice", e.p1, "foreign", c06Body, 404)
+	}
+	if calls.Load() != 1 {
+		t.Fatal("source scope substitution sent a model request")
+	}
 }

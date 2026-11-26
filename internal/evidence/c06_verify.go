@@ -154,7 +154,7 @@ func verifyC06(events []Event, objects map[string][]byte, full bool) (errs []str
 		if !c06Timestamp.MatchString(observed) {
 			add(sealedAt, "external observed_at must be UTC milliseconds")
 		} else if _, err := time.Parse("2006-01-02T15:04:05.000Z", observed); err != nil {
-			add(sealedAt, "external observed_at is invalid")
+			add(sealedAt, "source observation date is invalid")
 		} else if observed > str(events[sealedAt], "recorded_at") {
 			add(sealedAt, "source observation cannot follow context_sealed")
 		}

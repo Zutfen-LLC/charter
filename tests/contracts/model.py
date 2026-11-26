@@ -542,6 +542,14 @@ def _verify_c06(events, objects):
     errs = []
     if not events or not isinstance(events[0], dict):
         return errs
+    def timestamp(value):
+        if not isinstance(value, str) or not TS_RE.fullmatch(value):
+            return False
+        try:
+            datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+        except ValueError:
+            return False
+        return True
     received = _pl(events[0])
     if "source_binding_version" not in received:
         # A provenance marker is never valid outside a C06-bound turn.
@@ -626,8 +634,8 @@ def _verify_c06(events, objects):
         bound_scope = scope
         excerpts.append({"source_id": source.get("source_id"), "provider_version": ext["provider_version"], "text": text(sha)})
         observed = ext.get("observed_at")
-        if not isinstance(observed, str) or not TS_RE.fullmatch(observed):
-            add(sealed_i, "external observed_at must be UTC milliseconds")
+        if not timestamp(observed):
+            add(sealed_i, "source observation date is invalid")
     if not external_seen:
         add(sealed_i, "source binding version 1 requires an external source")
     fingerprint_sources = []
@@ -679,15 +687,15 @@ def _verify_c06(events, objects):
                 add(i, "C06 usage reservation requires C05 governed accounting")
         if typ in ("disclosure_intent", "provider_accepted", "response_released"):
             ts = p.get("source_authorized_at")
-            if not isinstance(ts, str) or not TS_RE.fullmatch(ts):
-                add(i, f"{typ}.source_authorized_at must be UTC milliseconds")
+            if not timestamp(ts):
+                add(i, f"{typ}.source_authorized_at must be a valid UTC millisecond timestamp")
             elif not isinstance(latest_auth, str) or not isinstance(e.get("recorded_at"), str) or ts > e["recorded_at"] or ts < latest_auth:
                 add(i, f"{typ}.source_authorized_at is out of order")
             else:
                 latest_auth = ts
     for source in sources:
         ext = source.get("external") if isinstance(source, dict) else None
-        if isinstance(ext, dict) and isinstance(ext.get("observed_at"), str) and ext["observed_at"] > sealed_at:
+        if isinstance(ext, dict) and isinstance(ext.get("observed_at"), str) and isinstance(sealed_at, str) and ext["observed_at"] > sealed_at:
             add(sealed_i, "source observation cannot follow context_sealed")
     return errs
 
