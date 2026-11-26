@@ -29,11 +29,15 @@ scripts/dev.sh down
 
 At startup `serve` validates the [restricted runtime credential profile](runtime-protection.md), takes the [ownership and drain fence](fence-ownership.md), and recovers unfinished turns before accepting requests. For a shared environment create the logins with `scripts/provision-runtime-roles.sql` (real secrets) after `charter migrate`. `/healthz` is liveness; `/readyz` pings both pools and returns 503 if either is unreachable. A process that loses ownership stops serving rather than reconnecting and continuing. `charter migrate` falls back to `CHARTER_DATABASE_URL` only as a development convenience.
 
-## Evidence is durable but not retention-enforced storage
-Evidence is written to append-only PostgreSQL tables ([evidence capture](evidence-capture.md)). That backend (`CHARTER_EVIDENCE_BACKEND=postgres-append-only`, default; `test-fixture` is an alias) is **not** WORM: a database owner can still alter it, `/healthz` reports `retention_enforced: false` with a notice, and the server logs it at startup. Do not advertise or use it as a preservation backend. Qualifying a genuinely retention-capable backend is still open (#4).
+## Evidence backends
+
+`CHARTER_EVIDENCE_BACKEND=postgres-append-only` is the default (`test-fixture` remains an alias). It is durable, not WORM: a database owner can alter it and `/healthz` reports `retention_enforced: false`.
+
+The same `charter serve` entrypoint can explicitly select `s3-object-lock` **only in the isolated synthetic lab**. Provision the database binding, qualified storage, separate runtime credential, signed activation statement and signing seed out of process. Use the [pinned lab procedure](retention-qualification.md) and [retained evidence profile](retention-candidate.md), not the ordinary development database. A missing opt-in, invalid qualification, unsafe runtime credentials or invalid live storage blocks startup. The retained deployment does not fall back to PostgreSQL; `/readyz` also checks storage protection, while `/healthz` identifies the backend and its startup qualification scope. Keep all storage-management credentials outside the serving identity.
 
 ## Egress and providers
-The server makes no outbound calls unless OIDC is configured, and then only to the configured https JWKS URL, never following redirects ([identity and access](identity-and-access.md)). Tests use an in-process synthetic IdP. Model calls go through the evidence recorder; deterministic fake model providers arrive with #5 (until then a stub answers). Any future outbound call must be opt-in and default off.
+
+By default, the server makes no outbound calls except to the configured OIDC JWKS endpoint when OIDC is enabled. The retention lab adds loopback S3 access and uses the synthetic loopback IdP; its deterministic model adapter consumes the exact sealed input without calling a remote model. No production storage or provider deployment is authorized by this mode.
 
 ## Stack decision
 Go + PostgreSQL, as the issue prefers: one static binary, a small dependency set (`pgx`), and embedded SQL migrations applied in order under an advisory lock. Migration `0003` defines the evidence schema from ADR 0001.

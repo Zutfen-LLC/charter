@@ -115,7 +115,13 @@ func VerifyCurrentFull(events []Event, objects map[string][]byte) []string {
 	return VerifyFull(events, objects)
 }
 
-func verify(events []Event, objects map[string][]byte, full bool) (errs []string) {
+func verify(events []Event, objects map[string][]byte, full bool) []string {
+	return verifyChain(events, objects, full, false)
+}
+
+// An unfinished prefix is internal to write-ahead gate checks only. Offline
+// verification always requires the original single terminal event.
+func verifyChain(events []Event, objects map[string][]byte, full, allowUnfinished bool) (errs []string) {
 	defer func() {
 		// Malformed input must produce verification errors, never a crash.
 		if r := recover(); r != nil {
@@ -134,10 +140,12 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 	}
 	first := events[0]
 	profile, hasProfile := payload(first)["evidence_profile"]
-	current := profile == CurrentProfile
+	retained := profile == RetentionProfile
+	current := profile == CurrentProfile || retained
 	if hasProfile && !current {
 		add(0, CodeEnvelope, "unknown evidence profile")
 	}
+	var deployment, bucket string
 	acked := map[int]bool{}
 	var sealedObjs map[string]int64 // object refs declared by context_sealed
 	var sealedReq string
@@ -296,8 +304,11 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 				add(i, CodeRefs, "evidence_ack.receipt is required and must be a valid identifier")
 			}
 			level, hasLevel := p["storage_level"]
-			if (current || hasLevel) && level != postgresDurableLevel {
+			if (retained && level != retentionDurableLevel) || (!retained && (current || hasLevel) && level != postgresDurableLevel) {
 				add(i, CodeRefs, "evidence_ack.storage_level must identify a supported durable storage class")
+			}
+			if _, hasRetainedReceipt := p["retained_receipt"]; !retained && hasRetainedReceipt {
+				add(i, CodeRefs, "retained receipt requires a retention profile")
 			}
 			a, ok := integer(p["acked_seq"])
 			h, _ := p["acked_event_hash"].(string)
@@ -306,6 +317,14 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 			} else {
 				if level == postgresDurableLevel && receipt != eventReceipt(postgresDurableLevel, events[a]).ID {
 					add(i, CodeRefs, "evidence_ack receipt does not bind the storage level and target event")
+				}
+				if retained {
+					r, valid := ackRetainedReceipt(p, events[a])
+					if !valid || (deployment != "" && (r.Deployment != deployment || r.Bucket != bucket)) {
+						add(i, CodeRefs, "retained receipt does not bind the event bytes and storage identity")
+					} else {
+						deployment, bucket = r.Deployment, r.Bucket
+					}
 				}
 				target := str(events[a], "type")
 				if current && (a != int64(i-1) || (target != "disclosure_intent" && target != "output_recorded")) {
@@ -409,10 +428,10 @@ func verify(events []Event, objects map[string][]byte, full bool) (errs []string
 			termAt = i
 		}
 	}
-	if terms != 1 || termAt != len(events)-1 {
+	if !(allowUnfinished && terms == 0) && (terms != 1 || termAt != len(events)-1) {
 		add(-1, "R3", "exactly one terminal event, last")
 	}
-	if contains(types, "response_released") && types[len(types)-1] != TypeTurnCompleted {
+	if !(allowUnfinished && terms == 0) && contains(types, "response_released") && types[len(types)-1] != TypeTurnCompleted {
 		add(-1, "R3", "response released in a turn that did not complete")
 	}
 	if full {

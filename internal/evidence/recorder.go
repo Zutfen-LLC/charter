@@ -13,8 +13,30 @@ import (
 const (
 	SchemaVersion = "1.0.0"
 	// CurrentProfile is recorded on admission and covers the entire turn.
-	CurrentProfile = "charter-postgres-v1"
+	CurrentProfile        = "charter-postgres-v1"
+	RetentionProfile      = "charter-s3-compliance-v1"
+	retentionDurableLevel = "s3:object-lock:COMPLIANCE"
 )
+
+// Keep the exact-storage recheck before last-mile authorization and fencing.
+type retainedTurnVerifier interface {
+	VerifyRetainedTurn(context.Context, string, string, []Event) error
+}
+
+type retainedTurnBackend interface {
+	retainedTurnVerifier
+	LoadRetainedObjects(context.Context, string, string, []Event) (map[string][]byte, error)
+}
+
+func (rc *Recorder) verifyRetained(ctx context.Context, t *turn, expected []Event) error {
+	b, ok := rc.Backend.(retainedTurnVerifier)
+	if !ok {
+		return nil
+	}
+	c, cancel := context.WithTimeout(ctx, rc.EvidenceTimeout)
+	defer cancel()
+	return b.VerifyRetainedTurn(c, t.tenant, t.id, expected)
+}
 
 // Destination is where the policy decision routed the request: the ACTUAL
 // provider endpoint and model identifier, not what the client asked for.
@@ -234,9 +256,20 @@ func (t *turn) emit(ctx context.Context, typ string, p map[string]any) (Event, R
 // the gate it guards open (R1, R2).
 func (t *turn) ack(ctx context.Context, r Receipt) error {
 	last := t.events[len(t.events)-1]
-	_, _, err := t.emit(ctx, "evidence_ack", map[string]any{
+	p := map[string]any{
 		"acked_seq": last["seq"], "acked_event_hash": last["event_hash"],
-		"receipt": r.ID, "storage_level": r.Level})
+		"receipt": r.ID, "storage_level": r.Level}
+	if _, ok := t.rc.Backend.(retainedTurnBackend); ok {
+		if r.Retained == nil || r.Level != retentionDurableLevel {
+			return ErrNotDurable
+		}
+		id, err := retainedReceiptID(*r.Retained)
+		if err != nil || id != r.ID || r.Retained.EventHash != str(last, "event_hash") {
+			return ErrNotDurable
+		}
+		p["retained_receipt"] = mapRetainedReceipt(*r.Retained)
+	}
+	_, _, err := t.emit(ctx, "evidence_ack", p)
 	return err
 }
 
@@ -277,6 +310,9 @@ func (rc *Recorder) Process(ctx context.Context, req Request, call ModelFunc, ga
 	if err := ctx.Err(); err != nil {
 		return Result{}, &AbortedError{Stage: "admission", Cause: err}
 	}
+	if _, retained := rc.Backend.(retainedTurnBackend); retained && gate == nil {
+		return Result{}, fmt.Errorf("%w: retained turns require fresh delivery authorization", ErrFailClosed)
+	}
 	if err := rc.Fence.Check(ctx); err != nil {
 		return Result{}, err
 	}
@@ -299,12 +335,16 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 	if err != nil {
 		return nil, nil, err
 	}
+	profile := CurrentProfile
+	if _, ok := rc.Backend.(retainedTurnBackend); ok {
+		profile = RetentionProfile
+	}
 	first := Event{
 		"schema_version": SchemaVersion, "tenant_id": req.TenantID, "project_id": req.ProjectID,
 		"matter_id": req.MatterID, "turn_id": id, "seq": 0, "type": "turn_received",
 		"recorded_at": rc.stamp(), "actor": map[string]any{"kind": "user", "id": req.CustodianID},
 		"payload": map[string]any{"request_id": req.RequestID, "input": ref(req.Input),
-			"evidence_profile": CurrentProfile, "custodian_id": req.CustodianID,
+			"evidence_profile": profile, "custodian_id": req.CustodianID,
 			"objects": []any{ref(req.Input)}, "request_fingerprint": fp},
 		"prev_hash": nil,
 	}
@@ -344,11 +384,26 @@ func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(
 	if err != nil {
 		return bad("load: %v", err)
 	}
+	if len(evs) == 0 {
+		return bad("empty stored log")
+	}
 	lastEv := evs[len(evs)-1]
 	if !isTerminal(str(lastEv, "type")) {
 		return Result{}, ErrTurnInFlight
 	}
-	objs, err := loadObjects(wc, rc.Backend, t.tenant, evs)
+	var objs map[string][]byte
+	retained, retainedProfile := rc.Backend.(retainedTurnBackend)
+	if retainedProfile {
+		if str(payload(evs[0]), "evidence_profile") != RetentionProfile {
+			return bad("required retention profile missing")
+		}
+		objs, err = retained.LoadRetainedObjects(wc, t.tenant, t.id, evs)
+	} else {
+		if str(payload(evs[0]), "evidence_profile") == RetentionProfile {
+			return bad("retention profile cannot be verified on this backend")
+		}
+		objs, err = loadObjects(wc, rc.Backend, t.tenant, evs)
+	}
 	if err != nil {
 		return bad("%v", err)
 	}
@@ -389,6 +444,12 @@ func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(
 	}
 	if n, _ := integer(m["bytes"]); n != int64(len(out)) || SHA256(out) != sha {
 		return bad("output object does not match its record")
+	}
+	if err := rc.verifyRetained(ctx, t, evs); err != nil {
+		return bad("retained readback: %v", err)
+	}
+	if retainedProfile && gate == nil {
+		return bad("fresh delivery authorization is required")
 	}
 	if err := rc.finalGate(ctx, gate, "delivery"); err != nil {
 		return Result{}, err
@@ -505,6 +566,15 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		"endpoint_id": d.Destination.EndpointID, "model_id": d.Destination.ModelID, "request": ref(sent)}); err != nil {
 		return fail("evidence_write_failed", err)
 	}
+	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
+		return fail("retained_readback_failed", err)
+	}
+	if _, ok := rc.Backend.(retainedTurnBackend); ok && gate != nil {
+		if err := gate(ctx); err != nil {
+			rc.abort(ctx, t, "dispatch_denied")
+			return Result{}, err
+		}
+	}
 
 	// Cancellation or expiry while the evidence above was being written: do not
 	// dispatch. The acknowledged intent derives "unknown", which over-reports
@@ -554,6 +624,9 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	}
 
 	// Release gate: output is durable; the caller may still veto the release.
+	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
+		return fail("retained_readback_failed", err)
+	}
 	if gate != nil {
 		if err := gate(ctx); err != nil {
 			rc.abort(ctx, t, "release_denied")
@@ -574,6 +647,9 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	// If it refuses, the log still says the release was authorized and the turn
 	// completed (the output is durable and a delivery-only retry stays possible
 	// through replay), but this call returns no output.
+	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
+		return fail("retained_readback_failed", err)
+	}
 	if err := rc.finalGate(ctx, gate, "delivery"); err != nil {
 		return Result{TurnID: t.id}, err
 	}

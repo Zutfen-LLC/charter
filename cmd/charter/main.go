@@ -37,9 +37,8 @@ func main() {
 
 func run(cmd string) error {
 	cfg := config.Load()
-	if cfg.EvidenceBackend != config.EvidenceBackendPostgresAppend && cfg.EvidenceBackend != config.EvidenceBackendTestFixture {
-		return fmt.Errorf("unsupported CHARTER_EVIDENCE_BACKEND %q: supported are %q (and its alias %q); neither is retention-enforced",
-			cfg.EvidenceBackend, config.EvidenceBackendPostgresAppend, config.EvidenceBackendTestFixture)
+	if cfg.EvidenceBackend != config.EvidenceBackendPostgresAppend && cfg.EvidenceBackend != config.EvidenceBackendTestFixture && cfg.EvidenceBackend != config.EvidenceBackendRetentionS3 {
+		return errors.New("unsupported CHARTER_EVIDENCE_BACKEND")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -75,6 +74,7 @@ func migrateOnly(ctx context.Context, cfg config.Config) error {
 // Serving holds the runtime pools after every safety check has passed.
 type Serving struct {
 	Workspace, Evidence *pgxpool.Pool
+	qualification       qualificationStatement
 }
 
 func (s *Serving) Close() {
@@ -103,10 +103,26 @@ func openServing(ctx context.Context, cfg config.Config) (*Serving, error) {
 	}
 	s := &Serving{}
 	var err error
-	if s.Workspace, err = pgxpool.New(ctx, cfg.DatabaseURL); err != nil {
+	openPool := pgxpool.New
+	if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
+		if err = validateSyntheticDatabases(cfg); err != nil {
+			return nil, err
+		}
+		if err = validateLabConfig(cfg.Addr, cfg.RetentionS3); err != nil {
+			return nil, err
+		}
+		s.qualification, err = loadQualification(ctx, cfg.RetentionS3, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		openPool = func(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+			return openRetainedCoordinationPool(ctx, dsn, s.qualification)
+		}
+	}
+	if s.Workspace, err = openPool(ctx, cfg.DatabaseURL); err != nil {
 		return nil, err
 	}
-	if s.Evidence, err = pgxpool.New(ctx, cfg.EvidenceDatabaseURL); err != nil {
+	if s.Evidence, err = openPool(ctx, cfg.EvidenceDatabaseURL); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -133,6 +149,11 @@ func openServing(ctx context.Context, cfg config.Config) (*Serving, error) {
 }
 
 func serve(ctx context.Context, cfg config.Config) error {
+	if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
+		if err := validateSyntheticOIDC(cfg.OIDC); err != nil {
+			return err
+		}
+	}
 	deps, err := openServing(ctx, cfg)
 	if err != nil {
 		return err
@@ -146,7 +167,27 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	defer fence.Release()
-	rec := &evidence.Recorder{Backend: ev.WithFence(fence), Fence: fence, Policy: server.StubPolicy(), Logf: log.Printf}
+	var backend evidence.Backend = ev.WithFence(fence)
+	info := server.PostgresEvidenceBackend()
+	depsReady := readinessDeps{pingAll{deps.Workspace, deps.Evidence}}
+	deployment := ""
+	if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
+		deployment = cfg.RetentionS3.Deployment
+	}
+	checkCtx, cancelCheck := context.WithTimeout(ctx, 15*time.Second)
+	defer cancelCheck()
+	if err := checkBackendBinding(checkCtx, deps.Evidence, deployment); err != nil {
+		return err
+	}
+	if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
+		selected, check, err := connectRetained(checkCtx, cfg.RetentionS3, deps.qualification, fence)
+		if err != nil {
+			return fmt.Errorf("retention storage startup refused: %w", err)
+		}
+		backend, info = selected, check.info()
+		depsReady = append(depsReady, check)
+	}
+	rec := &evidence.Recorder{Backend: backend, Fence: fence, Policy: server.StubPolicy(), Logf: log.Printf}
 	n, err := rec.Recover(ctx, time.Time{})
 	if err != nil {
 		return fmt.Errorf("evidence recovery: %w", err)
@@ -160,7 +201,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 		if err != nil {
 			return err
 		}
-		opts = append(opts, server.WithAuth(&server.Auth{Verifier: v, Store: &store.Store{DB: deps.Workspace}, Evidence: rec}))
+		auth := &server.Auth{Verifier: v, Store: &store.Store{DB: deps.Workspace}, Evidence: rec}
+		if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
+			auth.Model = retainedSyntheticModel
+		}
+		opts = append(opts, server.WithAuth(auth))
 		log.Printf("OIDC enabled: issuer=%s tenant=%s", o.Issuer, o.TenantID)
 		if o.AllowInsecureLoopback {
 			log.Printf("WARNING: plain-HTTP loopback IdP fixture mode enabled; never use outside local testing")
@@ -169,7 +214,8 @@ func serve(ctx context.Context, cfg config.Config) error {
 		log.Printf("OIDC not configured: only /healthz and /readyz are served (no data API)")
 	}
 
-	handler := server.New(pingAll{deps.Workspace, deps.Evidence}, server.PostgresEvidenceBackend(), opts...)
+	handler := server.New(depsReady, info, opts...)
+	log.Printf("charter evidence backend: kind=%s retention_enforced=%t scope=%s", info.Kind, info.RetentionEnforced, info.RetentionStatus)
 	return serveFencedHTTP(ctx, cfg.Addr, fence, handler)
 }
 
@@ -207,7 +253,7 @@ func serveFencedHTTP(ctx context.Context, addr string, fence *evidence.Fence, ha
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(listener) }()
-	log.Printf("charter listening on %s (evidence: postgres-append-only, NOT retention-enforced)", listener.Addr())
+	log.Printf("charter listening on %s", listener.Addr())
 	select {
 	case <-ctx.Done():
 	case <-fence.Lost():
