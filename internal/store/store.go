@@ -285,3 +285,20 @@ func (s *Store) ProjectMatter(ctx context.Context, p Principal, projectID string
 	}
 	return m, err
 }
+
+// MayReadUsage requires both explicit project membership and an operator role.
+func (s *Store) MayReadUsage(ctx context.Context, p Principal, projectID string) (bool, error) {
+	p, ok := p.canon()
+	id, valid := CanonicalID(projectID)
+	if !ok || !valid {
+		return false, nil
+	}
+	var yes bool
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS (
+        SELECT 1 FROM project_members m
+        JOIN users u ON u.id=m.user_id AND u.tenant_id=m.tenant_id
+        JOIN tenant_roles r ON r.user_id=u.id AND r.tenant_id=u.tenant_id
+        WHERE m.project_id=$1 AND m.user_id=$2 AND m.tenant_id=$3 AND u.disabled_at IS NULL AND r.role='operator'
+    )`, id, p.UserID, p.TenantID).Scan(&yes)
+	return yes, err
+}

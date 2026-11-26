@@ -41,6 +41,7 @@ func (e *gateError) Error() string { return e.msg }
 type callBody struct {
 	Input       string   `json:"input"`
 	ArtifactIDs []string `json:"artifact_ids"`
+	ModelID     string   `json:"model_id"`
 }
 
 // modelCall runs one governed turn. Evidence (ADR 0001 R1-R4) is written by
@@ -108,7 +109,7 @@ func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Princip
 		sources = append(sources, evidence.Source{ID: art.ID, Version: 1, Bytes: []byte(art.Body)})
 	}
 	req := evidence.Request{TenantID: p.TenantID, ProjectID: pidC, MatterID: matter, CustodianID: p.UserID,
-		IdempotencyKey: key, RequestID: evidence.NewUUID(), Input: []byte(body.Input), Sources: sources}
+		IdempotencyKey: key, RequestID: evidence.NewUUID(), ModelID: body.ModelID, Input: []byte(body.Input), Sources: sources}
 
 	ctx, cancel := context.WithTimeout(r.Context(), a.WorkTimeout)
 	defer cancel()
@@ -152,7 +153,14 @@ func (a *Auth) readCallBody(w http.ResponseWriter, r *http.Request) (callBody, b
 	var b callBody
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxCallBody))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&b); err != nil && !errors.Is(err, io.EOF) {
+	err := dec.Decode(&b)
+	if err == nil {
+		// Do not accept a second JSON value, even if the first is valid.
+		if dec.Decode(new(any)) != io.EOF {
+			deny(w, http.StatusBadRequest, "invalid request body")
+			return b, false
+		}
+	} else if !errors.Is(err, io.EOF) {
 		deny(w, http.StatusBadRequest, "invalid request body")
 		return b, false
 	}

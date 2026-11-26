@@ -154,7 +154,7 @@ func verifyChain(events []Event, objects map[string][]byte, full, allowUnfinishe
 	released, decided, denied := false, false, false
 	declared := map[string]int64{} // sha -> declared length, to catch contradictions
 	var reservedUnits int64
-	var hasReservation bool
+	var hasReservation, governedBudget bool
 	var policyDestination, intentDestination map[string]any
 
 	for i, e := range events {
@@ -238,6 +238,12 @@ func verifyChain(events []Event, objects map[string][]byte, full, allowUnfinishe
 			}
 			decided, denied = true, d == "deny"
 		case "usage_reserved":
+			if v, exists := p["accounting_version"]; exists {
+				governedBudget = v == budgetVersion && idRe.MatchString(str(p, "registry_model"))
+				if !governedBudget {
+					add(i, CodeRefs, "invalid governed budget version or model")
+				}
+			}
 			if n, ok := integer(p["units"]); !ok || n < 0 {
 				add(i, CodeRefs, "usage_reserved.units must be a non-negative integer")
 			} else {
@@ -345,6 +351,12 @@ func verifyChain(events []Event, objects map[string][]byte, full, allowUnfinishe
 				add(i, "R1", "provider contacted before acked disclosure_intent")
 			}
 		case "output_recorded":
+			if v, exists := p["provider_cost_units"]; exists {
+				n, ok := integer(v)
+				if !governedBudget || !ok || !safeBudgetAmount(n) || last(events[:i], "provider_accepted") < 0 {
+					add(i, CodeRefs, "governed provider cost needs a safe integer and confirmed acceptance")
+				}
+			}
 			if j := last(events[:i], "disclosure_intent"); j < 0 || !acked[j] {
 				add(i, "R1", "output recorded without acknowledged disclosure intent")
 			}
@@ -362,16 +374,43 @@ func verifyChain(events []Event, objects map[string][]byte, full, allowUnfinishe
 			released = true
 		case "usage_settled":
 			basis := str(p, "basis")
+			floorValue, hasFloor := p["observed_overrun_floor"]
+			unquantified, hasUnquantified := p["unquantified_exposure"]
+			if hasFloor || hasUnquantified || basis == "observed_minimum" {
+				intent := last(events[:i], "disclosure_intent")
+				_, noDispatch := p["confirmed_no_dispatch"]
+				floor, validFloor := integer(floorValue)
+				n, validUnits := integer(p["units"])
+				if !governedBudget || !hasReservation || intent < 0 || !acked[intent] || released || noDispatch ||
+					(hasUnquantified && (unquantified != true || hasFloor || basis != "reserved_max")) ||
+					(hasFloor && (!validFloor || !safeBudgetAmount(floor) || floor <= reservedUnits || !validUnits || n != floor || (basis != "observed_minimum" && basis != "provider_reported"))) ||
+					(basis == "observed_minimum" && !hasFloor) {
+					add(i, CodeRefs, "invalid governed exposure evidence")
+				}
+			}
+			if _, exists := p["confirmed_no_dispatch"]; exists {
+				reason := str(p, "confirmed_no_dispatch")
+				if !noDispatchReason(reason) || !governedBudget || basis != "reserved_max" || DeriveDisclosure(events[:i]) != DisclosureUnknown || last(events[:i], "output_recorded") >= 0 || (i+1 < len(events) && (str(events[i+1], "type") != TypeTurnInterrupted || str(payload(events[i+1]), "reason") != reason)) {
+					add(i, CodeRefs, "invalid governed non-dispatch accounting evidence")
+				}
+			}
+			if governedBudget && basis == "provider_reported" {
+				want, ok := acknowledgedCost(events[:i])
+				n, valid := integer(p["units"])
+				if !ok || !valid || n != want {
+					add(i, CodeRefs, "provider settlement must match acknowledged governed cost")
+				}
+			}
 			if n, ok := integer(p["units"]); !ok || n < 0 {
 				add(i, CodeRefs, "usage_settled.units must be a non-negative integer")
 			} else if basis == "reserved_max" && (!hasReservation || n != reservedUnits) {
 				add(i, CodeRefs, "usage_settled reserved_max units must equal the full reservation")
 			}
-			if basis != "reserved_max" && basis != "provider_reported" {
-				add(i, CodeRefs, "usage_settled.basis must be provider_reported or reserved_max")
+			if basis != "reserved_max" && basis != "provider_reported" && basis != "observed_minimum" {
+				add(i, CodeRefs, "unsupported usage_settled.basis")
 			}
-			if DeriveDisclosure(events[:i]) == DisclosureUnknown && basis != "reserved_max" {
-				add(i, CodeRefs, "unknown disclosure must use reserved_max settlement")
+			if DeriveDisclosure(events[:i]) == DisclosureUnknown && basis != "reserved_max" && basis != "observed_minimum" {
+				add(i, CodeRefs, "unknown disclosure cannot use exact settlement")
 			}
 		case TypeTurnCompleted:
 			if p["outcome"] == "completed" && last(events[:i], "usage_settled") < 0 {

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/url"
 	"os"
@@ -311,17 +310,6 @@ func connectRetained(ctx context.Context, c config.RetentionS3, signed qualifica
 // assertion that storage is currently reachable.
 func (p retainedReadiness) info() server.EvidenceBackend {
 	return server.EvidenceBackend{Kind: evidence.RetentionProfile, RetentionEnforced: true, RetentionStatus: "storage-native-qualified-synthetic", Notice: "Storage-native qualification and exact-version authority verified at startup for this synthetic deployment. Use readiness for current reachability. This is not C04 acceptance, external anchoring, or a legal compliance claim."}
-}
-
-// No network dispatch is wired for the synthetic storage profile. The adapter
-// actually consumes the sealed bytes and its deterministic output proves that
-// the digest of the provider input agrees with the retained request receipt.
-func retainedSyntheticModel(ctx context.Context, sealed []byte) (evidence.ModelOutcome, error) {
-	if err := ctx.Err(); err != nil {
-		return evidence.ModelOutcome{}, err
-	}
-	log.Print("synthetic retention provider invoked")
-	return evidence.ModelOutcome{Accepted: true, Complete: true, Output: []byte("synthetic c04 response for " + evidence.SHA256(sealed))}, nil
 }
 
 type readinessDeps []server.Pinger

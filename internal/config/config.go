@@ -54,6 +54,8 @@ type Config struct {
 	// DatabaseURL is accepted as a development fallback.
 	DatabaseURL         string
 	EvidenceDatabaseURL string
+	BudgetDatabaseURL   string
+	LocalModelURL       string
 	MigrateDatabaseURL  string
 	EvidenceBackend     string
 	RetentionS3         RetentionS3
@@ -65,6 +67,8 @@ func Load() Config {
 		Addr:                get("CHARTER_ADDR", "127.0.0.1:8080"),
 		DatabaseURL:         os.Getenv("CHARTER_DATABASE_URL"),
 		EvidenceDatabaseURL: os.Getenv("CHARTER_EVIDENCE_DATABASE_URL"),
+		BudgetDatabaseURL:   os.Getenv("CHARTER_BUDGET_DATABASE_URL"),
+		LocalModelURL:       os.Getenv("CHARTER_LOCAL_MODEL_URL"),
 		MigrateDatabaseURL:  os.Getenv("CHARTER_MIGRATE_DATABASE_URL"),
 		EvidenceBackend:     get("CHARTER_EVIDENCE_BACKEND", EvidenceBackendPostgresAppend),
 		RetentionS3: RetentionS3{

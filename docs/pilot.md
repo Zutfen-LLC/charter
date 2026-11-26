@@ -33,3 +33,5 @@ Can a customer-operated control plane enforce who can use which AI models and pr
 3. Export and independently verify the original inputs, actual context, outputs/artifacts, policy decisions and custody metadata. Fail the verify step for a missing or changed object.
 4. Show that releasing one of two holds preserves evidence and that unheld controls expire. Inject concurrent hold/expiry and storage failures. Record whether any disclosure occurred and show no successful response can escape without the required evidence.
 5. Reproduce from a clean checkout at a pinned commit. Report the exact scope demonstrated, what was mocked, open gaps and the go/no-go decision. An unavailable non-mock storage or integration test is a recorded gap, not a pass.
+
+The routing and budget pilot boundary is specified in [C05 model routing and accounting](model-routing-and-budget.md). This does not expand retained storage qualification or authorize real inference egress.

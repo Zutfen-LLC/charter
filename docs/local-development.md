@@ -27,7 +27,7 @@ scripts/dev.sh down
 | `CHARTER_DATABASE_URL` | `serve` | workspace login, member of `charter_workspace_app` (no privilege on evidence tables) |
 | `CHARTER_EVIDENCE_DATABASE_URL` | `serve` | evidence login, member of `charter_evidence_app` (INSERT and SELECT on evidence tables only) |
 
-At startup `serve` validates the [restricted runtime credential profile](runtime-protection.md), takes the [ownership and drain fence](fence-ownership.md), and recovers unfinished turns before accepting requests. For a shared environment create the logins with `scripts/provision-runtime-roles.sql` (real secrets) after `charter migrate`. `/healthz` is liveness; `/readyz` pings both pools and returns 503 if either is unreachable. A process that loses ownership stops serving rather than reconnecting and continuing. `charter migrate` falls back to `CHARTER_DATABASE_URL` only as a development convenience.
+At startup `serve` validates the [restricted runtime credential profile](runtime-protection.md), takes the [ownership and drain fence](fence-ownership.md), and recovers unfinished turns before accepting requests. Authenticated model serving also requires the separately provisioned accounting login; see [C05 setup and the local endpoint protocol](model-routing-and-budget.md). For a shared environment create the logins with `scripts/provision-runtime-roles.sql` (real secrets) after `charter migrate`. `/healthz` is liveness; `/readyz` pings both pools and returns 503 if either is unreachable. A process that loses ownership stops serving rather than reconnecting and continuing. `charter migrate` falls back to `CHARTER_DATABASE_URL` only as a development convenience.
 
 ## Evidence backends
 

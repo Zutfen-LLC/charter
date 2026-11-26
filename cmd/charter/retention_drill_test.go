@@ -85,6 +85,7 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	artifact, err := st.CreateArtifact(ctx, tenant, project, "synthetic exhibit", original)
 	must(err)
 	must(st.SeedMember(ctx, tenant, project, actor))
+	must((evidence.PG{DB: owner}).SetPolicy(ctx, evidence.BudgetPolicy{TenantID: tenant, ProjectID: project, LocalOnly: true, AllowedModels: []string{"det-a", "det-b"}, ProjectCap: 10000000}))
 	root := absent("CHARTER_DRILL_OUTPUT")
 	must(os.Mkdir(root, 0700))
 	dump := func(name string, x any) {
@@ -107,7 +108,7 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	env := []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8"}
 	for _, row := range os.Environ() {
 		n, _, _ := strings.Cut(row, "=")
-		if strings.HasPrefix(n, "CHARTER_S3_") || n == "CHARTER_ADDR" || n == "CHARTER_DATABASE_URL" || n == "CHARTER_EVIDENCE_DATABASE_URL" || n == "CHARTER_EVIDENCE_BACKEND" {
+		if strings.HasPrefix(n, "CHARTER_S3_") || n == "CHARTER_ADDR" || n == "CHARTER_DATABASE_URL" || n == "CHARTER_EVIDENCE_DATABASE_URL" || n == "CHARTER_BUDGET_DATABASE_URL" || n == "CHARTER_EVIDENCE_BACKEND" {
 			env = append(env, row)
 		}
 	}
@@ -179,12 +180,12 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	}
 	request, err := json.Marshal(map[string]any{"input": input, "artifact_ids": []string{artifact}})
 	must(err)
-	post := func(tok string, want int) map[string]any {
+	postRequest := func(tok string, body []byte, key string, want int) map[string]any {
 		t.Helper()
-		r, e := http.NewRequestWithContext(ctx, "POST", addr+"/v1/projects/"+project+"/model-calls", bytes.NewReader(request))
+		r, e := http.NewRequestWithContext(ctx, "POST", addr+"/v1/projects/"+project+"/model-calls", bytes.NewReader(body))
 		must(e)
 		r.Header.Set("Authorization", "Bearer "+tok)
-		r.Header.Set("Idempotency-Key", "c04-reconstruction-drill")
+		r.Header.Set("Idempotency-Key", key)
 		r.Header.Set("Content-Type", "application/json")
 		resp, e := client.Do(r)
 		must(e)
@@ -201,6 +202,11 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 		}
 		return data
 	}
+	post := func(tok string, want int) map[string]any {
+		return postRequest(tok, request, "c04-reconstruction-drill", want)
+	}
+	alternateRequest, err := json.Marshal(map[string]any{"input": input, "artifact_ids": []string{artifact}, "model_id": "det-b"})
+	must(err)
 	checkReadiness := func(want int) map[string]any {
 		t.Helper()
 		r, err := client.Get(addr + "/readyz")
@@ -285,6 +291,28 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	}
 	dump("events.json", baseline)
 	dump("objects.json", payloads)
+	alternate := postRequest(alice, alternateRequest, "c05-alt-reconstruction-drill", 200)
+	alternateTurn, ok := alternate["turn_id"].(string)
+	if !ok || alternateTurn == turn {
+		t.Fatal("alternate model lacked independent turn identity")
+	}
+	alternateBaseline, err := readonly.Load(ctx, tenant, alternateTurn)
+	must(err)
+	alternateObjects, err := readonly.LoadRetainedObjects(ctx, tenant, alternateTurn, alternateBaseline)
+	must(err)
+	if es := evidence.VerifyRetentionFull(alternateBaseline, alternateObjects); len(es) != 0 {
+		t.Fatalf("alternate model evidence: %v", es)
+	}
+	for _, event := range alternateBaseline {
+		if event["type"] == "disclosure_intent" {
+			policy := event["payload"].(map[string]any)
+			sha := policy["request"].(map[string]any)["sha256"].(string)
+			if policy["model_id"] != "deterministic-b" || policy["endpoint_id"] != "in-process-b" || evidence.SHA256(alternateObjects[sha]) != sha || alternate["output"] != "synthetic alternate response for "+sha {
+				t.Fatal("alternate model did not consume exact bound bytes")
+			}
+		}
+	}
+	dump("alternate-events.json", alternateBaseline)
 	refs, err := storage.Versions(ctx, "charter/v1/"+sc.Deployment+"/"+tenant+"/")
 	must(err)
 	var inventory []map[string]any
@@ -317,6 +345,14 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	}
 	dump("reconstructed-events.json", recovered)
 	dump("reconstructed-objects.json", after)
+	altRecovered, err := readonly.Load(ctx, tenant, alternateTurn)
+	must(err)
+	altAfter, err := readonly.LoadRetainedObjects(ctx, tenant, alternateTurn, altRecovered)
+	must(err)
+	if !reflect.DeepEqual(alternateBaseline, altRecovered) || !reflect.DeepEqual(alternateObjects, altAfter) {
+		t.Fatal("alternate retained reconstruction changed the evidence")
+	}
+
 	if _, err = readonly.Load(ctx, other, turn); err == nil {
 		t.Fatal("cross-tenant retained lookup succeeded")
 	}
@@ -343,7 +379,7 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 		t.Fatal("restart/replay altered the retained event chain")
 	}
 	stop()
-	for name, count := range map[string]int{"first-server.log": 1, "restarted-server.log": 0} {
+	for name, count := range map[string]int{"first-server.log": 2, "restarted-server.log": 0} {
 		logs, e := os.ReadFile(filepath.Join(root, name))
 		must(e)
 		if bytes.Count(logs, []byte("synthetic retention provider invoked")) != count {

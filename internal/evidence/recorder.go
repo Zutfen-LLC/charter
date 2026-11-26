@@ -69,6 +69,7 @@ type Request struct {
 	TenantID, ProjectID, MatterID, CustodianID string
 	IdempotencyKey                             string
 	RequestID                                  string
+	ModelID                                    string // stable registry key, not a provider model override
 	Input                                      []byte
 	Sources                                    []Source
 }
@@ -80,6 +81,12 @@ type ModelOutcome struct {
 	Accepted bool
 	Complete bool
 	Output   []byte
+	// UsageUnits is exact billable cost, when validated by the governed adapter.
+	UsageUnits *int64
+	// A lower bound, not an exact charge. UnquantifiedExposure records a
+	// distinct incident for which no output-derived amount can be justified.
+	ObservedOverrunFloor int64
+	UnquantifiedExposure bool
 }
 
 // ModelFunc performs the outbound call with the exact sealed request bytes. It
@@ -138,9 +145,11 @@ type Recorder struct {
 	// the same ownership session using PG.WithFence.
 	Fence *Fence
 	// Policy decides each turn. Required.
-	Policy func(ctx context.Context, r Request) (Decision, error)
-	Clock  func() time.Time
-	NewID  func() string
+	Policy     func(ctx context.Context, r Request) (Decision, error)
+	Governance Governance
+	Accounting func(context.Context, Backend, string, string) error
+	Clock      func() time.Time
+	NewID      func() string
 	// EvidenceTimeout bounds each evidence write. Writes use a context detached
 	// from the caller's cancellation so a cancelled request can still record how
 	// it ended.
@@ -197,10 +206,12 @@ func RenderRequest(d Destination, input []byte, sources []Source) ([]byte, error
 // turn is the in-memory view of one log, always rebuilt from the backend after
 // any failure so an ambiguous write is never assumed to have failed.
 type turn struct {
-	rc     *Recorder
-	tenant string
-	id     string
-	events []Event
+	rc                   *Recorder
+	tenant               string
+	id                   string
+	events               []Event
+	observedOverrunFloor int64
+	unquantifiedExposure bool
 }
 
 func (t *turn) lastHash() any {
@@ -304,14 +315,14 @@ func (rc *Recorder) put(ctx context.Context, tenant string, data []byte) error {
 //     marked interrupted (or left for recovery if even that cannot be stored).
 func (rc *Recorder) Process(ctx context.Context, req Request, call ModelFunc, gate func(context.Context) error) (Result, error) {
 	rc.defaults()
-	if rc.Backend == nil || rc.Policy == nil || call == nil {
+	if rc.Backend == nil || (rc.Governance == nil && (rc.Policy == nil || call == nil)) {
 		return Result{}, fmt.Errorf("%w: recorder is not configured", ErrFailClosed)
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, &AbortedError{Stage: "admission", Cause: err}
 	}
-	if _, retained := rc.Backend.(retainedTurnBackend); retained && gate == nil {
-		return Result{}, fmt.Errorf("%w: retained turns require fresh delivery authorization", ErrFailClosed)
+	if _, retained := rc.Backend.(retainedTurnBackend); (retained || rc.Governance != nil) && gate == nil {
+		return Result{}, fmt.Errorf("%w: retained and governed turns require fresh authorization", ErrFailClosed)
 	}
 	if err := rc.Fence.Check(ctx); err != nil {
 		return Result{}, err
@@ -451,6 +462,9 @@ func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(
 	if retainedProfile && gate == nil {
 		return bad("fresh delivery authorization is required")
 	}
+	if err := rc.reconcile(ctx, t); err != nil {
+		return bad("budget reconciliation pending")
+	}
 	if err := rc.finalGate(ctx, gate, "delivery"); err != nil {
 		return Result{}, err
 	}
@@ -497,6 +511,14 @@ func (rc *Recorder) finalGate(ctx context.Context, gate func(context.Context) er
 }
 
 func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFunc, gate func(context.Context) error) (Result, error) {
+	reconciled := false
+	defer func() {
+		if rc.Accounting != nil && !reconciled {
+			if err := rc.reconcile(ctx, t); err != nil {
+				rc.Logf("budget: turn remains pending reconciliation")
+			}
+		}
+	}()
 	fail := func(reason string, err error) (Result, error) {
 		rc.abort(ctx, t, reason)
 		return Result{}, fmt.Errorf("%w: %s: %v", ErrFailClosed, reason, err)
@@ -505,7 +527,34 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		rc.abort(ctx, t, "cancelled_before_dispatch")
 		return Result{}, &AbortedError{Stage: "policy", Cause: err}
 	}
-	d, err := rc.Policy(ctx, req)
+	var d Decision
+	var plan GovernedPlan
+	var sent []byte
+	var err error
+	if rc.Governance == nil {
+		d, err = rc.Policy(ctx, req)
+	} else {
+		plan, err = rc.Governance(ctx, req)
+		if err == nil && !plan.configured() {
+			return fail("policy_error", errors.New("invalid governed plan"))
+		}
+		if err == nil {
+			sent, err = plan.Build(req)
+			if err != nil {
+				return fail("render_failed", err)
+			}
+			var reserved int
+			reserved, err = plan.Reserve(ctx, t.id, sent)
+			if err == nil {
+				d = Decision{Allow: true, PolicyVersion: plan.PolicyVersion, Destination: plan.Destination, ReserveUnits: reserved}
+				call = plan.Invoke
+			} else if !errors.Is(err, ErrDenied) {
+				// The transaction may have committed. Recovery must inspect the
+				// durable reservation; this attempt must never use it to dispatch.
+				return fail("reservation_unconfirmed", err)
+			}
+		}
+	}
 	if err != nil {
 		// A policy evaluation failure is a durable denial, never an implicit
 		// allow or a retryable open turn. Recovery recognizes this decision too.
@@ -536,12 +585,19 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		"policy_version": d.PolicyVersion, "destination": dest}); err != nil {
 		return fail("evidence_write_failed", err)
 	}
-	if _, _, err := t.emit(ctx, "usage_reserved", map[string]any{"units": d.ReserveUnits}); err != nil {
+	reservation := map[string]any{"units": d.ReserveUnits}
+	if rc.Governance != nil {
+		reservation["accounting_version"] = budgetVersion
+		reservation["registry_model"] = plan.RegistryModel
+	}
+	if _, _, err := t.emit(ctx, "usage_reserved", reservation); err != nil {
 		return fail("evidence_write_failed", err)
 	}
-	sent, err := RenderRequest(d.Destination, req.Input, req.Sources)
-	if err != nil {
-		return fail("render_failed", err)
+	if rc.Governance == nil {
+		sent, err = RenderRequest(d.Destination, req.Input, req.Sources)
+		if err != nil {
+			return fail("render_failed", err)
+		}
 	}
 	objects := []any{}
 	sources := []any{}
@@ -569,7 +625,16 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
 		return fail("retained_readback_failed", err)
 	}
-	if _, ok := rc.Backend.(retainedTurnBackend); ok && gate != nil {
+	if rc.Governance != nil {
+		if err := plan.Arm(ctx, t.id); err != nil {
+			return fail("dispatch_arm_unconfirmed", err)
+		}
+		if err := plan.CheckRoute(ctx); err != nil {
+			rc.abort(ctx, t, "route_revoked_before_dispatch")
+			return Result{}, err
+		}
+	}
+	if _, retained := rc.Backend.(retainedTurnBackend); (retained || rc.Governance != nil) && gate != nil {
 		if err := gate(ctx); err != nil {
 			rc.abort(ctx, t, "dispatch_denied")
 			return Result{}, err
@@ -587,6 +652,10 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		return fail("dispatch_ownership_lost", err)
 	}
 	out, callErr := call(ctx, sent) // the only outbound call
+	if rc.Governance != nil {
+		t.observedOverrunFloor = out.ObservedOverrunFloor
+		t.unquantifiedExposure = out.UnquantifiedExposure
+	}
 	// Only a confirmed adapter acceptance is evidence of disclosure. An
 	// adapter can return buffered bytes after an ambiguous failure; preserve
 	// them as partial, but do not invent an acceptance or authorize release.
@@ -595,12 +664,16 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 			return fail("evidence_write_failed", err)
 		}
 	}
-	complete := out.Accepted && callErr == nil && out.Complete
-	if len(out.Output) > 0 || complete {
+	complete := out.Accepted && callErr == nil && out.Complete && t.observedOverrunFloor == 0 && !t.unquantifiedExposure
+	if len(out.Output) > 0 || complete || (rc.Governance != nil && out.Accepted && out.UsageUnits != nil) {
 		if err := rc.put(ctx, t.tenant, out.Output); err != nil {
 			return fail("evidence_write_failed", err)
 		}
-		if err := t.emitAcked(ctx, "output_recorded", map[string]any{"complete": complete, "objects": []any{ref(out.Output)}}); err != nil {
+		p := map[string]any{"complete": complete, "objects": []any{ref(out.Output)}}
+		if rc.Governance != nil && out.Accepted && out.UsageUnits != nil && safeBudgetAmount(*out.UsageUnits) {
+			p["provider_cost_units"] = *out.UsageUnits
+		}
+		if err := t.emitAcked(ctx, "output_recorded", p); err != nil {
 			return fail("evidence_write_failed", err)
 		}
 	}
@@ -650,6 +723,10 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
 		return fail("retained_readback_failed", err)
 	}
+	if err := rc.reconcile(ctx, t); err != nil {
+		return Result{}, fmt.Errorf("%w: budget reconciliation pending", ErrFinalizeFailed)
+	}
+	reconciled = true
 	if err := rc.finalGate(ctx, gate, "delivery"); err != nil {
 		return Result{TurnID: t.id}, err
 	}
@@ -674,7 +751,7 @@ func (rc *Recorder) finish(ctx context.Context, t *turn, reserved int) error {
 			return nil
 		}
 		if last(t.events, "usage_settled") < 0 {
-			if _, _, err = t.emit(ctx, "usage_settled", map[string]any{"units": reserved, "basis": "reserved_max"}); err != nil {
+			if _, _, err = t.emit(ctx, "usage_settled", settlementPayload(t.events, reserved)); err != nil {
 				continue
 			}
 		}
@@ -744,9 +821,25 @@ func (rc *Recorder) resolveOnce(ctx context.Context, t *turn, reason string) err
 	}
 	disc := DeriveDisclosure(t.events)
 	if disc != DisclosureNone && last(t.events, "usage_settled") < 0 {
-		// Unknown or partial disclosure is billed at the reserved maximum.
-		if _, _, err := t.emit(ctx, "usage_settled", map[string]any{"units": reservedUnits(t.events), "basis": "reserved_max"}); err != nil {
+		// This evidence is independent of the output object and also carries
+		// the incident if the coordination write did not acknowledge it.
+		p := interruptedSettlement(t.events, reason)
+		if t.observedOverrunFloor > 0 {
+			p["observed_overrun_floor"] = t.observedOverrunFloor
+			if p["basis"] != "provider_reported" {
+				p["basis"], p["units"] = "observed_minimum", t.observedOverrunFloor
+			}
+		}
+		if t.unquantifiedExposure {
+			p["unquantified_exposure"] = true
+		}
+		if _, _, err := t.emit(ctx, "usage_settled", p); err != nil {
 			return err
+		}
+	}
+	if i := last(t.events, "usage_settled"); i >= 0 {
+		if saved := str(payload(t.events[i]), "confirmed_no_dispatch"); noDispatchReason(saved) {
+			reason = saved
 		}
 	}
 	_, _, err := t.emit(ctx, TypeTurnInterrupted, map[string]any{"reason": reason, "disclosure": disc})

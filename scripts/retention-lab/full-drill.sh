@@ -24,6 +24,7 @@ name="charter-c04-$C04_RUN"
 ownerpw=$(openssl rand -hex 20)
 wspw=$(openssl rand -hex 20)
 evpw=$(openssl rand -hex 20)
+budgetpw=$(openssl rand -hex 20)
 db="charter_c04_disposable_$C04_RUN"
 foreign="${db}_foreign"
 export POSTGRES_PASSWORD="$ownerpw"
@@ -42,9 +43,9 @@ CHARTER_MIGRATE_DATABASE_URL="$CHARTER_DRILL_OWNER_DSN" ./charter migrate
 CHARTER_MIGRATE_DATABASE_URL="$CHARTER_DRILL_OWNER_DSN" ./charter migrate
 CHARTER_MIGRATE_DATABASE_URL="$CHARTER_DRILL_FOREIGN_OWNER_DSN" ./charter migrate
 for d in "$db" "$foreign"; do
-  { printf '\\set ws_user charter_ws\n\\set ws_password %s\n\\set ev_user charter_ev\n\\set ev_password %s\n' "$wspw" "$evpw"; cat provision-runtime-roles.sql;
+  { printf '\\set ws_user charter_ws\n\\set ws_password %s\n\\set ev_user charter_ev\n\\set ev_password %s\n\\set budget_user charter_budget\n\\set budget_password %s\n' "$wspw" "$evpw" "$budgetpw"; cat provision-runtime-roles.sql;
     printf "ALTER DATABASE %s SET charter.evidence_binding TO 'charter-s3-compliance-v1:lab-%s';\n" "$d" "$C04_RUN"
-    printf 'GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO charter_workspace_app, charter_evidence_app;\n'
+    printf 'GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO charter_workspace_app, charter_evidence_app, charter_budget_app;\n'
   } | pg -d "$d"
 done
 # Keep the PostgreSQL server key outside PGDATA (not a restore artifact).
@@ -70,6 +71,7 @@ source "$C04_PRIVATE/serving.env"
 [[ "$CHARTER_S3_DEPLOYMENT" == "lab-$C04_RUN" ]]
 export CHARTER_DATABASE_URL="postgres://charter_ws:$wspw@127.0.0.1:55433/$db?sslmode=require"
 export CHARTER_EVIDENCE_DATABASE_URL="postgres://charter_ev:$evpw@127.0.0.1:55433/$db?sslmode=require"
+export CHARTER_BUDGET_DATABASE_URL="postgres://charter_budget:$budgetpw@127.0.0.1:55433/$db?sslmode=require"
 export CHARTER_DRILL_FOREIGN_WORKSPACE_DSN="postgres://charter_ws:$wspw@127.0.0.1:55433/$foreign?sslmode=require"
 export CHARTER_DRILL_FOREIGN_EVIDENCE_DSN="postgres://charter_ev:$evpw@127.0.0.1:55433/$foreign?sslmode=require"
 export CHARTER_EVIDENCE_BACKEND=s3-object-lock CHARTER_ADDR=127.0.0.1:55434

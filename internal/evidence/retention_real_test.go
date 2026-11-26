@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Zutfen-LLC/charter/internal/evidence/s3transport"
+	"github.com/Zutfen-LLC/charter/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -101,6 +102,10 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 	}
 	pg := PG{DB: open("CHARTER_EVIDENCE_DATABASE_URL")}
 	owner := open("CHARTER_DRILL_OWNER_DSN")
+	t.Run("C05_unknown_overrun_across_stores", func(t *testing.T) {
+		runRealRetainedOverrun(t, ctx, pg, PG{DB: open("CHARTER_BUDGET_DATABASE_URL")}, owner, s3, root, bucket)
+	})
+
 	req := Request{TenantID: "fault-tenant", ProjectID: "fixture-project", MatterID: "fixture-matter", CustodianID: "fixture-custodian", IdempotencyKey: "synthetic-fault", RequestID: "synthetic-request", Input: []byte("fixture input"), Sources: []Source{{ID: "fixture-source", Version: 1, Bytes: []byte("fixture excerpt")}}}
 	out := []byte("fixture output must be withheld on error")
 	var injected = errors.New("deterministic boundary failure")
@@ -427,6 +432,146 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 					}
 				}
 			}
+		})
+	}
+}
+
+// Keep the retained serving profile synthetic-only. Inject the accounting
+// observation at its trusted model boundary; the HTTP path is tested separately.
+func runRealRetainedOverrun(t *testing.T, ctx context.Context, pg, budget PG, owner *pgxpool.Pool, s3 *s3transport.Client, root, bucket string) {
+	for _, scenario := range []struct{ name, faultEvent, wantBasis string }{
+		{"coordination-first", "usage_settled", "reserved_max"},
+		{"evidence-fallback", "provider_accepted", "observed_minimum"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			st := store.Store{DB: owner}
+			tenant, err := st.CreateTenant(ctx, "fixture-issuer", NewUUID(), "Synthetic C05")
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := st.CreateProject(ctx, tenant, "Synthetic C05")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := (PG{DB: owner}).SetPolicy(ctx, BudgetPolicy{TenantID: tenant, ProjectID: project, AllowedModels: []string{"det-a"}, LocalOnly: true, ProjectCap: 500}); err != nil {
+				t.Fatal(err)
+			}
+			acquire := func() *Fence {
+				t.Helper()
+				f, err := pg.AcquireFence(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(f.Release)
+				return f
+			}
+			f := acquire()
+			pub, key, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var faultHits, calls atomic.Int32
+			transport := &realFaultTransport{Client: s3, before: func(_ context.Context, path string, data []byte) error {
+				if strings.Contains(path, "/data/events/") && strings.Contains(string(data), `"type":"`+scenario.faultEvent+`"`) {
+					faultHits.Add(1)
+					return errors.New("synthetic retained append failure")
+				}
+				return nil
+			}}
+			options := RetentionOptions{Store: transport, Deployment: root + "-c05-" + scenario.name, Bucket: bucket, TrustedCommitKey: pub, Signer: key, Fence: f, RetainFor: time.Minute}
+			makeBackend := func(o RetentionOptions) *RetentionBackend {
+				t.Helper()
+				b, err := NewRetentionBackend(o)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return b
+			}
+			// Match serving: the fence owns evidence I/O, while the ledger uses
+			// its distinct restricted budget login and never borrows the evidence session.
+			ledger := budget
+			const maximum, floor = 67, 85
+			req := Request{TenantID: tenant, ProjectID: project, MatterID: project, CustodianID: "synthetic-custodian", IdempotencyKey: "stable", RequestID: "synthetic-request", Input: []byte("synthetic"), ModelID: "det-a"}
+			var turn string
+			plan := func(_ context.Context, r Request) (GovernedPlan, error) {
+				d := Destination{Provider: "fixture", EndpointID: "synthetic", ModelID: "det-a"}
+				var id string
+				return GovernedPlan{Destination: d, RegistryModel: r.ModelID, PolicyVersion: "synthetic-c05",
+					Build: func(r Request) ([]byte, error) { return RenderRequest(d, r.Input, r.Sources) },
+					Reserve: func(ctx context.Context, tid string, _ []byte) (int, error) {
+						turn = tid
+						got, err := ledger.Reserve(ctx, BudgetReservation{TenantID: tenant, ProjectID: project, TurnID: tid, IdempotencyKey: r.IdempotencyKey, ModelID: r.ModelID, Destination: d, Amount: maximum})
+						id = got.ID
+						return maximum, err
+					},
+					Arm:        func(ctx context.Context, _ string) error { return ledger.MarkDispatchPossible(ctx, id) },
+					CheckRoute: func(context.Context) error { return nil },
+					Invoke: func(ctx context.Context, _ []byte) (ModelOutcome, error) {
+						calls.Add(1)
+						if scenario.name == "coordination-first" {
+							if err := ledger.NoteOverrun(ctx, id, floor); err != nil {
+								t.Fatal(err)
+							}
+						} else {
+							if err := ledger.HoldBudgetExposure(ctx, id); err != nil {
+								t.Fatal(err)
+							}
+						}
+						return ModelOutcome{Accepted: true, ObservedOverrunFloor: floor}, errors.New("synthetic output withheld")
+					}}, nil
+			}
+			rec := &Recorder{Backend: makeBackend(options), Fence: f, Governance: plan}
+			gate := func(context.Context) error { return nil }
+			if result, err := rec.Process(ctx, req, nil, gate); err == nil || len(result.Output) != 0 || calls.Load() != 1 || faultHits.Load() == 0 {
+				t.Fatalf("fault not reached/contained: calls=%d hits=%d err=%v", calls.Load(), faultHits.Load(), err)
+			}
+			f.Release()
+			successor := acquire()
+			options.Fence, options.Store = successor, s3
+			retained := makeBackend(options)
+			nextLedger := budget
+			next := &Recorder{Backend: retained, Fence: successor, Governance: plan, Accounting: nextLedger.ReconcileBudget}
+			for range 2 {
+				if _, err := next.Recover(ctx, time.Time{}); err != nil {
+					t.Fatal(err)
+				}
+				if err := nextLedger.RecoverBudget(ctx, retained); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if result, err := next.Process(ctx, req, nil, gate); err == nil || len(result.Output) != 0 || calls.Load() != 1 {
+				t.Fatalf("retry dispatched or released: %v calls=%d", err, calls.Load())
+			}
+			stat, err := nextLedger.Summary(ctx, tenant, project)
+			if err != nil || stat.Unknown != floor || stat.Settled != 0 || !stat.Frozen || stat.Outstanding != 0 {
+				t.Fatalf("incorrect ledger: %+v %v", stat, err)
+			}
+			// Read-only reconstruction has storage and the public key, not PostgreSQL.
+			options.Signer, options.Fence = nil, nil
+			reader := makeBackend(options)
+			evs, err := reader.Load(ctx, tenant, turn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			objects, err := reader.LoadRetainedObjects(ctx, tenant, turn, evs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := reader.VerifyRetainedTurn(ctx, tenant, turn, evs); err != nil {
+				t.Fatal(err)
+			}
+			if errs := VerifyRetentionFull(evs, objects); len(errs) != 0 {
+				t.Fatalf("offline verifier: %v", errs)
+			}
+			settle := last(evs, "usage_settled")
+			if settle < 0 || str(payload(evs[settle]), "basis") != scenario.wantBasis {
+				t.Fatal("unexpected independently reconstructed settlement")
+			}
+			var durableFloor int64
+			if err := owner.QueryRow(ctx, `SELECT overrun_floor FROM evidence_budget_reservations WHERE tenant_id=$1 AND turn_id=$2`, tenant, turn).Scan(&durableFloor); err != nil || durableFloor != floor {
+				t.Fatalf("floor=%d err=%v", durableFloor, err)
+			}
+			t.Logf("retained_events=%d retained_basis=%s durable_floor=%d unknown_charge=%d frozen=%t fault_hits=%d synthetic_invocations=%d", len(evs), scenario.wantBasis, durableFloor, stat.Unknown, stat.Frozen, faultHits.Load(), calls.Load())
 		})
 	}
 }

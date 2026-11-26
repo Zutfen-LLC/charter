@@ -1,0 +1,179 @@
+package routing
+
+import (
+	"context"
+	"errors"
+
+	"github.com/Zutfen-LLC/charter/internal/evidence"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// Budget is the coordination boundary. A failed write may have committed;
+// retained reconciliation applies the same monotonic incident transition.
+type Budget interface {
+	GetPolicy(context.Context, string, string) (evidence.BudgetPolicy, error)
+	Reserve(context.Context, evidence.BudgetReservation) (evidence.BudgetReceipt, error)
+	MarkDispatchPossible(context.Context, string) error
+	NoteOverrun(context.Context, string, int64) error
+	NoteUnquantifiedExposure(context.Context, string) error
+	HoldBudgetExposure(context.Context, string) error
+}
+
+// Governance pins one resolved model for this turn. Configuration is immutable
+// across serving; project authorization is read again before invocation.
+func Governance(cfg Config, budget Budget, syntheticRetention bool, countSynthetic func()) evidence.Governance {
+	return func(ctx context.Context, r evidence.Request) (evidence.GovernedPlan, error) {
+		id := r.ModelID
+		if id == "" {
+			id = "det-a"
+		}
+		resolve := func(ctx context.Context) (Model, error) {
+			p, err := budget.GetPolicy(ctx, r.TenantID, r.ProjectID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return Model{}, evidence.ErrDenied
+			}
+			if err != nil {
+				return Model{}, errors.New("routing: project policy unavailable")
+			}
+			if !p.Enabled {
+				return Model{}, evidence.ErrDenied
+			}
+			c := cfg
+			c.Policy = Policy{AllowedModelIDs: p.AllowedModels, LocalOnly: p.LocalOnly}
+			m, err := c.Resolve(id)
+			if err != nil || (syntheticRetention && m.Kind == KindLocalHTTP) {
+				return Model{}, evidence.ErrDenied
+			}
+			return m, nil
+		}
+		m, err := resolve(ctx)
+		if err != nil {
+			return evidence.GovernedPlan{}, err
+		}
+		var receipt evidence.BudgetReceipt
+		var reserved int64
+		var adapter Adapter
+		switch m.Kind {
+		case KindDeterministicA, KindDeterministicB:
+			adapter = DeterministicAdapter{Kind: m.Kind}
+		case KindLocalHTTP:
+			adapter = HTTPAdapter{Timeout: cfg.Timeout, BearerToken: cfg.BearerToken}
+		default:
+			return evidence.GovernedPlan{}, evidence.ErrDenied
+		}
+		return evidence.GovernedPlan{
+			Destination: m.Destination, RegistryModel: m.ID, PolicyVersion: "charter-routing-v1",
+			Build: func(r evidence.Request) ([]byte, error) {
+				return evidence.RenderRequest(m.Destination, r.Input, r.Sources)
+			},
+			Reserve: func(ctx context.Context, turn string, sent []byte) (int, error) {
+				if int64(len(sent)) > m.MaxRequestBytes {
+					return 0, evidence.ErrDenied
+				}
+				max, ok := cost(m, int64(len(sent)), m.MaxOutputBytes)
+				if !ok {
+					return 0, evidence.ErrDenied
+				}
+				var err error
+				receipt, err = budget.Reserve(ctx, evidence.BudgetReservation{TenantID: r.TenantID, ProjectID: r.ProjectID, TurnID: turn, IdempotencyKey: r.IdempotencyKey, ModelID: m.ID, Destination: m.Destination, Amount: max})
+				var pe *pgconn.PgError
+				if errors.As(err, &pe) && (pe.Code == "54000" || pe.Code == "42501") {
+					return 0, evidence.ErrDenied
+				}
+				if err != nil {
+					return 0, errors.New("routing: reservation was not confirmed")
+				}
+				if receipt.Replayed {
+					return 0, evidence.ErrTurnInFlight
+				}
+				reserved = max
+				return int(max), nil
+			},
+			Arm: func(ctx context.Context, _ string) error { return budget.MarkDispatchPossible(ctx, receipt.ID) },
+			CheckRoute: func(ctx context.Context) error {
+				current, err := resolve(ctx)
+				if err != nil {
+					return err
+				}
+				if current != m {
+					return evidence.ErrDenied
+				}
+				return nil
+			},
+			Invoke: func(ctx context.Context, sent []byte) (evidence.ModelOutcome, error) {
+				if err := ctx.Err(); err != nil {
+					return evidence.ModelOutcome{}, err
+				}
+				if syntheticRetention && countSynthetic != nil {
+					countSynthetic()
+				}
+				o, err := adapter.Invoke(ctx, m, sent)
+				out := o.ModelOutcome
+				switch {
+				case o.ProviderConfirmedNonBillable:
+					zero := int64(0)
+					out.UsageUnits = &zero
+				case out.Accepted:
+					// Price the observations made before truncation. Reported usage only
+					// determines whether this amount is exact; it never changes the counts.
+					n, ok := cost(m, o.ObservedInputBytes, o.ObservedOutputBytes)
+					if !ok {
+						out.UnquantifiedExposure = true
+					} else {
+						if n > reserved {
+							out.ObservedOverrunFloor = n
+						}
+						if o.verifiedUsage() {
+							out.UsageUnits = &n
+						}
+					}
+				default:
+					out.UnquantifiedExposure = o.UnquantifiedExposure
+				}
+				if out.ObservedOverrunFloor > 0 || out.UnquantifiedExposure {
+					hold, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Timeout)
+					defer cancel()
+					var note error
+					if out.UnquantifiedExposure {
+						note = budget.NoteUnquantifiedExposure(hold, receipt.ID)
+					} else {
+						note = budget.NoteOverrun(hold, receipt.ID, out.ObservedOverrunFloor)
+					}
+					// Never authorize release for an incident. If the transaction was not
+					// confirmed, the immutable terminal evidence can still supply it.
+					if note != nil {
+						// Use a separate transaction and write path. A committed-but-unacknowledged
+						// incident is already held; otherwise block admissions and settlement
+						// until reconciliation establishes the incident from retained evidence.
+						fallback, done := context.WithTimeout(context.WithoutCancel(ctx), cfg.Timeout)
+						defer done()
+						if budget.HoldBudgetExposure(fallback, receipt.ID) != nil {
+							return out, errors.New("routing: neither budget exposure nor fallback hold was confirmed")
+						}
+						return out, errors.New("routing: budget exposure not durably confirmed")
+					}
+					return out, errors.New("routing: budget exposure exceeded or unverifiable")
+				}
+				if err != nil {
+					return out, errors.New("routing: adapter did not complete")
+				}
+				return out, nil
+			},
+		}, nil
+	}
+}
+
+func cost(m Model, in, out int64) (int64, bool) {
+	if in < 0 || out < 0 || m.RequestByteRate < 0 || m.OutputByteRate < 0 {
+		return 0, false
+	}
+	if (in > 0 && m.RequestByteRate > maxSafeInteger/in) || (out > 0 && m.OutputByteRate > maxSafeInteger/out) {
+		return 0, false
+	}
+	a, b := in*m.RequestByteRate, out*m.OutputByteRate
+	if a > maxSafeInteger-b {
+		return 0, false
+	}
+	return a + b, true
+}
