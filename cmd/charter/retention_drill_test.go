@@ -343,6 +343,70 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	if beforeChange["replayed"] != true || beforeChange["output"] != sourceResponse["output"] {
 		t.Fatal("C06 replay changed output")
 	}
+	// C06 correction regressions against the actual retained serving
+	// composition. First: context eligibility precedes sealing. Revoke the
+	// delegated grant between the completed selection read and the first
+	// revalidation; nothing may be sealed into model context.
+	eligibilityBase := sourceFixture.ReadCalls.Load()
+	sourceFixture.BeforeRead = func() {
+		if sourceFixture.ReadCalls.Load() == eligibilityBase+2 {
+			sourceFixture.Grant("sp-original-doc", "synthetic-delegate", false)
+		}
+	}
+	dump("c06-eligibility-response.json", postRequest(alice, sourceBody, "c06-context-eligibility-drill", 404))
+	sourceFixture.BeforeRead = nil
+	sourceFixture.Grant("sp-original-doc", "synthetic-delegate", true)
+	var eligibilityTurn string
+	must(owner.QueryRow(ctx, `SELECT turn_id::text FROM evidence_turns WHERE idempotency_key=$1`, "c06-context-eligibility-drill").Scan(&eligibilityTurn))
+	eligibilityEvents, err := readonly.Load(ctx, tenant, eligibilityTurn)
+	must(err)
+	for _, ev := range eligibilityEvents {
+		switch ev["type"] {
+		case "context_sealed":
+			t.Fatal("retained: source revoked before context eligibility was sealed")
+		case "disclosure_intent":
+			t.Fatal("retained: disclosure intent recorded for an ineligible source")
+		}
+	}
+	if last := eligibilityEvents[len(eligibilityEvents)-1]; last["type"] != evidence.TypeTurnInterrupted ||
+		last["payload"].(map[string]any)["reason"] != "context_eligibility_denied" ||
+		last["payload"].(map[string]any)["disclosure"] != "none" {
+		t.Fatalf("retained: eligibility refusal evidence: %v", last)
+	}
+	dump("c06-eligibility-events.json", eligibilityEvents)
+	// Second: route authorization is re-resolved after the final delegated
+	// source revalidation. Commit an allowlist change that disallows the
+	// pinned model during that revalidation, with source ACLs, version,
+	// bytes and membership still valid, and require zero invocations.
+	routeBase := sourceFixture.ReadCalls.Load()
+	var routeHookErr error
+	sourceFixture.AfterRead = func() {
+		if routeHookErr == nil && sourceFixture.ReadCalls.Load() == routeBase+4 {
+			routeHookErr = (evidence.PG{DB: owner}).SetPolicy(ctx, evidence.BudgetPolicy{TenantID: tenant, ProjectID: project, LocalOnly: true, AllowedModels: []string{"det-b"}, ProjectCap: 10000000})
+		}
+	}
+	dump("c06-route-revocation-response.json", postRequest(alice, sourceBody, "c06-route-revocation-drill", 403))
+	sourceFixture.AfterRead = nil
+	must(routeHookErr)
+	must((evidence.PG{DB: owner}).SetPolicy(ctx, evidence.BudgetPolicy{TenantID: tenant, ProjectID: project, LocalOnly: true, AllowedModels: []string{"det-a", "det-b"}, ProjectCap: 10000000}))
+	if bytes.Count(sourceLogs.Bytes(), []byte("synthetic retention provider invoked")) != 1 {
+		t.Fatal("retained: eligibility refusal or route revocation dispatched the model")
+	}
+	var routeTurn string
+	must(owner.QueryRow(ctx, `SELECT turn_id::text FROM evidence_turns WHERE idempotency_key=$1`, "c06-route-revocation-drill").Scan(&routeTurn))
+	routeEvents, err := readonly.Load(ctx, tenant, routeTurn)
+	must(err)
+	for _, ev := range routeEvents {
+		switch ev["type"] {
+		case "provider_accepted", "output_recorded", "response_released":
+			t.Fatalf("retained: authorization or output followed the route revocation: %v", ev["type"])
+		}
+	}
+	if last := routeEvents[len(routeEvents)-1]; last["type"] != evidence.TypeTurnInterrupted ||
+		last["payload"].(map[string]any)["reason"] != "route_revoked_before_dispatch" {
+		t.Fatalf("retained: route revocation evidence: %v", last)
+	}
+	dump("c06-route-revocation-events.json", routeEvents)
 	sourceFixture.Grant("sp-original-doc", "synthetic-delegate", false)
 	_ = postRequest(alice, sourceBody, sourceKey, 404)
 	sourceFixture.Grant("sp-original-doc", "synthetic-delegate", true)
