@@ -374,6 +374,20 @@ func verifyChain(events []Event, objects map[string][]byte, full, allowUnfinishe
 			released = true
 		case "usage_settled":
 			basis := str(p, "basis")
+			floorValue, hasFloor := p["observed_overrun_floor"]
+			unquantified, hasUnquantified := p["unquantified_exposure"]
+			if hasFloor || hasUnquantified || basis == "observed_minimum" {
+				intent := last(events[:i], "disclosure_intent")
+				_, noDispatch := p["confirmed_no_dispatch"]
+				floor, validFloor := integer(floorValue)
+				n, validUnits := integer(p["units"])
+				if !governedBudget || !hasReservation || intent < 0 || !acked[intent] || released || noDispatch ||
+					(hasUnquantified && (unquantified != true || hasFloor || basis != "reserved_max")) ||
+					(hasFloor && (!validFloor || !safeBudgetAmount(floor) || floor <= reservedUnits || !validUnits || n != floor || (basis != "observed_minimum" && basis != "provider_reported"))) ||
+					(basis == "observed_minimum" && !hasFloor) {
+					add(i, CodeRefs, "invalid governed exposure evidence")
+				}
+			}
 			if _, exists := p["confirmed_no_dispatch"]; exists {
 				reason := str(p, "confirmed_no_dispatch")
 				if !noDispatchReason(reason) || !governedBudget || basis != "reserved_max" || DeriveDisclosure(events[:i]) != DisclosureUnknown || last(events[:i], "output_recorded") >= 0 || (i+1 < len(events) && (str(events[i+1], "type") != TypeTurnInterrupted || str(payload(events[i+1]), "reason") != reason)) {
@@ -392,11 +406,11 @@ func verifyChain(events []Event, objects map[string][]byte, full, allowUnfinishe
 			} else if basis == "reserved_max" && (!hasReservation || n != reservedUnits) {
 				add(i, CodeRefs, "usage_settled reserved_max units must equal the full reservation")
 			}
-			if basis != "reserved_max" && basis != "provider_reported" {
-				add(i, CodeRefs, "usage_settled.basis must be provider_reported or reserved_max")
+			if basis != "reserved_max" && basis != "provider_reported" && basis != "observed_minimum" {
+				add(i, CodeRefs, "unsupported usage_settled.basis")
 			}
-			if DeriveDisclosure(events[:i]) == DisclosureUnknown && basis != "reserved_max" {
-				add(i, CodeRefs, "unknown disclosure must use reserved_max settlement")
+			if DeriveDisclosure(events[:i]) == DisclosureUnknown && basis != "reserved_max" && basis != "observed_minimum" {
+				add(i, CodeRefs, "unknown disclosure cannot use exact settlement")
 			}
 		case TypeTurnCompleted:
 			if p["outcome"] == "completed" && last(events[:i], "usage_settled") < 0 {

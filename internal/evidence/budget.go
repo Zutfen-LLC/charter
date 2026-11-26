@@ -142,7 +142,12 @@ func (b PG) NoteOverrun(ctx context.Context, id string, units int64) error {
 	return b.transition(ctx, `SELECT evidence_budget_note_overrun($1::uuid,$2)`, id, units)
 }
 
-// Settle records verified exact usage or conservatively charges max reservation if unknown. Owner/evidence backend only.
+// NoteUnquantifiedExposure freezes admissions without claiming an amount.
+func (b PG) NoteUnquantifiedExposure(ctx context.Context, id string) error {
+	return b.transition(ctx, `SELECT evidence_budget_note_overrun($1::uuid,NULL::bigint)`, id)
+}
+
+// Settle records exact usage, or max(reservation, durable floor) as unknown.
 func (b PG) Settle(ctx context.Context, id string, exact *int64) error {
 	if exact != nil && !safeBudgetAmount(*exact) {
 		return fmt.Errorf("evidence: invalid settlement amount")

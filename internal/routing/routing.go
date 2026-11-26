@@ -146,12 +146,29 @@ func validateEndpoint(raw string) error {
 	return nil
 }
 
-type Outcome struct {
-	ModelOutcome                                    evidence.ModelOutcome
-	InputBytes, OutputBytes                         int64
-	UsageMissing, UsageInconsistent, UsageExcessive bool
-	ProviderConfirmedNonBillable                    bool
+type usageWire struct {
+	InputBytes  *int64 `json:"input_bytes"`
+	OutputBytes *int64 `json:"output_bytes"`
 }
+
+type Outcome struct {
+	ModelOutcome                            evidence.ModelOutcome
+	ObservedInputBytes, ObservedOutputBytes int64
+	ReportedUsage                           *usageWire
+	DeterministicUsage                      bool
+	UnquantifiedExposure                    bool
+	ProviderConfirmedNonBillable            bool
+}
+
+func (o Outcome) verifiedUsage() bool {
+	if o.DeterministicUsage {
+		return true
+	}
+	r := o.ReportedUsage
+	return r != nil && r.InputBytes != nil && r.OutputBytes != nil &&
+		*r.InputBytes == o.ObservedInputBytes && *r.OutputBytes == o.ObservedOutputBytes
+}
+
 type Adapter interface {
 	Invoke(context.Context, Model, []byte) (Outcome, error)
 }
@@ -173,7 +190,7 @@ func (a DeterministicAdapter) Invoke(_ context.Context, m Model, b []byte) (Outc
 	if int64(len(out)) > m.MaxOutputBytes {
 		return Outcome{}, errors.New("routing: output exceeds limit")
 	}
-	return Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true, Complete: true, Output: out}, InputBytes: int64(len(b)), OutputBytes: int64(len(out))}, nil
+	return Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true, Complete: true, Output: out}, ObservedInputBytes: int64(len(b)), ObservedOutputBytes: int64(len(out)), DeterministicUsage: true}, nil
 }
 
 type HTTPAdapter struct {
@@ -181,13 +198,10 @@ type HTTPAdapter struct {
 	BearerToken string
 }
 type responseWire struct {
-	Output   *string `json:"output"`
-	Rejected bool    `json:"rejected"`
-	Billable *bool   `json:"billable"`
-	Usage    *struct {
-		InputBytes  *int64 `json:"input_bytes"`
-		OutputBytes *int64 `json:"output_bytes"`
-	} `json:"usage"`
+	Output   *string         `json:"output"`
+	Rejected bool            `json:"rejected"`
+	Billable *bool           `json:"billable"`
+	Usage    json.RawMessage `json:"usage"`
 }
 
 func (a HTTPAdapter) Invoke(ctx context.Context, m Model, request []byte) (Outcome, error) {
@@ -226,47 +240,44 @@ func (a HTTPAdapter) Invoke(ctx context.Context, m Model, request []byte) (Outco
 	if (resp.StatusCode < 200 || resp.StatusCode >= 300) && resp.StatusCode != http.StatusUnprocessableEntity {
 		return Outcome{}, fmt.Errorf("routing: local endpoint status %d", resp.StatusCode)
 	}
+	// Envelope bytes are not output bytes. If we cannot establish a bounded,
+	// valid completion, neither zero cost nor cap compliance is established.
+	unquantified := Outcome{ObservedInputBytes: int64(len(request)), UnquantifiedExposure: true}
 	limit := m.MaxOutputBytes*6 + 65536
 	if limit < 65536 || limit > maxSafeInteger {
-		return Outcome{}, errors.New("routing: invalid response bound")
+		return unquantified, errors.New("routing: invalid response bound")
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return Outcome{}, err
+		return unquantified, err
 	}
 	if int64(len(data)) > limit {
-		return Outcome{}, errors.New("routing: response envelope too large")
+		return unquantified, errors.New("routing: response envelope too large")
 	}
 	var w responseWire
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err = dec.Decode(&w); err != nil {
-		return Outcome{}, errors.New("routing: malformed response")
+		return unquantified, errors.New("routing: malformed response")
 	}
 	if dec.Decode(new(any)) != io.EOF {
-		return Outcome{}, errors.New("routing: trailing response data")
+		return unquantified, errors.New("routing: trailing response data")
 	}
 	if resp.StatusCode == http.StatusUnprocessableEntity {
-		if w.Rejected && w.Billable != nil && !*w.Billable && w.Output == nil && w.Usage == nil {
+		if w.Rejected && w.Billable != nil && !*w.Billable && w.Output == nil && (w.Usage == nil || bytes.Equal(w.Usage, []byte("null"))) {
 			return Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true}, ProviderConfirmedNonBillable: true}, errors.New("routing: confirmed rejection without billable work")
 		}
-		return Outcome{}, errors.New("routing: unconfirmed rejection")
+		return unquantified, errors.New("routing: unconfirmed rejection")
 	}
 	if w.Output == nil || w.Rejected || w.Billable != nil {
-		return Outcome{}, errors.New("routing: malformed completion")
+		return unquantified, errors.New("routing: malformed completion")
 	}
 	out := []byte(*w.Output)
-	o := Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true, Complete: true, Output: out}, InputBytes: int64(len(request)), OutputBytes: int64(len(out))}
-	if w.Usage == nil || w.Usage.InputBytes == nil || w.Usage.OutputBytes == nil {
-		o.UsageMissing = true
-	} else {
-		o.InputBytes = *w.Usage.InputBytes
-		o.OutputBytes = *w.Usage.OutputBytes
-		if o.InputBytes != int64(len(request)) || o.OutputBytes != int64(len(out)) {
-			o.UsageInconsistent = true
-		}
-		if o.InputBytes < 0 || o.OutputBytes < 0 || o.InputBytes > maxSafeInteger || o.OutputBytes > maxSafeInteger {
-			o.UsageExcessive = true
-		}
+	o := Outcome{ModelOutcome: evidence.ModelOutcome{Accepted: true, Complete: true, Output: out}, ObservedInputBytes: int64(len(request)), ObservedOutputBytes: int64(len(out))}
+	// A numerically invalid or ill-typed usage object cannot hide successfully
+	// decoded output. Parse that untrusted metadata separately, all or nothing.
+	var reported *usageWire
+	if json.Unmarshal(w.Usage, &reported) == nil {
+		o.ReportedUsage = reported
 	}
 	if int64(len(out)) > m.MaxOutputBytes {
 		o.ModelOutcome.Output = out[:m.MaxOutputBytes]

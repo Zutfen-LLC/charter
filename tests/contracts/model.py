@@ -443,6 +443,18 @@ def verify_turn(events, objects=None):
                 add(i, "R2", "response released before acked complete output")
             released = True
         elif typ == "usage_settled":
+            basis = p.get("basis")
+            has_floor = "observed_overrun_floor" in p
+            has_unquantified = "unquantified_exposure" in p
+            if has_floor or has_unquantified or basis == "observed_minimum":
+                intent = max((j for j, kind in enumerate(types[:i]) if kind == "disclosure_intent"), default=-1)
+                floor = p.get("observed_overrun_floor")
+                if (not governed_budget or intent not in acked or released or "confirmed_no_dispatch" in p or
+                        (has_unquantified and (p["unquantified_exposure"] is not True or has_floor or basis != "reserved_max")) or
+                        (has_floor and (not _int(floor) or not reserved_units < floor <= MAX_SAFE_INT or
+                                        not _int(p.get("units")) or p["units"] != floor or basis not in ("observed_minimum", "provider_reported"))) or
+                        (basis == "observed_minimum" and not has_floor)):
+                    add(i, "REFS", "invalid governed exposure evidence")
             if "confirmed_no_dispatch" in p:
                 reason = p["confirmed_no_dispatch"]
                 nxt = events[i+1] if i+1 < len(events) and isinstance(events[i+1], dict) else {}
@@ -459,10 +471,10 @@ def verify_turn(events, objects=None):
                 add(i, "REFS", "usage_settled.units must be a non-negative integer")
             elif p.get("basis") == "reserved_max" and p["units"] != reserved_units:
                 add(i, "REFS", "usage_settled reserved_max units must equal the full reservation")
-            if p.get("basis") not in ("reserved_max", "provider_reported"):
-                add(i, "REFS", "usage_settled.basis must be provider_reported or reserved_max")
-            if derive_disclosure(events[:i]) == "unknown" and p.get("basis") != "reserved_max":
-                add(i, "REFS", "unknown disclosure must use reserved_max settlement")
+            if p.get("basis") not in ("reserved_max", "provider_reported", "observed_minimum"):
+                add(i, "REFS", "unsupported usage_settled.basis")
+            if derive_disclosure(events[:i]) == "unknown" and p.get("basis") not in ("reserved_max", "observed_minimum"):
+                add(i, "REFS", "unknown disclosure cannot use exact settlement")
         elif typ == "turn_completed":
             o = p.get("outcome")
             if o == "completed" and not any(isinstance(x, dict) and x.get("type") == "usage_settled" for x in events[:i]):

@@ -52,7 +52,7 @@ func TestHTTPAdapterSendsExactBytesOnce(t *testing.T) {
 	defer srv.Close()
 	m := Model{ID: "local-http", Kind: KindLocalHTTP, Class: ClassLocal, Destination: evidenceDestination("test", "local", "local-model"), Endpoint: srv.URL, MaxRequestBytes: 10, MaxOutputBytes: 100, RequestByteRate: 1, OutputByteRate: 1}
 	out, err := (HTTPAdapter{Timeout: time.Second}).Invoke(context.Background(), m, body)
-	if err != nil || calls.Load() != 1 || string(out.ModelOutcome.Output) != "ok" || out.InputBytes != 5 || out.OutputBytes != 2 {
+	if err != nil || calls.Load() != 1 || string(out.ModelOutcome.Output) != "ok" || out.ObservedInputBytes != 5 || out.ObservedOutputBytes != 2 || !out.verifiedUsage() {
 		t.Fatalf("out=%+v calls=%d err=%v", out, calls.Load(), err)
 	}
 }

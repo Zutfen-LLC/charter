@@ -57,9 +57,10 @@ func (rc *Recorder) reconcile(ctx context.Context, t *turn) error {
 // charge. An unavailable or unverified log leaves the reservation outstanding.
 func (b PG) ReconcileBudget(ctx context.Context, backend Backend, tenant, turnID string) error {
 	var id, status, project, model, provider, endpoint, destinationModel string
-	var maximum int64
+	var maximum, floor int64
+	var unquantified bool
 	var dispatch bool
-	err := b.DB.QueryRow(ctx, `SELECT reservation_id::text,status,dispatch_possible,project_id::text,model_id,provider,endpoint_id,destination_model_id,reserved_amount FROM evidence_budget_reservations WHERE tenant_id=$1::uuid AND turn_id=$2::uuid`, tenant, turnID).Scan(&id, &status, &dispatch, &project, &model, &provider, &endpoint, &destinationModel, &maximum)
+	err := b.DB.QueryRow(ctx, `SELECT reservation_id::text,status,dispatch_possible,project_id::text,model_id,provider,endpoint_id,destination_model_id,reserved_amount,overrun_floor,unquantified_exposure FROM evidence_budget_reservations WHERE tenant_id=$1::uuid AND turn_id=$2::uuid`, tenant, turnID).Scan(&id, &status, &dispatch, &project, &model, &provider, &endpoint, &destinationModel, &maximum, &floor, &unquantified)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -119,6 +120,19 @@ func (b PG) ReconcileBudget(ctx context.Context, backend Backend, tenant, turnID
 		return errors.New("budget: armed reservation has no settlement evidence")
 	}
 	p := payload(evs[settle])
+	// Either durability domain can retain the incident. If the ledger write
+	// failed or its acknowledgment was lost, reconcile from verified evidence
+	// before settling, never below the durable floor.
+	if n, ok := integer(p["observed_overrun_floor"]); ok && n > floor {
+		if err := b.NoteOverrun(ctx, id, n); err != nil {
+			return err
+		}
+	}
+	if p["unquantified_exposure"] == true && !unquantified {
+		if err := b.NoteUnquantifiedExposure(ctx, id); err != nil {
+			return err
+		}
+	}
 	if noDispatchReason(str(p, "confirmed_no_dispatch")) {
 		n := int64(0)
 		return b.Settle(ctx, id, &n)

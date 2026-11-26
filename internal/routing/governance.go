@@ -3,16 +3,25 @@ package routing
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// Budget is the coordination boundary. A failed write may have committed;
+// retained reconciliation applies the same monotonic incident transition.
+type Budget interface {
+	GetPolicy(context.Context, string, string) (evidence.BudgetPolicy, error)
+	Reserve(context.Context, evidence.BudgetReservation) (evidence.BudgetReceipt, error)
+	MarkDispatchPossible(context.Context, string) error
+	NoteOverrun(context.Context, string, int64) error
+	NoteUnquantifiedExposure(context.Context, string) error
+}
+
 // Governance pins one resolved model for this turn. Configuration is immutable
 // across serving; project authorization is read again before invocation.
-func Governance(cfg Config, budget evidence.PG, syntheticRetention bool, countSynthetic func()) evidence.Governance {
+func Governance(cfg Config, budget Budget, syntheticRetention bool, countSynthetic func()) evidence.Governance {
 	return func(ctx context.Context, r evidence.Request) (evidence.GovernedPlan, error) {
 		id := r.ModelID
 		if id == "" {
@@ -100,25 +109,42 @@ func Governance(cfg Config, budget evidence.PG, syntheticRetention bool, countSy
 				}
 				o, err := adapter.Invoke(ctx, m, sent)
 				out := o.ModelOutcome
-				if o.ProviderConfirmedNonBillable {
+				switch {
+				case o.ProviderConfirmedNonBillable:
 					zero := int64(0)
 					out.UsageUnits = &zero
-				} else if out.Accepted && !o.UsageMissing && !o.UsageInconsistent && !o.UsageExcessive {
-					if n, ok := cost(m, o.InputBytes, o.OutputBytes); ok {
-						// Preserve the observed value for retained settlement even if the
-						// coordination write fails. The response must still fail closed.
-						out.UsageUnits = &n
-						if n > reserved {
-							hold, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Timeout)
-							note := budget.NoteOverrun(hold, receipt.ID, n)
-							cancel()
-							if note != nil {
-								return out, errors.New("routing: budget overrun not durably recorded")
-							}
-						}
+				case out.Accepted:
+					// Price the observations made before truncation. Reported usage only
+					// determines whether this amount is exact; it never changes the counts.
+					n, ok := cost(m, o.ObservedInputBytes, o.ObservedOutputBytes)
+					if !ok {
+						out.UnquantifiedExposure = true
 					} else {
-						return out, fmt.Errorf("routing: usage exceeds numeric domain")
+						if n > reserved {
+							out.ObservedOverrunFloor = n
+						}
+						if o.verifiedUsage() {
+							out.UsageUnits = &n
+						}
 					}
+				default:
+					out.UnquantifiedExposure = o.UnquantifiedExposure
+				}
+				if out.ObservedOverrunFloor > 0 || out.UnquantifiedExposure {
+					hold, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Timeout)
+					defer cancel()
+					var note error
+					if out.UnquantifiedExposure {
+						note = budget.NoteUnquantifiedExposure(hold, receipt.ID)
+					} else {
+						note = budget.NoteOverrun(hold, receipt.ID, out.ObservedOverrunFloor)
+					}
+					// Never authorize release for an incident. If the transaction was not
+					// confirmed, the immutable terminal evidence can still supply it.
+					if note != nil {
+						return out, errors.New("routing: budget exposure not durably confirmed")
+					}
+					return out, errors.New("routing: budget exposure exceeded or unverifiable")
 				}
 				if err != nil {
 					return out, errors.New("routing: adapter did not complete")

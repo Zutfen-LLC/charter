@@ -83,6 +83,10 @@ type ModelOutcome struct {
 	Output   []byte
 	// UsageUnits is exact billable cost, when validated by the governed adapter.
 	UsageUnits *int64
+	// A lower bound, not an exact charge. UnquantifiedExposure records a
+	// distinct incident for which no output-derived amount can be justified.
+	ObservedOverrunFloor int64
+	UnquantifiedExposure bool
 }
 
 // ModelFunc performs the outbound call with the exact sealed request bytes. It
@@ -202,10 +206,12 @@ func RenderRequest(d Destination, input []byte, sources []Source) ([]byte, error
 // turn is the in-memory view of one log, always rebuilt from the backend after
 // any failure so an ambiguous write is never assumed to have failed.
 type turn struct {
-	rc     *Recorder
-	tenant string
-	id     string
-	events []Event
+	rc                   *Recorder
+	tenant               string
+	id                   string
+	events               []Event
+	observedOverrunFloor int64
+	unquantifiedExposure bool
 }
 
 func (t *turn) lastHash() any {
@@ -646,6 +652,10 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		return fail("dispatch_ownership_lost", err)
 	}
 	out, callErr := call(ctx, sent) // the only outbound call
+	if rc.Governance != nil {
+		t.observedOverrunFloor = out.ObservedOverrunFloor
+		t.unquantifiedExposure = out.UnquantifiedExposure
+	}
 	// Only a confirmed adapter acceptance is evidence of disclosure. An
 	// adapter can return buffered bytes after an ambiguous failure; preserve
 	// them as partial, but do not invent an acceptance or authorize release.
@@ -654,7 +664,7 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 			return fail("evidence_write_failed", err)
 		}
 	}
-	complete := out.Accepted && callErr == nil && out.Complete
+	complete := out.Accepted && callErr == nil && out.Complete && t.observedOverrunFloor == 0 && !t.unquantifiedExposure
 	if len(out.Output) > 0 || complete || (rc.Governance != nil && out.Accepted && out.UsageUnits != nil) {
 		if err := rc.put(ctx, t.tenant, out.Output); err != nil {
 			return fail("evidence_write_failed", err)
@@ -811,8 +821,19 @@ func (rc *Recorder) resolveOnce(ctx context.Context, t *turn, reason string) err
 	}
 	disc := DeriveDisclosure(t.events)
 	if disc != DisclosureNone && last(t.events, "usage_settled") < 0 {
-		// Unknown or partial disclosure is billed at the reserved maximum.
-		if _, _, err := t.emit(ctx, "usage_settled", interruptedSettlement(t.events, reason)); err != nil {
+		// This evidence is independent of the output object and also carries
+		// the incident if the coordination write did not acknowledge it.
+		p := interruptedSettlement(t.events, reason)
+		if t.observedOverrunFloor > 0 {
+			p["observed_overrun_floor"] = t.observedOverrunFloor
+			if p["basis"] != "provider_reported" {
+				p["basis"], p["units"] = "observed_minimum", t.observedOverrunFloor
+			}
+		}
+		if t.unquantifiedExposure {
+			p["unquantified_exposure"] = true
+		}
+		if _, _, err := t.emit(ctx, "usage_settled", p); err != nil {
 			return err
 		}
 	}
