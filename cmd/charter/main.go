@@ -74,6 +74,7 @@ func migrateOnly(ctx context.Context, cfg config.Config) error {
 // Serving holds the runtime pools after every safety check has passed.
 type Serving struct {
 	Workspace, Evidence *pgxpool.Pool
+	qualification       qualificationStatement
 }
 
 func (s *Serving) Close() {
@@ -102,10 +103,26 @@ func openServing(ctx context.Context, cfg config.Config) (*Serving, error) {
 	}
 	s := &Serving{}
 	var err error
-	if s.Workspace, err = pgxpool.New(ctx, cfg.DatabaseURL); err != nil {
+	openPool := pgxpool.New
+	if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
+		if err = validateSyntheticDatabases(cfg); err != nil {
+			return nil, err
+		}
+		if err = validateLabConfig(cfg.Addr, cfg.RetentionS3); err != nil {
+			return nil, err
+		}
+		s.qualification, err = loadQualification(ctx, cfg.RetentionS3, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		openPool = func(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+			return openRetainedCoordinationPool(ctx, dsn, s.qualification)
+		}
+	}
+	if s.Workspace, err = openPool(ctx, cfg.DatabaseURL); err != nil {
 		return nil, err
 	}
-	if s.Evidence, err = pgxpool.New(ctx, cfg.EvidenceDatabaseURL); err != nil {
+	if s.Evidence, err = openPool(ctx, cfg.EvidenceDatabaseURL); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -133,9 +150,6 @@ func openServing(ctx context.Context, cfg config.Config) (*Serving, error) {
 
 func serve(ctx context.Context, cfg config.Config) error {
 	if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
-		if err := validateSyntheticDatabases(cfg); err != nil {
-			return err
-		}
 		if err := validateSyntheticOIDC(cfg.OIDC); err != nil {
 			return err
 		}
@@ -166,7 +180,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
-		selected, check, err := connectRetained(checkCtx, cfg.Addr, cfg.RetentionS3, fence)
+		selected, check, err := connectRetained(checkCtx, cfg.RetentionS3, deps.qualification, fence)
 		if err != nil {
 			return fmt.Errorf("retention storage startup refused: %w", err)
 		}

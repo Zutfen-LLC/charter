@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,9 @@ func TestRetentionQualificationCannotRedirectOrDowngrade(t *testing.T) {
 	c.CommitKey = hex.EncodeToString(make([]byte, ed25519.PublicKeySize))
 	q := qualificationStatement{Version: retentionQualificationVersion, Profile: evidence.RetentionProfile, Endpoint: c.Endpoint, Bucket: c.Bucket, Deployment: c.Deployment, Region: c.Region, Credential: evidence.SHA256([]byte(c.AccessKey)), Implementation: "SeaweedFS 4.55", ImageDigest: evidence.SHA256([]byte("empty-package-test")), EvidenceReport: evidence.SHA256([]byte("wire-fixture-report")), IssuedAt: now.Add(-time.Minute).Format(time.RFC3339), ValidUntil: now.Add(2 * time.Hour).Format(time.RFC3339), Controls: requiredStorageControls, Canary: qualificationCanary{Key: "charter/v1/lab-run/authority", Version: "v-test-physical", SHA: evidence.SHA256([]byte("test-canary")), Length: 11, Mode: "COMPLIANCE", Until: now.Add(4 * time.Hour).Format(time.RFC3339)}}
 	q.CommitKey, q.MinSeconds = c.CommitKey, c.MinSeconds
+	q.Coordination = "1234567:16390:sha256:" + strings.Repeat("a", 64)
+	body := authorityBody(c.Deployment, q.Coordination)
+	q.Canary.SHA, q.Canary.Length = evidence.SHA256(body), len(body)
 	path := filepath.Join(t.TempDir(), "qualification.json")
 	c.QualificationFile, c.QualificationKey = path, hex.EncodeToString(pub)
 	put := func(q qualificationStatement) {
@@ -69,6 +73,17 @@ func TestRetentionQualificationCannotRedirectOrDowngrade(t *testing.T) {
 	}
 	if _, err = loadQualification(ctx, c, now.Add(3*time.Hour)); err == nil {
 		t.Fatal("expired scope accepted")
+	}
+	foreign := q
+	foreign.Coordination = "1234567:16391:sha256:" + strings.Repeat("a", 64)
+	put(foreign)
+	if _, err = loadQualification(ctx, c, now); err == nil {
+		t.Fatal("a new signed database identity reused the old retained authority receipt")
+	}
+	foreign.Coordination = ""
+	put(foreign)
+	if _, err = loadQualification(ctx, c, now); err == nil {
+		t.Fatal("signed qualification without database identity was accepted")
 	}
 	q.Profile = evidence.CurrentProfile
 	put(q)

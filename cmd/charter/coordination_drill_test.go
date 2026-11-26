@@ -35,11 +35,20 @@ func TestRetainedCoordinationAuthorityDrill(t *testing.T) {
 	deps, err := openServing(ctx, c)
 	must(err)
 	defer deps.Close()
+	bad := deps.qualification
+	bad.Coordination = strings.SplitN(bad.Coordination, ":sha256:", 2)[0] + ":sha256:" + strings.Repeat("0", 64)
+	wrongKey, err := openRetainedCoordinationPool(ctx, c.EvidenceDatabaseURL, bad)
+	must(err)
+	defer wrongKey.Close()
+	if err := wrongKey.Ping(ctx); err == nil || !strings.Contains(err.Error(), "coordination authority mismatch") {
+		t.Fatalf("unpinned PostgreSQL server key was not refused: %v", err)
+	}
+	wrongKey.Close()
 	pg := evidence.PG{DB: deps.Evidence}
 	f, err := pg.AcquireFence(ctx)
 	must(err)
 	defer f.Release()
-	b, _, err := connectRetained(ctx, c.Addr, c.RetentionS3, f)
+	b, _, err := connectRetained(ctx, c.RetentionS3, deps.qualification, f)
 	must(err)
 	rec := &evidence.Recorder{Backend: b, Fence: f, Policy: server.StubPolicy()}
 	req := evidence.Request{TenantID: "coordination-fixture", ProjectID: "project", MatterID: "matter", CustodianID: "custodian", IdempotencyKey: "coordination", RequestID: "coordination", Input: []byte("synthetic authority boundary")}
@@ -128,7 +137,8 @@ func TestRetainedCoordinationAuthorityDrill(t *testing.T) {
 	}
 	next, err := pg.AcquireFence(ctx)
 	must(err)
-	b, _, err = connectRetained(ctx, c.Addr, c.RetentionS3, next)
+	defer next.Release()
+	b, _, err = connectRetained(ctx, c.RetentionS3, deps.qualification, next)
 	must(err)
 	n, err := (&evidence.Recorder{Backend: b, Fence: next}).Recover(ctx, time.Time{})
 	next.Release()

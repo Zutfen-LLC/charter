@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -96,12 +97,14 @@ retain = now + dt.timedelta(hours=2)
 sha = lambda b: 'sha256:' + hashlib.sha256(b).hexdigest()
 run = 'lab-' + p['RUN']
 key = 'charter/v1/' + run + '/authority'
-body = ('Charter C04 synthetic authority ' + run + '\n').encode()
+coordination = os.environ['C04_COORDINATION_DATABASE']
+assert re.fullmatch(r'[1-9][0-9]{0,19}:[1-9][0-9]{0,9}:sha256:[0-9a-f]{64}', coordination)
+body = f'Charter C04 synthetic coordination authority v2\n{run}\n{coordination}\n'.encode()
 made = ad.call('PUT', protected, key, headers={'if-none-match':'*','x-amz-object-lock-mode':'COMPLIANCE','x-amz-object-lock-retain-until-date':p['brief'](retain)},data=body)
 assert made.status==200 and made.version not in ('',None,'null')
 ok, obs = p['verify_version'](rt, protected, key, made.version, body, p['brief'](retain))
 assert ok
-cert = dict(version='charter-s3-lab-qualification-v1', profile='charter-s3-compliance-v1',endpoint=p['ORIGIN'],region='us-east-1',bucket=protected,deployment=run,runtime_access_key_sha256=sha(rt.access.encode()),
+cert = dict(version='charter-s3-lab-qualification-v2', coordination_database=coordination, profile='charter-s3-compliance-v1',endpoint=p['ORIGIN'],region='us-east-1',bucket=protected,deployment=run,runtime_access_key_sha256=sha(rt.access.encode()),
     storage_implementation='SeaweedFS 4.55 a98c9e27185cf1003eca095761a39973c60734db',storage_digest='sha256:b0e48a0d0bd26d206cc4e96b3edcfebded8086b47d77f619b9a676f4f51abd36',qualification_report_sha256=sha(rd.read_bytes()),issued_at=p['brief'](now), valid_until=p['brief'](valid),controls=list(controls),
     canary=dict(key=key,version=made.version,sha256=sha(body),length=len(body),mode='COMPLIANCE',retain_until=p['brief'](retain)))
 def sh(*cmd): return subprocess.check_output(cmd)
@@ -113,7 +116,7 @@ qpub, cpub = (sh('openssl','pkey','-in',str(f),'-pubout','-outform','DER')[-32:]
 cert.update(commit_public_key=cpub,minimum_retention_seconds='600')
 payload = json.dumps(cert, separators=(',',':'))
 message = public/'signature-input'
-message.write_bytes(b'CHARTER-S3-LAB-QUALIFICATION-v1\0'+payload.encode())
+message.write_bytes(b'CHARTER-S3-LAB-QUALIFICATION-v2\0'+payload.encode())
 sig=sh('openssl','pkeyutl','-sign','-inkey',str(qual),'-rawin','-in',str(message))
 envelope = json.dumps(dict(payload=payload,signature=sig.hex()))+'\n'
 (base/'qualification.json').write_text(envelope)

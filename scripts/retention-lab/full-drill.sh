@@ -15,9 +15,6 @@ exec > >(tee -a "$E/drill-$C04_RUN.log") 2>&1
 if [[ -f "$P/charter.head" ]]; then
   grep -Ex '[0-9a-f]{40}' "$P/charter.head" > "$E/charter-head-$C04_RUN"
 fi
-python3 "$P/lab-qualification.py"
-source "$C04_PRIVATE/serving.env"
-[[ "$CHARTER_S3_DEPLOYMENT" == "lab-$C04_RUN" ]]
 image='sha256:a3c40a6a77a9a545ed6d766860c45f82ab8bc254148266e56c4139f91beec635'
 systemctl start docker
 docker --version
@@ -28,6 +25,7 @@ ownerpw=$(openssl rand -hex 20)
 wspw=$(openssl rand -hex 20)
 evpw=$(openssl rand -hex 20)
 db="charter_c04_disposable_$C04_RUN"
+foreign="${db}_foreign"
 export POSTGRES_PASSWORD="$ownerpw"
 docker run --pull=never --name "$name" -d --rm --network host -e POSTGRES_PASSWORD -e "POSTGRES_DB=$db" --tmpfs /var/lib/postgresql/data "$image" postgres -c listen_addresses=127.0.0.1 -p 55433
 unset POSTGRES_PASSWORD
@@ -38,14 +36,45 @@ for i in $(seq 1 40); do
 done
 pg() { docker exec -i "$name" psql -p 55433 -q -U postgres -d "$db" -v ON_ERROR_STOP=1 "$@"; }
 export CHARTER_DRILL_OWNER_DSN="postgres://postgres:$ownerpw@127.0.0.1:55433/$db?sslmode=disable"
+printf 'CREATE DATABASE %s;\n' "$foreign" | pg
+export CHARTER_DRILL_FOREIGN_OWNER_DSN="postgres://postgres:$ownerpw@127.0.0.1:55433/$foreign?sslmode=disable"
 CHARTER_MIGRATE_DATABASE_URL="$CHARTER_DRILL_OWNER_DSN" ./charter migrate
 CHARTER_MIGRATE_DATABASE_URL="$CHARTER_DRILL_OWNER_DSN" ./charter migrate
-{ printf '\\set ws_user charter_ws\n\\set ws_password %s\n\\set ev_user charter_ev\n\\set ev_password %s\n' "$wspw" "$evpw"; cat provision-runtime-roles.sql; } | pg
-printf "ALTER DATABASE %s SET charter.evidence_binding TO '%s:%s';\n" "$db" 'charter-s3-compliance-v1' "$CHARTER_S3_DEPLOYMENT" | pg
-export CHARTER_DATABASE_URL="postgres://charter_ws:$wspw@127.0.0.1:55433/$db?sslmode=disable"
-export CHARTER_EVIDENCE_DATABASE_URL="postgres://charter_ev:$evpw@127.0.0.1:55433/$db?sslmode=disable"
+CHARTER_MIGRATE_DATABASE_URL="$CHARTER_DRILL_FOREIGN_OWNER_DSN" ./charter migrate
+for d in "$db" "$foreign"; do
+  { printf '\\set ws_user charter_ws\n\\set ws_password %s\n\\set ev_user charter_ev\n\\set ev_password %s\n' "$wspw" "$evpw"; cat provision-runtime-roles.sql;
+    printf "ALTER DATABASE %s SET charter.evidence_binding TO 'charter-s3-compliance-v1:lab-%s';\n" "$d" "$C04_RUN"
+    printf 'GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO charter_workspace_app, charter_evidence_app;\n'
+  } | pg -d "$d"
+done
+# Keep the PostgreSQL server key outside PGDATA (not a restore artifact).
+tlsdir=$(mktemp -d "$C04_PRIVATE/pg-tls.XXXXXXXX")
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=charter-c04-coordination \
+  -keyout "$tlsdir/server.key" -out "$tlsdir/server.crt" 2>"$C04_PRIVATE/pg-tls-generation.log"
+spki=$(openssl x509 -in "$tlsdir/server.crt" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)
+docker exec "$name" mkdir -m 700 /run/charter-c04-pg-tls
+tar -C "$tlsdir" -cf - server.key server.crt | docker exec -i "$name" tar -C /run/charter-c04-pg-tls -xf -
+docker exec "$name" chown -R postgres:postgres /run/charter-c04-pg-tls
+rm -r "$tlsdir"
+pg -c "ALTER SYSTEM SET ssl_cert_file = '/run/charter-c04-pg-tls/server.crt'" \
+   -c "ALTER SYSTEM SET ssl_key_file = '/run/charter-c04-pg-tls/server.key'" \
+   -c "ALTER SYSTEM SET ssl = 'on'" -c 'SELECT pg_reload_conf()' >/dev/null
+for i in $(seq 1 20); do
+  if docker exec "$name" env PGSSLMODE=require PGCONNECT_TIMEOUT=2 pg_isready -h 127.0.0.1 -p 55433 -U postgres -d "$db" >/dev/null; then break; fi
+  sleep 1
+done
+catalog_id=$(pg -Atc "SELECT system_identifier::text || ':' || (SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())::text FROM pg_catalog.pg_control_system()")
+export C04_COORDINATION_DATABASE="$catalog_id:sha256:$spki"
+python3 "$P/lab-qualification.py"
+source "$C04_PRIVATE/serving.env"
+[[ "$CHARTER_S3_DEPLOYMENT" == "lab-$C04_RUN" ]]
+export CHARTER_DATABASE_URL="postgres://charter_ws:$wspw@127.0.0.1:55433/$db?sslmode=require"
+export CHARTER_EVIDENCE_DATABASE_URL="postgres://charter_ev:$evpw@127.0.0.1:55433/$db?sslmode=require"
+export CHARTER_DRILL_FOREIGN_WORKSPACE_DSN="postgres://charter_ws:$wspw@127.0.0.1:55433/$foreign?sslmode=require"
+export CHARTER_DRILL_FOREIGN_EVIDENCE_DSN="postgres://charter_ev:$evpw@127.0.0.1:55433/$foreign?sslmode=require"
 export CHARTER_EVIDENCE_BACKEND=s3-object-lock CHARTER_ADDR=127.0.0.1:55434
 export CHARTER_DRILL_BINARY="$P/charter" CHARTER_DRILL_OUTPUT="$E/drill-$C04_RUN"
+./retention-drill.test -test.v -test.run '^TestRetainedCoordinationAuthorityDrill$' -test.timeout 2m
 ./retention-drill.test -test.v -test.run '^TestRetentionReconstructionDrill$' -test.timeout 5m
 ./retention-real.test -test.v -test.run '^TestRealRetainedBoundaryFailures$' -test.timeout 4m
 python3 "$P/lab-qualification.py" post

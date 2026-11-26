@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	retentionQualificationVersion = "charter-s3-lab-qualification-v1"
-	qualificationDomain           = "CHARTER-S3-LAB-QUALIFICATION-v1\x00"
+	retentionQualificationVersion = "charter-s3-lab-qualification-v2"
+	qualificationDomain           = "CHARTER-S3-LAB-QUALIFICATION-v2\x00"
 	syntheticOptIn                = "I_OWN_THIS_SYNTHETIC_CHARTER_C04_LAB"
 )
 
@@ -56,6 +56,7 @@ type qualificationStatement struct {
 	Region         string              `json:"region"`
 	Bucket         string              `json:"bucket"`
 	Deployment     string              `json:"deployment"`
+	Coordination   string              `json:"coordination_database"`
 	Credential     string              `json:"runtime_access_key_sha256"`
 	CommitKey      string              `json:"commit_public_key"`
 	MinSeconds     string              `json:"minimum_retention_seconds"`
@@ -137,7 +138,8 @@ func loadQualification(ctx context.Context, c config.RetentionS3, now time.Time)
 		}
 	}
 	k := s.Canary
-	if k.Key != "charter/v1/"+c.Deployment+"/authority" || k.Version == "" || k.Version == "null" || k.Mode != "COMPLIANCE" || !qualificationDigest.MatchString(k.SHA) || k.Length < 1 || k.Length > 4096 {
+	body := authorityBody(c.Deployment, s.Coordination)
+	if !coordinationID.MatchString(s.Coordination) || k.Key != "charter/v1/"+c.Deployment+"/authority" || k.Version == "" || k.Version == "null" || k.Mode != "COMPLIANCE" || k.SHA != evidence.SHA256(body) || k.Length != len(body) {
 		return s, fail
 	}
 	return s, nil
@@ -149,12 +151,7 @@ func loadQualification(ctx context.Context, c config.RetentionS3, now time.Time)
 func checkBackendBinding(ctx context.Context, db *pgxpool.Pool, deployment string) error {
 	var bound string
 	var legacyEvidence bool
-	err := db.QueryRow(ctx, `SELECT COALESCE((SELECT substring(v FROM length('charter.evidence_binding=')+1)
-   FROM pg_catalog.pg_db_role_setting s
-   JOIN pg_catalog.pg_database d ON d.oid=s.setdatabase
-   CROSS JOIN LATERAL unnest(s.setconfig) v
-   WHERE d.datname=current_database() AND s.setrole=0 AND starts_with(v,'charter.evidence_binding=')),''),
-   EXISTS (SELECT 1 FROM evidence_turns LIMIT 1)`).Scan(&bound, &legacyEvidence)
+	err := db.QueryRow(ctx, `SELECT `+databaseBindingSQL+`, EXISTS (SELECT 1 FROM evidence_turns LIMIT 1)`).Scan(&bound, &legacyEvidence)
 	if err != nil {
 		return errors.New("cannot verify the database-level evidence backend binding")
 	}
@@ -259,15 +256,8 @@ func validateSyntheticOIDC(o config.OIDC) error {
 	}
 	return errors.New("synthetic retention serving requires a literal loopback OIDC fixture")
 }
-func connectRetained(ctx context.Context, addr string, c config.RetentionS3, f *evidence.Fence) (*evidence.RetentionBackend, retainedReadiness, error) {
+func connectRetained(ctx context.Context, c config.RetentionS3, signed qualificationStatement, f *evidence.Fence) (*evidence.RetentionBackend, retainedReadiness, error) {
 	var p retainedReadiness
-	if err := validateLabConfig(addr, c); err != nil {
-		return nil, p, err
-	}
-	signed, err := loadQualification(ctx, c, time.Now())
-	if err != nil {
-		return nil, p, err
-	}
 	secret, err := sizedRead(c.SecretFile, 1024, true)
 	if err != nil {
 		return nil, p, err
@@ -287,6 +277,24 @@ func connectRetained(ctx context.Context, addr string, c config.RetentionS3, f *
 		return nil, p, err
 	}
 	p = retainedReadiness{s3: client, statement: signed}
+	// An independently issued statement cannot select an alternate version of
+	// the authority key. Never let an ambiguous namespace enter recovery.
+	refs, err := client.Versions(ctx, signed.Canary.Key)
+	if err != nil {
+		return nil, p, err
+	}
+	count := 0
+	for _, ref := range refs {
+		if ref.Key == signed.Canary.Key {
+			if ref.DeleteMarker || ref.VersionID != signed.Canary.Version {
+				return nil, p, errors.New("retention namespace has conflicting authority versions")
+			}
+			count++
+		}
+	}
+	if count != 1 {
+		return nil, p, errors.New("retention namespace authority version is missing")
+	}
 	if err = p.Ping(ctx); err != nil {
 		return nil, p, err
 	}
