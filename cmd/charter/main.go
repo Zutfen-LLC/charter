@@ -20,6 +20,7 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/migrate"
 	"github.com/Zutfen-LLC/charter/internal/oidc"
+	"github.com/Zutfen-LLC/charter/internal/routing"
 	"github.com/Zutfen-LLC/charter/internal/server"
 	"github.com/Zutfen-LLC/charter/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -73,11 +74,14 @@ func migrateOnly(ctx context.Context, cfg config.Config) error {
 
 // Serving holds the runtime pools after every safety check has passed.
 type Serving struct {
-	Workspace, Evidence *pgxpool.Pool
-	qualification       qualificationStatement
+	Workspace, Evidence, Budget *pgxpool.Pool
+	qualification               qualificationStatement
 }
 
 func (s *Serving) Close() {
+	if s.Budget != nil {
+		s.Budget.Close()
+	}
 	if s.Workspace != nil {
 		s.Workspace.Close()
 	}
@@ -125,6 +129,25 @@ func openServing(ctx context.Context, cfg config.Config) (*Serving, error) {
 	if s.Evidence, err = openPool(ctx, cfg.EvidenceDatabaseURL); err != nil {
 		s.Close()
 		return nil, err
+	}
+	if cfg.BudgetDatabaseURL != "" {
+		s.Budget, err = openPool(ctx, cfg.BudgetDatabaseURL)
+		if err != nil {
+			s.Close()
+			return nil, errors.New("cannot configure budget database")
+		}
+		w, b := s.Workspace.Config().ConnConfig, s.Budget.Config().ConnConfig
+		if w.Host != b.Host || w.Port != b.Port || w.Database != b.Database || w.RuntimeParams["search_path"] != b.RuntimeParams["search_path"] {
+			s.Close()
+			return nil, errors.New("budget and workspace credentials must target the same database and schema")
+		}
+		if err := evidence.CheckBudgetRuntime(ctx, s.Budget); err != nil {
+			s.Close()
+			return nil, err
+		}
+	} else if cfg.OIDC.Configured() {
+		s.Close()
+		return nil, errors.New("CHARTER_BUDGET_DATABASE_URL is required to enable the authenticated inference API")
 	}
 	for _, check := range []func() error{
 		func() error { return evidence.CheckWorkspaceRuntime(ctx, s.Workspace) },
@@ -187,12 +210,29 @@ func serve(ctx context.Context, cfg config.Config) error {
 		backend, info = selected, check.info()
 		depsReady = append(depsReady, check)
 	}
-	rec := &evidence.Recorder{Backend: backend, Fence: fence, Policy: server.StubPolicy(), Logf: log.Printf}
+	rec := &evidence.Recorder{Backend: backend, Fence: fence, Logf: log.Printf}
+	ledger := evidence.PG{DB: deps.Budget}
+	if deps.Budget != nil {
+		modelCfg := routing.DefaultConfig()
+		modelCfg.Endpoint = cfg.LocalModelURL
+		retained := cfg.EvidenceBackend == config.EvidenceBackendRetentionS3
+		if retained && cfg.LocalModelURL != "" {
+			return errors.New("retained synthetic profile does not admit HTTP model endpoints")
+		}
+		rec.Governance = routing.Governance(modelCfg, ledger, retained, func() { log.Print("synthetic retention provider invoked") })
+		rec.Accounting = ledger.ReconcileBudget
+		depsReady = append(depsReady, deps.Budget)
+	}
 	n, err := rec.Recover(ctx, time.Time{})
 	if err != nil {
 		return fmt.Errorf("evidence recovery: %w", err)
 	}
 	log.Printf("evidence recovery: resolved %d unfinished turn(s)", n)
+	if deps.Budget != nil {
+		if err := ledger.RecoverBudget(ctx, backend); err != nil {
+			return fmt.Errorf("budget recovery: %w", err)
+		}
+	}
 
 	var opts []server.Option
 	if cfg.OIDC.Configured() {
@@ -201,10 +241,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 		if err != nil {
 			return err
 		}
-		auth := &server.Auth{Verifier: v, Store: &store.Store{DB: deps.Workspace}, Evidence: rec}
-		if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
-			auth.Model = retainedSyntheticModel
-		}
+		auth := &server.Auth{Verifier: v, Store: &store.Store{DB: deps.Workspace}, Evidence: rec, Budget: ledger.Summary}
 		opts = append(opts, server.WithAuth(auth))
 		log.Printf("OIDC enabled: issuer=%s tenant=%s", o.Issuer, o.TenantID)
 		if o.AllowInsecureLoopback {

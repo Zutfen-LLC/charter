@@ -15,6 +15,7 @@ import (
 const (
 	evidenceGroup  = "charter_evidence_app"
 	workspaceGroup = "charter_workspace_app"
+	budgetGroup    = "charter_budget_app"
 )
 
 var evidenceTables = []string{"evidence_turns", "evidence_events", "evidence_objects"}
@@ -106,6 +107,11 @@ func CheckWorkspaceRuntime(ctx context.Context, db *pgxpool.Pool) error {
 	return checkRuntime(ctx, db, "workspace", workspaceGroup)
 }
 
+// CheckBudgetRuntime requires a distinct, restricted accounting login.
+func CheckBudgetRuntime(ctx context.Context, db *pgxpool.Pool) error {
+	return checkRuntime(ctx, db, "budget", budgetGroup)
+}
+
 func checkRuntime(ctx context.Context, pool *pgxpool.Pool, kind, group string) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -132,7 +138,8 @@ func checkRuntime(ctx context.Context, pool *pgxpool.Pool, kind, group string) e
 	}
 	for _, t := range ep {
 		for _, priv := range privs {
-			want := kind == "evidence" && (priv == "SELECT" || priv == "INSERT")
+			budgetTable := strings.HasSuffix(t, ".evidence_budget_policy") || strings.HasSuffix(t, ".evidence_budget_reservations") || strings.HasSuffix(t, `."evidence_budget_policy"`) || strings.HasSuffix(t, `."evidence_budget_reservations"`)
+			want := (kind == "evidence" && !budgetTable && (priv == "SELECT" || priv == "INSERT")) || (kind == "budget" && budgetTable && priv == "SELECT")
 			ok, err := hasPriv(ctx, tx, t, priv, !want)
 			if err != nil {
 				return fmt.Errorf("%s credential: %w", kind, err)
@@ -154,7 +161,7 @@ func checkRuntime(ctx context.Context, pool *pgxpool.Pool, kind, group string) e
 			}
 		}
 	}
-	if kind == "evidence" {
+	if kind != "workspace" {
 		ws, err := workspaceTables(ctx, tx)
 		if err != nil {
 			return fmt.Errorf("%s credential: %w", kind, err)

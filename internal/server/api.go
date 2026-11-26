@@ -39,6 +39,7 @@ type Auth struct {
 	// if it is nil the call is refused (503) before any model work, so a missing
 	// or misconfigured evidence store can never produce an unrecorded answer.
 	Evidence *evidence.Recorder
+	Budget   func(context.Context, string, string) (evidence.BudgetSummary, error)
 	// Model performs the outbound call with the exact sealed request bytes. If
 	// nil, Work is used (the legacy stub, which ignores the request bytes).
 	Model evidence.ModelFunc
@@ -68,6 +69,9 @@ func WithAuth(a *Auth) Option {
 		a.route(mux, "GET /v1/search", a.search)
 		a.route(mux, "GET /v1/projects/{pid}/artifacts", a.member(a.listArtifacts))
 		a.route(mux, "POST /v1/projects/{pid}/model-calls", a.member(a.modelCall))
+		if a.Budget != nil {
+			a.route(mux, "GET /v1/projects/{pid}/usage", a.projectUsage)
+		}
 		a.route(mux, "GET /v1/artifacts/{id}", a.getArtifact)
 		a.route(mux, "GET /v1/artifacts/{id}/content", a.getArtifact)
 

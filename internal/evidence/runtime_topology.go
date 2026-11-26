@@ -56,7 +56,12 @@ func runtimeTopology(ctx context.Context, tx pgx.Tx, expected, group string) ([]
 			EXISTS (SELECT 1 FROM pg_catalog.pg_proc f JOIN pg_catalog.pg_namespace fn ON f.pronamespace=fn.oid
 			WHERE f.prosecdef AND fn.nspname NOT IN ('pg_catalog','information_schema')
 			AND pg_catalog.has_schema_privilege($1::name,fn.oid,'USAGE')
-			AND pg_catalog.has_function_privilege($1::name,f.oid,'EXECUTE')),
+			AND pg_catalog.has_function_privilege($1::name,f.oid,'EXECUTE')
+            AND NOT ($2::boolean AND fn.nspname=pg_catalog.current_schema() AND
+              (f.proname || '(' || pg_catalog.oidvectortypes(f.proargtypes) || ')') IN (
+                'evidence_budget_reserve(uuid, uuid, uuid, text, text, text, text, text, bigint, bigint)',
+                'evidence_budget_mark_dispatch(uuid)', 'evidence_budget_release_unmarked(uuid)',
+                'evidence_budget_settle(uuid, bigint, boolean)', 'evidence_budget_summary(uuid, uuid)'))),
 			EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace rn ON c.relnamespace=rn.oid
 			WHERE rn.nspname NOT IN ('pg_catalog','information_schema') AND rn.nspname NOT LIKE 'pg\_temp\_%'
 			AND pg_catalog.has_schema_privilege($1::name,rn.oid,'USAGE')
@@ -65,7 +70,7 @@ func runtimeTopology(ctx context.Context, tx pgx.Tx, expected, group string) ([]
 			AND (pg_catalog.has_table_privilege($1::name,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
 			OR pg_catalog.has_any_column_privilege($1::name,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))
 			FROM pg_catalog.pg_namespace n CROSS JOIN pg_catalog.pg_database d
-			WHERE n.nspname=pg_catalog.current_schema() AND d.datname=pg_catalog.current_database()`, subject).
+			WHERE n.nspname=pg_catalog.current_schema() AND d.datname=pg_catalog.current_database()`, subject, group == budgetGroup).
 			Scan(&schemaOwner, &dbOwner, &schemaCreate, &dbCreate, &privilegedFunctions, &indirectRelations); err != nil {
 			return nil, err
 		}

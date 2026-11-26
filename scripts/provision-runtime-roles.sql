@@ -13,3 +13,9 @@ SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'ev_user', :'ev_password')
  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ev_user') \gexec
 SELECT format('GRANT charter_workspace_app TO %I', :'ws_user') \gexec
 SELECT format('GRANT charter_evidence_app TO %I', :'ev_user') \gexec
+
+\if :{?budget_user}
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'budget_user', :'budget_password')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'budget_user') \gexec
+SELECT format('GRANT charter_budget_app TO %I', :'budget_user') \gexec
+\endif

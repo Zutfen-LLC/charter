@@ -85,6 +85,7 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	artifact, err := st.CreateArtifact(ctx, tenant, project, "synthetic exhibit", original)
 	must(err)
 	must(st.SeedMember(ctx, tenant, project, actor))
+	must((evidence.PG{DB: owner}).SetPolicy(ctx, evidence.BudgetPolicy{TenantID: tenant, ProjectID: project, LocalOnly: true, AllowedModels: []string{"det-a", "det-b"}, ProjectCap: 10000000}))
 	root := absent("CHARTER_DRILL_OUTPUT")
 	must(os.Mkdir(root, 0700))
 	dump := func(name string, x any) {
@@ -107,7 +108,7 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	env := []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8"}
 	for _, row := range os.Environ() {
 		n, _, _ := strings.Cut(row, "=")
-		if strings.HasPrefix(n, "CHARTER_S3_") || n == "CHARTER_ADDR" || n == "CHARTER_DATABASE_URL" || n == "CHARTER_EVIDENCE_DATABASE_URL" || n == "CHARTER_EVIDENCE_BACKEND" {
+		if strings.HasPrefix(n, "CHARTER_S3_") || n == "CHARTER_ADDR" || n == "CHARTER_DATABASE_URL" || n == "CHARTER_EVIDENCE_DATABASE_URL" || n == "CHARTER_BUDGET_DATABASE_URL" || n == "CHARTER_EVIDENCE_BACKEND" {
 			env = append(env, row)
 		}
 	}
@@ -332,6 +333,7 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	must(err)
 	dump("revoked-replay-response.json", post(alice, 404))
 	must(st.SeedMember(ctx, tenant, project, actor))
+	must((evidence.PG{DB: owner}).SetPolicy(ctx, evidence.BudgetPolicy{TenantID: tenant, ProjectID: project, LocalOnly: true, AllowedModels: []string{"det-a", "det-b"}, ProjectCap: 10000000}))
 	replay := post(idp.Token("alice"), 200)
 	dump("replay-response.json", replay)
 	if replay["turn_id"] != turn || replay["output"] != output || replay["replayed"] != true {
