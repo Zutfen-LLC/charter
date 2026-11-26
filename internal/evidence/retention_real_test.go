@@ -312,6 +312,18 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 			options.Fence = acquire()
 			clean := makeRecorder(options)
 			if tc.recover {
+				var recoveringTurn string
+				if tc.name == "finalization" {
+					open, err := clean.Backend.OpenTurns(ctx, time.Time{})
+					if err != nil || len(open) != 1 || open[0].TenantID != req.TenantID {
+						t.Fatalf("finalization did not leave one open retained turn: %v (%d)", err, len(open))
+					}
+					recoveringTurn = open[0].TurnID
+					before, err := clean.Backend.Load(ctx, req.TenantID, recoveringTurn)
+					if err != nil || len(before) == 0 || isTerminal(str(before[len(before)-1], "type")) || last(before, "response_released") < 0 {
+						t.Fatalf("expected committed release authorization but no terminal event: %v", err)
+					}
+				}
 				n, e := clean.Recover(ctx, time.Time{})
 				if e != nil {
 					t.Fatalf("successor recovery: %v", e)
@@ -320,6 +332,66 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 					if n != 1 {
 						t.Fatalf("expected an open committed turn, recovered %d", n)
 					}
+				}
+				if tc.name == "finalization" {
+					// A recovery-completed turn had already committed its release
+					// authorization before the terminal append failed. The initial
+					// request still received nothing. A later request can only
+					// deliver that same output after its own fresh authorization.
+					if n != 1 || dispatch.Load() != 1 {
+						t.Fatalf("recovery count=%d provider calls=%d; want 1 each", n, dispatch.Load())
+					}
+					retained := clean.Backend.(*RetentionBackend)
+					events, err := retained.Load(ctx, req.TenantID, recoveringTurn)
+					if err != nil || len(events) == 0 || str(events[len(events)-1], "type") != TypeTurnCompleted {
+						t.Fatalf("recovery did not complete the retained turn: %v", err)
+					}
+					objects, err := retained.LoadRetainedObjects(ctx, req.TenantID, recoveringTurn, events)
+					if err != nil {
+						t.Fatalf("recovery exact-version objects: %v", err)
+					}
+					if errs := VerifyRetentionFull(events, objects); len(errs) != 0 || string(objects[SHA256(out)]) != string(out) {
+						t.Fatalf("recovery retained evidence did not verify: %v", errs)
+					}
+					revoked := errors.New("fixture membership revoked")
+					for _, replay := range []struct {
+						name string
+						want error
+						stop bool
+					}{
+						{"denied", ErrDenied, false},
+						{"revoked", revoked, false},
+						{"cancelled_at_delivery", context.Canceled, true},
+						{"expired_at_delivery", context.DeadlineExceeded, false},
+						{"authorized", nil, false},
+					} {
+						t.Run(replay.name, func(t *testing.T) {
+							replayCtx, cancel := context.WithCancel(ctx)
+							defer cancel()
+							checks := 0
+							result, err := clean.Process(replayCtx, req, model, func(context.Context) error {
+								checks++
+								if replay.stop {
+									cancel()
+									return nil
+								}
+								return replay.want
+							})
+							if checks != 1 || dispatch.Load() != 1 || !errors.Is(err, replay.want) {
+								t.Fatalf("delivery-only replay: calls=%d gates=%d err=%v", dispatch.Load(), checks, err)
+							}
+							if replay.want != nil && (len(result.Output) != 0 || result.Replayed) {
+								t.Fatal("unauthorized replay released output")
+							}
+							if replay.want == nil && (!result.Replayed || result.TurnID != recoveringTurn || string(result.Output) != string(out)) {
+								t.Fatal("authorized replay did not return the exact retained output")
+							}
+						})
+					}
+					if err := retained.VerifyRetainedTurn(ctx, req.TenantID, recoveringTurn, events); err != nil {
+						t.Fatalf("replay changed or invalidated retained evidence: %v", err)
+					}
+					return
 				}
 				result, e := clean.Process(ctx, req, model, nil)
 				if e == nil || len(result.Output) != 0 || dispatch.Load() != tc.calls {
