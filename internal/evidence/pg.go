@@ -308,3 +308,36 @@ func inputSHA(first Event) string {
 	}
 	return SHA256(nil)
 }
+
+// InventoryTurns enumerates every admitted turn of the tenant from the
+// append-only admission table. admitted_at is written in the same transaction
+// as event 0, so it is the turn's recorded time for lifecycle purposes.
+func (b PG) InventoryTurns(ctx context.Context, tenantID string) ([]TurnIdentity, error) {
+	if !idRe.MatchString(tenantID) {
+		return nil, ErrNotFound
+	}
+	query := b.DB.Query
+	if b.fence != nil {
+		conn, release, err := b.fence.lease(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		query = conn.Query
+	}
+	rows, err := query(ctx, `SELECT tenant_id::text, project_id::text, matter_id::text, custodian_id::text, turn_id::text, admitted_at
+		FROM evidence_turns WHERE tenant_id=$1::uuid ORDER BY admitted_at`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TurnIdentity
+	for rows.Next() {
+		var t TurnIdentity
+		if err := rows.Scan(&t.TenantID, &t.ProjectID, &t.MatterID, &t.CustodianID, &t.TurnID, &t.RecordedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}

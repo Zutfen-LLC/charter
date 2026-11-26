@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
@@ -51,6 +52,16 @@ func (*AmbiguousError) Error() string { return "s3 transport: operation outcome 
 type Error struct{ Kind string }
 
 func (e *Error) Error() string { return "s3 transport: " + e.Kind }
+
+// ErrObjectProtected is returned by DeleteVersion when the storage refuses to
+// delete because the version is still under active retention or a legal hold.
+// The refusal itself is authoritative backend state, not a transport failure.
+var ErrObjectProtected = &Error{"object protected"}
+
+// ErrObjectAbsent is returned by DeleteVersion and SetLegalHold when the exact
+// version does not exist (already deleted). Deletion is idempotent; an absent
+// version is a successful disposal readback, not a failure.
+var ErrObjectAbsent = &Error{"not found"}
 
 func New(c Config) (*Client, error) {
 	u, err := url.Parse(c.Endpoint)
@@ -248,6 +259,17 @@ func (c *Client) Versions(ctx context.Context, prefix string) ([]Ref, error) {
 	}
 	return refs, nil
 }
+
+// apiErrorCode extracts the S3 error code when the SDK surfaced a modeled
+// API error.
+func apiErrorCode(err error) (string, bool) {
+	var ae smithy.APIError
+	if errors.As(err, &ae) {
+		return ae.ErrorCode(), true
+	}
+	return "", false
+}
+
 func clean(err error) error {
 	var r *smithyhttp.ResponseError
 	if errors.As(err, &r) {
@@ -261,6 +283,89 @@ func clean(err error) error {
 		}
 	}
 	return &Error{"transport or service failure"}
+}
+
+// LegalHold reports the version's legal-hold state: "ON", "OFF", or "" when
+// no legal hold was ever recorded for the version.
+func (c *Client) LegalHold(ctx context.Context, key, versionID string) (string, error) {
+	if key == "" || !validVersion(versionID) {
+		return "", &Error{"invalid request"}
+	}
+	r, e := c.api.GetObjectLegalHold(ctx, &s3.GetObjectLegalHoldInput{Bucket: aws.String(c.bucket), Key: aws.String(key), VersionId: aws.String(versionID)})
+	if e != nil {
+		// The SDK version in use does not model the object-lock error shapes;
+		// distinguish them by their S3 error code and HTTP status.
+		if code, ok := apiErrorCode(e); ok && code == "NoSuchObjectLockConfiguration" {
+			return "", nil
+		}
+		var re *smithyhttp.ResponseError
+		if errors.As(e, &re) && re.HTTPStatusCode() == 404 {
+			// A version that no longer exists has no hold state; the caller
+			// must not treat a deleted version as unprotected-new.
+			return "", ErrObjectAbsent
+		}
+		return "", clean(e)
+	}
+	if r.LegalHold == nil || r.LegalHold.Status != types.ObjectLockLegalHoldStatusOn {
+		return "OFF", nil
+	}
+	return "ON", nil
+}
+
+// SetLegalHold sets or clears the version's legal hold. The credential must
+// hold s3:PutObjectLegalHold; the serving runtime credential deliberately
+// does not (C04 qualification control runtime_cannot_change_legal_hold).
+func (c *Client) SetLegalHold(ctx context.Context, key, versionID string, on bool) error {
+	if key == "" || !validVersion(versionID) {
+		return &Error{"invalid request"}
+	}
+	status := types.ObjectLockLegalHoldStatusOff
+	if on {
+		status = types.ObjectLockLegalHoldStatusOn
+	}
+	_, e := c.api.PutObjectLegalHold(ctx, &s3.PutObjectLegalHoldInput{Bucket: aws.String(c.bucket), Key: aws.String(key), VersionId: aws.String(versionID), LegalHold: &types.ObjectLockLegalHold{Status: status}})
+	if e != nil {
+		if code, ok := apiErrorCode(e); ok && code == "NoSuchObjectLockConfiguration" {
+			return ErrObjectAbsent
+		}
+		var re *smithyhttp.ResponseError
+		if errors.As(e, &re) && re.HTTPStatusCode() == 404 {
+			return ErrObjectAbsent
+		}
+		return clean(e)
+	}
+	return nil
+}
+
+// DeleteVersion deletes one exact object version. Deletion is refused by the
+// backend while the version is under active retention or a legal hold
+// (ErrObjectProtected) and is idempotent for an already-deleted version
+// (ErrObjectAbsent). The version ID is required: this never deletes "latest".
+func (c *Client) DeleteVersion(ctx context.Context, key, versionID string) error {
+	if key == "" || !validVersion(versionID) {
+		return &Error{"invalid request"}
+	}
+	_, e := c.api.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key), VersionId: aws.String(versionID)})
+	if e != nil {
+		var r *smithyhttp.ResponseError
+		if errors.As(e, &r) {
+			switch r.HTTPStatusCode() {
+			case 404:
+				return ErrObjectAbsent
+			case 403:
+				return ErrObjectProtected
+			}
+		}
+		return clean(e)
+	}
+	return nil
+}
+
+// DeleteMarker removes every version under the key that is a delete marker
+// left by an unprotected delete. Versioned deletes of real versions are only
+// performed by DeleteVersion.
+func (c *Client) DeleteMarker(ctx context.Context, key, versionID string) error {
+	return c.DeleteVersion(ctx, key, versionID)
 }
 
 func createError(err error) error {

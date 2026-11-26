@@ -743,6 +743,30 @@ def derive_disclosure(events):
 
 # ---- holds and retention -------------------------------------------------
 
+def matches_scope(hold, item):
+    """ADR 0001 section 7 matching without the hold-state filter: the C07
+    lifecycle applies it to pending/effective/failed holds itself."""
+    item = dict(item)
+    item.setdefault("state", "active")
+    saved = hold.get("state")
+    hold = dict(hold, state="active")
+    try:
+        return matches(hold, item)
+    finally:
+        if saved is not None:
+            hold_hold = hold  # noqa: F841 (documentation only)
+
+
+def _scope_only(hold, item):
+    matter = hold["matter_id"] == item["matter_id"]
+    custodians = hold.get("custodian_ids") or []
+    cust_ok = not custodians or item["custodian_id"] in custodians
+    ws, we = hold.get("window_start"), hold.get("window_end")
+    recorded = item["recorded_at"]
+    window = (ws is None or recorded >= ws) and (we is None or recorded < we)
+    return matter and cust_ok and window
+
+
 def matches(hold, item):
     if hold["state"] != "active" or hold["matter_id"] != item["matter_id"]:
         return False
@@ -820,3 +844,236 @@ class Store:
     def purge(self, item_id, now, approved_by_records_officer):
         return (self.begin_purge(item_id, now, approved_by_records_officer)
                 and self.finish_purge(item_id) == "disposed")
+
+
+# ---- C07 lifecycle: protection states, new-work guard, release cleanup ----
+
+# Hold states (C07): pending = epoch committed, disposal fenced, protection
+# not yet verified; effective = protection established and read back; failed =
+# establishment failed, retryable, the fence stands; released = claim removed.
+HOLD_PENDING, HOLD_EFFECTIVE, HOLD_FAILED, HOLD_RELEASED = "pending", "effective", "failed", "released"
+
+
+class GuardedStore(Store):
+    """The C07 reference lifecycle: Store plus storage-native protection.
+
+    protection(volume) simulates the records transport: it can set and read
+    back legal holds on exact (key, version) pairs and delete versions that
+    are neither under legal hold nor unexpired base retention. The store
+    refuses to acknowledge a hold as effective before every in-scope version
+    is verified protected, and it never releases a storage legal hold that
+    another protected record still requires.
+    """
+
+    def __init__(self, items, holds=()):
+        super().__init__(items, holds)
+        self.legal_hold = {}      # (key, version) -> "ON"/"OFF"
+        self.protect_until = {}   # (key, version) -> expiry tick or None
+        self.deleted = set()
+        self.storage_down = False
+        self.readback_lies = False
+        self.reports = {}
+        self.shared_object = {}   # item id -> shared object key (default own)
+        self.clock = 0            # abstract tick for base-retention simulation
+
+    # -- storage simulation (the records transport) --
+    def set_legal_hold(self, key, version, on):
+        if self.storage_down:
+            raise StorageUnavailable()
+        self.legal_hold[(key, version)] = "ON" if on else "OFF"
+
+    def legal_hold_state(self, key, version):
+        if self.storage_down:
+            raise StorageUnavailable()
+        if self.readback_lies:
+            return "OFF"
+        return self.legal_hold.get((key, version), "")
+
+    def delete_version(self, key, version):
+        if (key, version) in self.deleted:
+            return "absent"
+        if self.legal_hold.get((key, version)) == "ON":
+            return "protected"
+        until = self.protect_until.get((key, version))
+        if until is not None and until > self.clock:
+            return "protected"
+        self.deleted.add((key, version))
+        return "deleted"
+
+    def versions_of(self, item_id):
+        # Every item owns four versions. The last one is a content-addressed
+        # object: by default private, but shareable by mapping another item
+        # onto the same key (content addressing deduplicates identical bytes,
+        # so a shared object has ONE key and ONE version id).
+        shared = self.shared_object.get(item_id, f"{item_id}-obj")
+        return [(f"{item_id}/admissions", f"v-{item_id}-0"),
+                (f"{item_id}/events/0", f"v-{item_id}-1"),
+                (f"{item_id}/events/h", f"v-{item_id}-2"),
+                (f"shared/{shared}", f"v-{shared}-3")]
+
+    def held(self, item):
+        """A pending, effective or failed hold all fence disposal; only a
+        released hold stops matching (ADR: failure never weakens)."""
+        return any(h["state"] in (HOLD_PENDING, HOLD_EFFECTIVE, HOLD_FAILED)
+                   and _scope_only(h, item) for h in self.holds.values())
+
+    # -- placement with establishment (two-phase) --
+    def place_hold(self, hold):
+        """Phase 1: the durable placement. The hold is recorded pending - the
+        epoch is committed and disposal is fenced, but protection has not yet
+        been established or verified."""
+        super().place_hold(hold)
+        placed = self.holds[hold["id"]]
+        placed["state"] = HOLD_PENDING
+        return placed
+
+    def place_hold_verified(self, hold, now=0):
+        """Phase 1 commits the epoch (Store.place_hold); phase 2 establishes
+        and verifies protection. Returns the durable hold dict or raises
+        EstablishmentError; the hold is only effective when verified."""
+        placed = self.place_hold(hold)
+        try:
+            report = self._establish(placed, now)
+        except StorageUnavailable as e:
+            placed["state"] = HOLD_FAILED
+            self.reports[hold["id"]] = {"error": str(e)}
+            raise EstablishmentError(str(e))
+        if report["uncovered"]:
+            placed["state"] = HOLD_FAILED
+            self.reports[hold["id"]] = report
+            raise EstablishmentError("uncovered records")
+        placed["state"] = HOLD_EFFECTIVE
+        placed["report"] = report
+        self.reports[hold["id"]] = report
+        return placed
+
+    def _establish(self, hold, now):
+        report = {"items": [], "disposed_before_hold": [], "uncovered": [],
+                  "protected_versions": [], "already_expired": []}
+        for it in self.items.values():
+            if not _scope_only(hold, it):
+                continue
+            if it["state"] == "disposed":
+                report["disposed_before_hold"].append(it["id"])
+                continue
+            refs = self.versions_of(it["id"])
+            for key, version in refs:
+                if (key, version) in self.deleted:
+                    report["uncovered"].append(it["id"])
+                    break
+                self.set_legal_hold(key, version, True)
+                if self.legal_hold_state(key, version) != "ON":
+                    report["uncovered"].append(it["id"])
+                    break
+            else:
+                report["protected_versions"].extend(refs)
+                entry = dict(id=it["id"], custodian_id=it["custodian_id"],
+                             recorded_at=it["recorded_at"], versions=len(refs))
+                if now >= it["retention_expires_at"]:
+                    entry["already_expired"] = True
+                    report["already_expired"].append(it["id"])
+                report["items"].append(entry)
+        return report
+
+    # -- new matching work guard --
+    def hold_applies(self, matter_id, custodian_id, recorded_at, now=0):
+        for h in self.holds.values():
+            if h["state"] in (HOLD_PENDING, HOLD_EFFECTIVE, HOLD_FAILED) and \
+                    _scope_only(h, {"matter_id": matter_id, "custodian_id": custodian_id,
+                                    "recorded_at": recorded_at}):
+                return True
+        return False
+
+    def admit_new_work(self, item_id, matter_id, custodian_id, now=0, recorded_at=None):
+        """New matching work: the admission fails closed unless every version
+        of the new turn is protected before the response escapes."""
+        recorded = recorded_at if recorded_at is not None else now
+        if not self.hold_applies(matter_id, custodian_id, recorded):
+            self.items[item_id] = dict(id=item_id, matter_id=matter_id,
+                                       custodian_id=custodian_id, recorded_at=now,
+                                       retention_expires_at=now + 100, state="active")
+            return "admitted"
+        try:
+            for key, version in self.versions_of(item_id):
+                self.set_legal_hold(key, version, True)
+                if self.legal_hold_state(key, version) != "ON":
+                    raise StorageUnavailable("readback")
+        except StorageUnavailable as e:
+            # Nothing is released: the admission fails closed and the turn is
+            # recorded as interrupted evidence of the failed protection.
+            raise NewWorkFailClosed(str(e))
+        self.items[item_id] = dict(id=item_id, matter_id=matter_id,
+                                   custodian_id=custodian_id, recorded_at=recorded,
+                                   retention_expires_at=now + 100, state="active")
+        return "admitted-protected"
+
+    # -- release with conservative cleanup --
+    def release_hold_verified(self, hold_id):
+        hold = self.holds[hold_id]
+        report = self.reports.get(hold_id, {})
+        protected = report.get("protected_versions", [])
+        super().release_hold(hold_id)
+        pending = []
+        for key, version in protected:
+            if self._still_required(key, version, exclude=hold_id):
+                continue
+            try:
+                self.set_legal_hold(key, version, False)
+                if self.legal_hold_state(key, version) == "ON":
+                    pending.append([key, version])
+            except StorageUnavailable:
+                pending.append([key, version])
+        report["release_cleanup_pending"] = pending
+        return pending
+
+    def _still_required(self, key, version, exclude):
+        for other_id, other in self.holds.items():
+            if other_id == exclude or other["state"] == HOLD_RELEASED:
+                continue
+            for it in self.items.values():
+                if it["state"] == "disposed":
+                    continue
+                if _scope_only(other, it) and (key, version) in self.versions_of(it["id"]):
+                    return True
+        return False
+
+    # -- disposal (shared-object aware) --
+    def finish_purge_shared(self, item_id, now):
+        """The conditional delete: refuses on epoch change like Store, and
+        never deletes a version another non-disposed record references."""
+        it = self.items[item_id]
+        if it["state"] != "purging":
+            return "not_purging"
+        if self.epoch != it["observed_epoch"]:
+            if self.held(it):
+                it["state"] = "active"
+                return "restored_active"
+            it["state"] = "disposal_pending"
+            return "stale_retry"
+        outcomes = {}
+        for key, version in self.versions_of(item_id):
+            shared = any(other["id"] != item_id and other["state"] != "disposed"
+                         and (key, version) in self.versions_of(other["id"])
+                         for other in self.items.values())
+            if shared:
+                outcomes[key] = "retained_shared"
+                continue
+            outcomes[key] = self.delete_version(key, version)
+        if any(v == "protected" for v in outcomes.values()):
+            return "blocked_by_storage"
+        if all(v in ("deleted", "absent", "retained_shared") for v in outcomes.values()):
+            it["state"] = "disposed"
+            return "disposed"
+        return "incomplete"
+
+
+class StorageUnavailable(Exception):
+    pass
+
+
+class EstablishmentError(Exception):
+    pass
+
+
+class NewWorkFailClosed(Exception):
+    pass

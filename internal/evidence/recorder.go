@@ -140,10 +140,24 @@ func (e *AbortedError) Error() string {
 }
 func (e *AbortedError) Unwrap() error { return e.Cause }
 
+// TurnLifecycleGuard enforces hold protection for new matching work (C07).
+// HoldApplies is consulted with the turn's exact recorded time (its event 0);
+// when a matching active hold exists, EnsureProtected must establish and
+// verify storage-native protection for every version of the turn published
+// so far before the turn may proceed. Any error fails the turn closed.
+type TurnLifecycleGuard interface {
+	HoldApplies(ctx context.Context, tenant, matter, custodian string, recordedAt time.Time) (bool, error)
+	EnsureProtected(ctx context.Context, tenant, turn string) error
+}
+
 // Recorder is the durable write path. Its ordering enforces ADR 0001 R1-R4
 // before each event is stored, and every step fails closed.
 type Recorder struct {
 	Backend Backend
+	// Lifecycle, when configured, is the C07 hold guard: new matching work is
+	// protected (and the protection verified) before anything is released,
+	// so no successful response escapes without its required hold protection.
+	Lifecycle TurnLifecycleGuard
 	// Fence is required by the serving entrypoint. Its backend must be bound to
 	// the same ownership session using PG.WithFence.
 	Fence *Fence
@@ -401,7 +415,40 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 	if !res.Created {
 		return &turn{rc: rc, tenant: req.TenantID, id: res.TurnID}, &struct{}{}, nil
 	}
+	if rc.Lifecycle != nil {
+		if err := rc.ensureProtected(wc, req, id, first); err != nil {
+			return nil, nil, fmt.Errorf("%w: admission hold protection: %w", ErrFailClosed, err)
+		}
+	}
 	return &turn{rc: rc, tenant: req.TenantID, id: id, events: []Event{first}}, nil, nil
+}
+
+// ensureProtected fails the turn closed unless a matching active hold's
+// storage-native protection is established and verified for the turn.
+func (rc *Recorder) ensureProtected(ctx context.Context, req Request, turnID string, first Event) error {
+	recorded, err := time.Parse(time.RFC3339Nano, str(first, "recorded_at"))
+	if err != nil {
+		return err
+	}
+	applies, err := rc.Lifecycle.HoldApplies(ctx, req.TenantID, req.MatterID, req.CustodianID, recorded)
+	if err != nil || !applies {
+		return err
+	}
+	return rc.Lifecycle.EnsureProtected(ctx, req.TenantID, turnID)
+}
+
+// EnsureTurnProtected re-checks hold protection immediately before release
+// (the release gate) and before a replay delivery, using the stored event-0
+// identity of the turn. It is a no-op when no lifecycle guard is configured.
+func (rc *Recorder) EnsureTurnProtected(ctx context.Context, t *turn) error {
+	if rc.Lifecycle == nil || len(t.events) == 0 {
+		return nil
+	}
+	wc, cancel := rc.wctx(ctx)
+	defer cancel()
+	first := t.events[0]
+	req := Request{TenantID: str(first, "tenant_id"), MatterID: str(first, "matter_id"), CustodianID: str(actorOf(first), "id")}
+	return rc.ensureProtected(wc, req, t.id, first)
 }
 
 // replay answers a repeated idempotency key from the log only. It never
@@ -423,6 +470,7 @@ func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(
 	if len(evs) == 0 {
 		return bad("empty stored log")
 	}
+	t.events = evs
 	lastEv := evs[len(evs)-1]
 	if !isTerminal(str(lastEv, "type")) {
 		return Result{}, ErrTurnInFlight
@@ -489,6 +537,9 @@ func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(
 	}
 	if err := rc.reconcile(ctx, t); err != nil {
 		return bad("budget reconciliation pending")
+	}
+	if err := rc.EnsureTurnProtected(ctx, t); err != nil {
+		return bad("hold protection: %v", err)
 	}
 	if err := rc.finalGate(ctx, gate, "delivery"); err != nil {
 		return Result{}, err
@@ -782,6 +833,14 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	}
 
 	// Release gate: output is durable; the caller may still veto the release.
+	// Hold protection (C07) is verified here, after the last evidence write
+	// and before release authorization: a hold that committed while this turn
+	// was in flight is seen now, and its protection is established before any
+	// output can escape.
+	if err := rc.EnsureTurnProtected(ctx, t); err != nil {
+		rc.abort(ctx, t, "hold_protection_failed")
+		return Result{}, fmt.Errorf("%w: release hold protection: %w", ErrFailClosed, err)
+	}
 	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
 		return fail("retained_readback_failed", err)
 	}
@@ -810,6 +869,13 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	// If it refuses, the log still says the release was authorized and the turn
 	// completed (the output is durable and a delivery-only retry stays possible
 	// through replay), but this call returns no output.
+	// Hold protection (C07) is verified here a second time, after the LAST
+	// evidence write of the turn (the terminal event): every version the
+	// response's evidence names is protected and verified before any output
+	// escapes.
+	if err := rc.EnsureTurnProtected(ctx, t); err != nil {
+		return Result{TurnID: t.id}, fmt.Errorf("%w: delivery hold protection: %w", ErrFailClosed, err)
+	}
 	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
 		return fail("retained_readback_failed", err)
 	}

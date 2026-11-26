@@ -10,6 +10,7 @@ import (
 
 	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/oidc"
+	"github.com/Zutfen-LLC/charter/internal/records"
 	"github.com/Zutfen-LLC/charter/internal/sharepoint"
 	"github.com/Zutfen-LLC/charter/internal/store"
 )
@@ -46,6 +47,9 @@ type Auth struct {
 	Model evidence.ModelFunc
 	// SharePoint is installed by trusted server composition only; nil disables it.
 	SharePoint *sharepoint.Connector
+	// Records is the C07 hold/retention lifecycle service; nil keeps the
+	// records routes at 501 after authorization.
+	Records *records.Service
 
 	routes []string // every registered pattern, for tests
 }
@@ -85,10 +89,28 @@ func WithAuth(a *Auth) Option {
 		a.route(mux, "DELETE /v1/users/{uid}/roles/{role}", a.admin(a.changeRole(false)))
 		a.route(mux, "POST /v1/users/{uid}/disable", a.admin(a.disableUser))
 
-		// Records and export capabilities. Authorization is enforced now; the
-		// operations themselves arrive with #7/#8 and answer 501 after authz.
-		a.route(mux, "POST /v1/holds", a.role(store.RoleRecordsOfficer, notImplemented))
-		a.route(mux, "POST /v1/holds/{id}/release", a.role(store.RoleRecordsOfficer, notImplemented))
+		// Workspace deletion (C07): removing a chat or project is a
+		// workspace-only change; evidence is a separate store and is never
+		// touched by these operations.
+		a.route(mux, "DELETE /v1/artifacts/{id}", a.deleteArtifact)
+		a.route(mux, "DELETE /v1/projects/{pid}", a.admin(a.deleteProject))
+
+		// C07 hold and retention lifecycle (records officers only). Exports
+		// remain #8 and answer 501 after authorization.
+		g := a.recordsGuard
+		a.route(mux, "POST /v1/holds", a.role(store.RoleRecordsOfficer, g(a.placeHold)))
+		a.route(mux, "GET /v1/holds", a.role(store.RoleRecordsOfficer, g(a.listHolds)))
+		a.route(mux, "GET /v1/holds/{id}", a.role(store.RoleRecordsOfficer, g(a.getHold)))
+		a.route(mux, "PUT /v1/holds/{id}", a.role(store.RoleRecordsOfficer, g(a.changeHold)))
+		a.route(mux, "POST /v1/holds/{id}/release", a.role(store.RoleRecordsOfficer, g(a.releaseHold)))
+		a.route(mux, "POST /v1/retention/policy", a.role(store.RoleRecordsOfficer, g(a.setPolicy)))
+		a.route(mux, "POST /v1/retention/sweep", a.role(store.RoleRecordsOfficer, g(a.sweep)))
+		a.route(mux, "GET /v1/retention/items", a.role(store.RoleRecordsOfficer, g(a.listItems)))
+		a.route(mux, "GET /v1/retention/items/{turn}", a.role(store.RoleRecordsOfficer, g(a.itemDetail)))
+		a.route(mux, "GET /v1/retention/items/{turn}/events", a.role(store.RoleRecordsOfficer, g(a.itemEvents)))
+		a.route(mux, "GET /v1/retention/items/{turn}/objects/{sha}", a.role(store.RoleRecordsOfficer, g(a.itemObject)))
+		a.route(mux, "POST /v1/retention/items/{turn}/purge", a.role(store.RoleRecordsOfficer, g(a.purgeBegin)))
+		a.route(mux, "POST /v1/retention/items/{turn}/purge/finish", a.role(store.RoleRecordsOfficer, g(a.purgeFinish)))
 		a.route(mux, "POST /v1/exports", a.role(store.RoleRecordsOfficer, notImplemented))
 		a.route(mux, "POST /v1/exports/{id}/approve", a.role(store.RoleExportReviewer, notImplemented))
 	}
@@ -176,6 +198,8 @@ func (a *Auth) fail(w http.ResponseWriter, err error) {
 		deny(w, http.StatusNotFound, "not found")
 	case errors.Is(err, store.ErrForbidden):
 		deny(w, http.StatusForbidden, "forbidden")
+	case errors.Is(err, records.ErrConflict), errors.Is(err, records.ErrBlockedStorage):
+		deny(w, http.StatusConflict, "conflict")
 	default:
 		a.Logf("internal: %v", err)
 		deny(w, http.StatusServiceUnavailable, "unavailable")

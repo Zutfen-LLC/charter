@@ -221,6 +221,55 @@ def main():
         hold=runtime.call('PUT',PROT,key,q|{'legal-hold':''},data=xml('LegalHold','<Status>ON</Status>'))
         good, observed=verify_version(runtime,PROT,key,ver,body,until)
         checkpoint('runtime_cannot_change_legal_hold',hold.status==403 and hold.code=='AccessDenied' and good,mutation=hold.summary(),**observed)
+        # ---- C07 controls: legal holds and versioned deletes through the
+        # records-scoped credential. The runtime identity cannot perform any
+        # of these (verified above and by the C04 permission matrix).
+        records_path = os.environ['C04_PRIVATE']+'/c07-records.json'
+        if os.path.exists(records_path):
+            rec = Client('c07-records')
+            assert rec.access not in (admin.access, runtime.access)
+            ck='c07/legal-hold-probe'
+            body2=b'c07 legal hold native probe\n'
+            short=brief(NOW + dt.timedelta(seconds=30))
+            put=rec.call('PUT',PROT,ck,headers={'x-amz-object-lock-mode':'COMPLIANCE','x-amz-object-lock-retain-until-date':short,'if-none-match':'*'},data=body2)
+            v2=put.version
+            on=rec.call('PUT',PROT,ck,{'legal-hold':'','versionId':v2},data=xml('LegalHold','<Status>ON</Status>'))
+            readback=rec.call('GET',PROT,ck,{'legal-hold':'','versionId':v2})
+            checkpoint('legal_hold_set_and_readback',put.status in (200,201) and on.status in (200,204) and readback.status==200 and field(readback.raw,'Status')=='ON',put=put.summary(),mutation=on.summary(),readback=readback.summary())
+            # Deleting under legal hold is refused, governance bypass included.
+            d_on=rec.call('DELETE',PROT,ck,{'versionId':v2})
+            d_bypass=rec.call('DELETE',PROT,ck,{'versionId':v2},{'x-amz-bypass-governance-retention':'true'})
+            still=rec.call('GET',PROT,ck,{'versionId':v2})
+            checkpoint('legal_hold_blocks_delete',d_on.status in (400,403) and d_bypass.status in (400,403) and still.status==200 and still.raw==body2,delete=d_on.summary(),bypass=d_bypass.summary(),readback=still.summary())
+            # Releasing the hold then deleting after expiry succeeds.
+            off=rec.call('PUT',PROT,ck,{'legal-hold':'','versionId':v2},data=xml('LegalHold','<Status>OFF</Status>'))
+            import time as _time
+            _time.sleep(32)
+            d_off=rec.call('DELETE',PROT,ck,{'versionId':v2})
+            gone=rec.call('GET',PROT,ck,{'versionId':v2})
+            checkpoint('legal_hold_release_allows_delete',off.status in (200,204) and d_off.status==204 and gone.status==404,release=off.summary(),delete=d_off.summary(),readback=gone.summary())
+            # A second short-retention version without a legal hold deletes after expiry.
+            put3=rec.call('PUT',PROT,ck+'2',headers={'x-amz-object-lock-mode':'COMPLIANCE','x-amz-object-lock-retain-until-date':brief(dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=8)),'if-none-match':'*'},data=body2)
+            _time.sleep(10)
+            d3=rec.call('DELETE',PROT,ck+'2',{'versionId':put3.version})
+            g3=rec.call('GET',PROT,ck+'2',{'versionId':put3.version})
+            checkpoint('records_delete_expired',put3.status in (200,201) and d3.status==204 and g3.status==404,put=put3.summary(),delete=d3.summary(),readback=g3.summary())
+            # The records identity administers objects only: bucket
+            # administration, versioning and lock configuration are denied.
+            for name, method, query, data in (
+                ('records_bucket_delete','DELETE',{},b''),
+                ('records_suspend_versioning','PUT',{'versioning':''},xml('VersioningConfiguration','<Status>Suspended</Status>')),
+                ('records_remove_lock_default','PUT',{'object-lock':''},xml('ObjectLockConfiguration','<ObjectLockEnabled>Enabled</ObjectLockEnabled>')),
+            ):
+                op=rec.call(method,PROT,'',query,data=data)
+                checkpoint(name,op.status==403 and op.code=='AccessDenied',mutation=op.summary())
+            # The runtime cannot use the records operations even on an
+            # expired, unprotected version.
+            put4=rec.call('PUT',PROT,ck+'3',headers={'x-amz-object-lock-mode':'COMPLIANCE','x-amz-object-lock-retain-until-date':brief(dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=5)),'if-none-match':'*'},data=body2)
+            _time.sleep(7)
+            d4=runtime.call('DELETE',PROT,ck+'3',{'versionId':put4.version})
+            g4=runtime.call('GET',PROT,ck+'3',{'versionId':put4.version})
+            checkpoint('runtime_cannot_delete_expired',d4.status==403 and g4.status==200,delete=d4.summary(),readback=g4.summary())
     for i in range(6):
         race_key=f'races/empty-{i}'
         barrier=threading.Barrier(32)
