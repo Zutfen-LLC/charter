@@ -7,20 +7,23 @@ Authoritative rules live in [ADR 0001](../adr/0001-governance-and-evidence-contr
 ```
 turn_received -> policy_decision
 policy_decision(deny)  -> turn_completed(outcome=denied)            disclosure: none (no sealing, intent, provider or release events allowed)
+policy evaluation error -> policy_decision(deny, reason=policy_evaluation_failed) -> turn_completed(outcome=denied)
 policy_decision(allow) -> usage_reserved -> context_sealed
 context_sealed -> disclosure_intent -> evidence_ack(intent)         <- R1 gate
 evidence_ack(intent) -> provider_accepted                           disclosure: disclosed
+evidence_ack(intent) -> output_recorded(complete=false) [no confirmed provider acceptance] -> evidence_ack(output) -> usage_settled(reserved_max) -> turn_interrupted(disclosure=unknown)
 provider_accepted -> output_recorded(complete=true) -> evidence_ack(output)
 evidence_ack(output) -> response_released                           <- R2 gate
 response_released -> usage_settled -> turn_completed
 
-any non-terminal state -> turn_interrupted   (provider error, store outage, crash recovery)
+a non-terminal state other than denied or released -> turn_interrupted
+  (provider error, veto, cancellation, store outage, crash recovery)
 ```
 
 | Last durable event | Disclosure if interrupted | Client sees | Usage |
 | --- | --- | --- | --- |
 | before acked intent | none | error | reservation released |
-| acked intent, no `provider_accepted` | **unknown** (treated as disclosed) | error | settled at reserved max |
+| acked intent, no `provider_accepted` (including partial bytes without acceptance) | **unknown** (treated as disclosed) | error (no partial text) | settled at reserved max |
 | `provider_accepted`, no complete output | disclosed, output partial | error (no partial text) | settled at reserved max or provider-reported if known |
 | complete output acked, not released | disclosed, output complete | error or retry of *delivery only* | settled |
 

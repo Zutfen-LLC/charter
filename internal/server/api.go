@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/oidc"
 	"github.com/Zutfen-LLC/charter/internal/store"
 )
@@ -34,6 +35,13 @@ type Auth struct {
 	// If it cannot finish in time the call fails closed with no output. Default 2s.
 	ReleaseCheckTimeout time.Duration
 	Logf                func(format string, a ...any)
+	// Evidence is the durable evidence write path (#4). Model calls REQUIRE it:
+	// if it is nil the call is refused (503) before any model work, so a missing
+	// or misconfigured evidence store can never produce an unrecorded answer.
+	Evidence *evidence.Recorder
+	// Model performs the outbound call with the exact sealed request bytes. If
+	// nil, Work is used (the legacy stub, which ignores the request bytes).
+	Model evidence.ModelFunc
 
 	routes []string // every registered pattern, for tests
 }
@@ -217,77 +225,6 @@ func (a *Auth) getArtifact(w http.ResponseWriter, r *http.Request, p store.Princ
 		return
 	}
 	writeJSON(w, 200, v)
-}
-
-// modelCall guarantees, in order:
-//
-//  1. Entry: authenticated and a project member (route wrapper + a.member).
-//  2. Work runs under a deadline derived from the request context. The deadline
-//     is COOPERATIVE: the handler cannot preempt Work, so a non-cooperating
-//     adapter can still run past it. The real execution bound must come from the
-//     adapter's own enforced timeouts (#5). No goroutine is started; Work runs
-//     on the request goroutine.
-//  3. First gate: if the work context is already done the output is dropped.
-//  4. Authorization (the linearization point): ONE authoritative query,
-//     "user active AND member of project", on committed state. It runs on its
-//     own context bounded by ReleaseCheckTimeout, so cancelling the request can
-//     neither abort the check into an implicit allow nor leave it unbounded.
-//     Revocations committed before the query reads are honoured; ones committed
-//     after it are not reflected in this response. Any failure, including an
-//     unavailable or too-slow database, returns no output.
-//  5. Final gate, immediately before the output is written: the work context is
-//     checked again. A cancellation or deadline that occurred while the query
-//     was running therefore still prevents release (504 deadline / 503
-//     cancelled), whatever the query returned.
-//
-// Between step 5 and the response write only the in-process write remains; the
-// guarantee is "no output is released once the work context is known to be
-// done", not hard preemption. Output the adapter already disclosed to a provider
-// cannot be recalled; ADR 0001 R1/R2 (durable intent before send, durable output
-// record before release) attach to this same gate in #4/#5.
-func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Principal) {
-	pid := r.PathValue("pid")
-	ctx, cancel := context.WithTimeout(r.Context(), a.WorkTimeout)
-	defer cancel()
-	out, err := a.Work(ctx, p, pid)
-	if err != nil {
-		a.fail(w, err)
-		return
-	}
-	if workContextDone(w, ctx) {
-		return
-	}
-	rc, rcancel := context.WithTimeout(context.Background(), a.ReleaseCheckTimeout)
-	member, err := a.Store.IsMember(rc, p, pid) // includes the active-account predicate
-	rcancel()
-	if err != nil {
-		a.Logf("model call release check: %v", err)
-		deny(w, http.StatusServiceUnavailable, "unavailable")
-		return
-	}
-	if !member {
-		deny(w, http.StatusForbidden, "access revoked during request")
-		return
-	}
-	if workContextDone(w, ctx) { // final gate: expiry/cancellation during the query
-		return
-	}
-	writeJSON(w, 200, map[string]string{"output": out})
-}
-
-// workContextDone writes the refusal and returns true if the work context has
-// expired (504) or been cancelled (503).
-func workContextDone(w http.ResponseWriter, ctx context.Context) bool {
-	cerr := ctx.Err()
-	if cerr == nil {
-		return false
-	}
-	if errors.Is(cerr, context.DeadlineExceeded) {
-		deny(w, http.StatusGatewayTimeout, "work deadline exceeded")
-	} else {
-		deny(w, http.StatusServiceUnavailable, "request cancelled")
-	}
-	return true
 }
 
 func (a *Auth) changeMember(add bool) handler {

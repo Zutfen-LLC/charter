@@ -7,6 +7,8 @@ import hashlib
 import json
 
 SCHEMA_VERSION = "1.0.0"
+CURRENT_PROFILE = "charter-postgres-v1"
+POSTGRES_DURABLE_LEVEL = "postgres:fsync=on,synchronous_commit=on"
 
 
 MAX_SAFE_INT = 2**53 - 1
@@ -66,66 +68,395 @@ def build_turn(base: dict, steps):
     return events
 
 
+import re
+
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+TS_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
+SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+RECEIPT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
+DESTINATION_KEYS = ("provider", "endpoint_id", "model_id")
+KNOWN = {"turn_received", "policy_decision", "usage_reserved", "context_sealed", "disclosure_intent",
+         "evidence_ack", "provider_accepted", "output_recorded", "response_released", "usage_settled",
+         "turn_completed", "turn_interrupted", "outcome_resolved"}
+TERMINAL = ("turn_completed", "turn_interrupted")
+
+
+def _int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _ref(v):
+    """{sha256, bytes} -> (sha, bytes) or None."""
+    if isinstance(v, dict) and isinstance(v.get("sha256"), str) and SHA_RE.fullmatch(v["sha256"]) \
+            and _int(v.get("bytes")) and v["bytes"] >= 0:
+        return v["sha256"], v["bytes"]
+    return None
+
+
+def _pl(e):
+    p = e.get("payload") if isinstance(e, dict) else None
+    return p if isinstance(p, dict) else {}
+
+
+def _refs(v):
+    if not isinstance(v, list):
+        return None
+    out = [_ref(x) for x in v]
+    return None if any(r is None for r in out) else out
+
+
+def strict_loads(text):
+    """json.loads that rejects duplicate keys (the Go verifier does too)."""
+    def hook(pairs):
+        d = {}
+        for k, v in pairs:
+            if k in d:
+                raise ValueError(f"duplicate key {k!r}")
+            d[k] = v
+        return d
+    return json.loads(text, object_pairs_hook=hook)
+
+
+def _next_state(state, typ, p):
+    if typ == "turn_interrupted":
+        return None if state in ("start", "denied", "released", "settled_released", "terminal") else "terminal"
+    if state == "intent" and typ == "output_recorded" and p.get("complete") is False:
+        return "output_unconfirmed"
+    table = {
+        "start": {"turn_received": "received"},
+        "received": {"policy_decision": "deny" if p.get("decision") == "deny" else "decided"},
+        "denied": {"turn_completed": "terminal"},
+        "decided": {"usage_reserved": "reserved"},
+        "reserved": {"context_sealed": "sealed"},
+        "sealed": {"disclosure_intent": "intent"},
+        "intent": {"provider_accepted": "accepted", "usage_settled": "settled"},
+        "output_unconfirmed": {"usage_settled": "settled"},
+        "accepted": {"output_recorded": "output", "usage_settled": "settled"},
+        "output": {"response_released": "released", "usage_settled": "settled"},
+        "released": {"usage_settled": "settled_released", "turn_completed": "terminal"},
+        "settled_released": {"turn_completed": "terminal"},
+    }
+    if state == "received" and p.get("decision") == "deny":
+        table["received"] = {"policy_decision": "denied"}
+    return table.get(state, {}).get(typ)
+
+
+def _destination_fields(p):
+    return isinstance(p, dict) and all(k not in p or (isinstance(p[k], str) and p[k] and p[k].strip() == p[k])
+                                       for k in DESTINATION_KEYS)
+
+
+def _destination_equal(a, b):
+    return all(k not in a or k not in b or (isinstance(a[k], str) and isinstance(b[k], str) and a[k] == b[k])
+               for k in DESTINATION_KEYS)
+
+
+def _complete_destination(p):
+    return _destination_fields(p) and all(k in p for k in DESTINATION_KEYS)
+
+
+def verify_current_full(events, objects):
+    """Require current-profile evidence with exact input and all referenced bytes."""
+    if not events or _pl(events[0]).get("evidence_profile") != CURRENT_PROFILE:
+        return ["[ENVELOPE] current evidence profile is required"]
+    if objects is None:
+        return ["[OBJECT] current full verification requires the referenced objects"]
+    return verify_turn(events, objects)
+
+
 def verify_turn(events, objects=None):
-    """Return a list of violation strings; empty means the log verifies."""
-    errs, prev = [], None
-    acked = set()  # seqs durably acknowledged
-    types = [e["type"] for e in events]
+    """Return violation strings, each "seq N: [CODE] text" or "[CODE] text".
+    Same rules and codes as the Go verifier (internal/evidence/verify.go).
+    objects=None checks structure; a dict checks declared objects. Legacy logs
+    may pass without proving exact original input. To require the current
+    profile and input bytes, use verify_current_full."""
+    errs = []
+    add = lambda i, code, msg: errs.append((f"seq {i}: " if i >= 0 else "") + f"[{code}] {msg}")
+    if not events:
+        return ["[ENVELOPE] empty log"]
+    first = events[0]
+    first_payload = _pl(first)
+    current = first_payload.get("evidence_profile") == CURRENT_PROFILE
+    if "evidence_profile" in first_payload and not current:
+        add(0, "ENVELOPE", "unknown evidence profile")
+    acked, sealed, sealed_req, state = set(), None, None, "start"
+    released = decided = denied = False
+    declared = {}
+    reserved_units = None
+    policy_destination = intent_destination = None
+    types = []
     for i, e in enumerate(events):
-        if e["seq"] != i:
-            errs.append(f"seq {i}: out of order")
-        if e["prev_hash"] != prev:
-            errs.append(f"seq {i}: broken chain")
-        if e["event_hash"] != event_hash(e):
-            errs.append(f"seq {i}: hash mismatch")
-        prev = e["event_hash"]
-        t, p = e["type"], e["payload"]
-        if t == "evidence_ack":
-            a = p["acked_seq"]
-            if a >= i or events[a]["event_hash"] != p["acked_event_hash"]:
-                errs.append(f"seq {i}: ack does not match event")
+        if not isinstance(e, dict):
+            add(i, "ENVELOPE", "event is not an object"); continue
+        typ = e.get("type") if isinstance(e.get("type"), str) else ""
+        types.append(typ)
+        p = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+        v = e.get("schema_version")
+        if not isinstance(v, str) or not SEMVER_RE.fullmatch(v):
+            add(i, "ENVELOPE", "schema_version must be semantic-version text")
+        elif not v.startswith("1."):
+            add(i, "ENVELOPE", "unsupported schema_version")
+        for k in ("tenant_id", "project_id", "matter_id", "turn_id"):
+            if not isinstance(e.get(k), str) or not ID_RE.fullmatch(e[k]):
+                add(i, "ENVELOPE", f"{k} must be an opaque lowercase identifier")
+            elif e[k] != first.get(k):
+                add(i, "ENVELOPE", f"{k} differs within the turn")
+        if not TYPE_RE.fullmatch(typ):
+            add(i, "ENVELOPE", "type must be a lowercase identifier")
+        if not _int(e.get("seq")):
+            add(i, "ENVELOPE", "seq must be an integer")
+        ts = e.get("recorded_at")
+        if not isinstance(ts, str) or not TS_RE.fullmatch(ts):
+            add(i, "ENVELOPE", "recorded_at must be RFC 3339 UTC with milliseconds and Z")
+        else:
+            import datetime
+            try:
+                datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ")
+            except ValueError:
+                add(i, "ENVELOPE", "recorded_at is not a valid time")
+        a = e.get("actor")
+        expected_actor = "user" if i == 0 else "service"
+        if not isinstance(a, dict) or a.get("kind") != expected_actor \
+                or not isinstance(a.get("id"), str) or not ID_RE.fullmatch(a["id"]):
+            add(i, "ENVELOPE", "actor must be {kind: user|service, id: identifier}")
+        if not isinstance(e.get("payload"), dict):
+            add(i, "ENVELOPE", "payload must be an object")
+        if "prev_hash" not in e:
+            add(i, "ENVELOPE", "prev_hash is required")
+        elif e["prev_hash"] is not None and not (isinstance(e["prev_hash"], str) and SHA_RE.fullmatch(e["prev_hash"])):
+            add(i, "ENVELOPE", "prev_hash must be null or sha256:<hex>")
+        if not isinstance(e.get("event_hash"), str) or not SHA_RE.fullmatch(e["event_hash"]):
+            add(i, "ENVELOPE", "event_hash must be sha256:<hex>")
+        # chain
+        if e.get("seq") != i:
+            add(i, "CHAIN", "seq out of order")
+        if i == 0:
+            if e.get("prev_hash") is not None:
+                add(i, "CHAIN", "first event must have a null prev_hash")
+        elif e.get("prev_hash") != events[i - 1].get("event_hash"):
+            add(i, "CHAIN", "broken chain")
+        try:
+            if e.get("event_hash") != event_hash(e):
+                add(i, "CHAIN", "hash mismatch")
+        except ValueError:
+            add(i, "CHAIN", "hash mismatch")
+        # declared reference lengths
+        refs = []
+        if isinstance(p.get("objects"), list):
+            refs += [r for r in map(_ref, p["objects"]) if r]
+        for k in ("request", "input"):
+            r = _ref(p.get(k))
+            if r:
+                refs.append(r)
+        for sha, n in refs:
+            if sha in declared and declared[sha] != n:
+                add(i, "LENGTH", f"object {sha} declared with different lengths")
+            declared[sha] = n
+        if i == 0 and typ != "turn_received":
+            add(i, "LIFECYCLE", "the first event must be turn_received")
+        if i > 0 and typ == "turn_received":
+            add(i, "LIFECYCLE", "turn_received may appear only once, at seq 0")
+        if typ == "turn_received":
+            if current and (not _ref(p.get("input")) or "input_summary" in p):
+                add(i, "REFS", "current evidence requires exact input bytes, not a legacy summary")
+            a = e.get("actor") if isinstance(e.get("actor"), dict) else {}
+            if current and (not isinstance(p.get("custodian_id"), str) or not p["custodian_id"] or p["custodian_id"] != a.get("id")):
+                add(i, "ENVELOPE", "admission actor does not match the declared custodian")
+            if "input" in p:
+                if not _ref(p["input"]):
+                    add(i, "REFS", "input must be a {sha256, bytes} reference")
+            elif not isinstance(p.get("input_summary"), str):
+                add(i, "REFS", "turn_received needs an input reference (or a legacy input_summary)")
+        elif typ == "policy_decision":
+            d = p.get("decision")
+            if d == "allow":
+                if "destination" in p and not _destination_fields(p["destination"]):
+                    add(i, "REFS", "policy destination has invalid identifiers")
+                policy_destination = p.get("destination") if isinstance(p.get("destination"), dict) else None
+                if policy_destination is not None and not _destination_equal(p, policy_destination):
+                    add(i, "REFS", "policy destination conflicts with its corresponding identifiers")
+                if current and (not _complete_destination(policy_destination) or p.get("route") != policy_destination["endpoint_id"]):
+                    add(i, "REFS", "policy must identify the actual provider, endpoint, and model, with its route matching the endpoint")
+            if d not in ("allow", "deny"):
+                add(i, "POLICY", "decision must be allow or deny")
+            elif i != 1:
+                add(i, "POLICY", "the policy decision must be seq 1")
+            if decided:
+                add(i, "POLICY", "repeated policy decision")
+            decided, denied = True, d == "deny"
+        elif typ == "usage_reserved":
+            if not _int(p.get("units")) or p["units"] < 0:
+                add(i, "REFS", "usage_reserved.units must be a non-negative integer")
             else:
-                acked.update(range(a + 1))
-        elif t == "policy_decision":
-            if p.get("decision") not in ("allow", "deny"):
-                errs.append(f"seq {i}: policy_decision must be allow or deny")
-        elif t == "provider_accepted":
-            idx = [j for j, x in enumerate(events[:i]) if x["type"] == "disclosure_intent"]
+                reserved_units = p["units"]
+        elif typ == "context_sealed":
+            objs = _refs(p.get("objects"))
+            sealed = dict(objs) if objs else {}
+            if not objs:
+                add(i, "REFS", "context_sealed.objects must be a non-empty list of {sha256, bytes}")
+            sealed_req = p.get("request_sha256")
+            if not (isinstance(sealed_req, str) and SHA_RE.fullmatch(sealed_req)):
+                add(i, "REFS", "request_sha256 missing or malformed"); sealed_req = None
+            elif sealed_req not in sealed:
+                add(i, "REFS", "request_sha256 is not among the sealed objects")
+            srcs = p.get("sources")
+            if not isinstance(srcs, list):
+                add(i, "REFS", "context_sealed.sources must be a list"); srcs = []
+            for sx in srcs:
+                ok = isinstance(sx, dict) and isinstance(sx.get("source_id"), str) and sx["source_id"] \
+                    and _int(sx.get("version")) and sx["version"] >= 0 \
+                    and isinstance(sx.get("sha256"), str) and SHA_RE.fullmatch(sx["sha256"])
+                if not ok:
+                    add(i, "REFS", "malformed source reference")
+                elif sx["sha256"] not in sealed:
+                    add(i, "REFS", "source sha256 is not among the sealed objects")
+        elif typ == "disclosure_intent":
+            intent_destination = p
+            if not _destination_fields(p) or (current and not _complete_destination(p)):
+                add(i, "REFS", "disclosure intent has invalid or missing destination identifiers")
+            if policy_destination is not None and not _destination_equal(policy_destination, intent_destination):
+                add(i, "REFS", "disclosure intent destination differs from policy destination")
+            rq = _ref(p.get("request"))
+            if not rq:
+                add(i, "REFS", "disclosure_intent.request must be a {sha256, bytes} reference")
+            elif sealed_req is None:
+                add(i, "REFS", "disclosure_intent without a sealed request")
+            elif rq[0] != sealed_req:
+                add(i, "REFS", "disclosure_intent request does not match the sealed request")
+            elif sealed and sealed.get(rq[0]) != rq[1]:
+                add(i, "LENGTH", "disclosure_intent request length differs from the sealed object length")
+            for k in ("provider", "endpoint_id"):
+                if not isinstance(p.get(k), str) or not p[k]:
+                    add(i, "REFS", f"disclosure_intent.{k} is required")
+        elif typ == "evidence_ack":
+            receipt = p.get("receipt")
+            if not isinstance(receipt, str) or RECEIPT_RE.fullmatch(receipt) is None:
+                add(i, "REFS", "evidence_ack.receipt is required and must be a valid identifier")
+            level = p.get("storage_level")
+            if (current or "storage_level" in p) and level != POSTGRES_DURABLE_LEVEL:
+                add(i, "REFS", "evidence_ack.storage_level must identify a supported durable storage class")
+            ak = p.get("acked_seq")
+            if not _int(ak) or ak < 0 or ak >= i or not isinstance(events[ak], dict) \
+                    or events[ak].get("event_hash") != p.get("acked_event_hash") or not p.get("acked_event_hash"):
+                add(i, "REFS", "ack does not match event")
+            else:
+                target = events[ak]
+                if level == POSTGRES_DURABLE_LEVEL:
+                    try:
+                        expected = sha256_bytes(canonical({"backend": "postgres-append-only", "level": level,
+                            **{key: target.get(key) for key in ("tenant_id", "turn_id", "seq", "event_hash")}}))
+                    except (ValueError, AttributeError):
+                        expected = None
+                    if receipt != expected:
+                        add(i, "REFS", "evidence_ack receipt does not bind the storage level and target event")
+                if current and (ak != i - 1 or target.get("type") not in ("disclosure_intent", "output_recorded")):
+                    add(i, "REFS", "current evidence_ack must target its immediately preceding intent or output event")
+                acked.update(range(ak + 1))
+        elif typ == "provider_accepted":
+            if not _destination_fields(p) or (current and not _complete_destination(p)):
+                add(i, "REFS", "provider acceptance has invalid or missing destination identifiers")
+            if intent_destination is not None and not _destination_equal(intent_destination, p):
+                add(i, "REFS", "provider acceptance destination differs from disclosure intent")
+            idx = [j for j, x in enumerate(events[:i]) if isinstance(x, dict) and x.get("type") == "disclosure_intent"]
             if not idx or idx[-1] not in acked:
-                errs.append(f"seq {i}: R1 provider contacted before acked disclosure_intent")
-        elif t == "response_released":
-            out = [j for j, x in enumerate(events[:i]) if x["type"] == "output_recorded"]
-            if not out or out[-1] not in acked or not events[out[-1]]["payload"]["complete"]:
-                errs.append(f"seq {i}: R2 response released before acked complete output")
-        if t in ("context_sealed", "disclosure_intent", "provider_accepted", "response_released"):
-            d = [x for x in events[:i] if x["type"] == "policy_decision"]
-            if not d or d[-1]["payload"].get("decision") != "allow":
-                errs.append(f"seq {i}: R4 {t} without a preceding allow policy_decision")
-    terminals = [i for i, t in enumerate(types) if t in ("turn_completed", "turn_interrupted")]
+                add(i, "R1", "provider contacted before acked disclosure_intent")
+        elif typ == "output_recorded":
+            intents = [j for j, x in enumerate(events[:i]) if isinstance(x, dict) and x.get("type") == "disclosure_intent"]
+            if not intents or intents[-1] not in acked:
+                add(i, "R1", "output recorded without acknowledged disclosure intent")
+            if not isinstance(p.get("complete"), bool):
+                add(i, "REFS", "output_recorded.complete must be a boolean")
+            o = _refs(p.get("objects"))
+            if not o or len(o) != 1:
+                add(i, "REFS", "output_recorded.objects must be exactly one {sha256, bytes} reference")
+        elif typ == "response_released":
+            out = [j for j, x in enumerate(events[:i]) if isinstance(x, dict) and x.get("type") == "output_recorded"]
+            if not out or out[-1] not in acked or _pl(events[out[-1]]).get("complete") is not True:
+                add(i, "R2", "response released before acked complete output")
+            released = True
+        elif typ == "usage_settled":
+            if not _int(p.get("units")) or p["units"] < 0:
+                add(i, "REFS", "usage_settled.units must be a non-negative integer")
+            elif p.get("basis") == "reserved_max" and p["units"] != reserved_units:
+                add(i, "REFS", "usage_settled reserved_max units must equal the full reservation")
+            if p.get("basis") not in ("reserved_max", "provider_reported"):
+                add(i, "REFS", "usage_settled.basis must be provider_reported or reserved_max")
+            if derive_disclosure(events[:i]) == "unknown" and p.get("basis") != "reserved_max":
+                add(i, "REFS", "unknown disclosure must use reserved_max settlement")
+        elif typ == "turn_completed":
+            o = p.get("outcome")
+            if o == "completed" and not any(isinstance(x, dict) and x.get("type") == "usage_settled" for x in events[:i]):
+                add(i, "LIFECYCLE", "successful completion requires usage_settled")
+            if o == "completed" and not released:
+                add(i, "LIFECYCLE", "turn_completed(completed) without a recorded release")
+            elif o == "denied" and not denied:
+                add(i, "LIFECYCLE", "turn_completed(denied) without a deny decision")
+            elif o not in ("completed", "denied"):
+                add(i, "REFS", "turn_completed.outcome must be completed or denied")
+        elif typ == "turn_interrupted":
+            if not isinstance(p.get("reason"), str) or not p["reason"]:
+                add(i, "REFS", "turn_interrupted.reason is required")
+            dv = p.get("disclosure")
+            if dv not in ("none", "unknown", "disclosed"):
+                add(i, "REFS", "turn_interrupted.disclosure must be none, unknown or disclosed")
+            elif dv != derive_disclosure(events[:i]):
+                add(i, "DISCLOSURE", f"recorded disclosure {dv!r} but the log derives {derive_disclosure(events[:i])!r}")
+            if derive_disclosure(events[:i]) == "unknown" and "usage_settled" not in types[:-1]:
+                add(i, "LIFECYCLE", "unknown disclosure must settle the full reservation before interruption")
+            if released:
+                add(i, "R3", "a turn with a recorded release cannot end interrupted")
+        if typ in ("context_sealed", "disclosure_intent", "provider_accepted", "response_released"):
+            d = [x for x in events[:i] if isinstance(x, dict) and x.get("type") == "policy_decision"]
+            if not d or _pl(d[-1]).get("decision") != "allow":
+                add(i, "R4", f"{typ} without a preceding allow policy_decision")
+        if typ != "evidence_ack" and typ in KNOWN:
+            nxt = _next_state(state, typ, p)
+            if nxt is None:
+                add(i, "LIFECYCLE", f"{typ} is not allowed after {state}")
+            else:
+                state = nxt
+    terminals = [i for i, t in enumerate(types) if t in TERMINAL]
     if len(terminals) != 1 or terminals[0] != len(events) - 1:
-        errs.append("R3: exactly one terminal event, last")
+        add(-1, "R3", "exactly one terminal event, last")
     if "response_released" in types and types[-1] != "turn_completed":
-        errs.append("R3: response released in a turn that did not complete")
+        add(-1, "R3", "response released in a turn that did not complete")
     if objects is not None:
+        seen = set()
+        refs = []
         for e in events:
-            for ref in e["payload"].get("objects", []):
-                data = objects.get(ref["sha256"])
-                if data is None:
-                    errs.append(f"missing object {ref['sha256']}")
-                elif sha256_bytes(data) != ref["sha256"]:
-                    errs.append(f"changed object {ref['sha256']}")
+            p = _pl(e)
+            for r in (_refs(p.get("objects")) or []) + [x for x in (_ref(p.get("request")), _ref(p.get("input"))) if x]:
+                refs.append(r)
+            rs = p.get("request_sha256")
+            if isinstance(rs, str) and SHA_RE.fullmatch(rs) and sealed and rs in sealed:
+                refs.append((rs, sealed[rs]))
+        for sha, n in refs:
+            if (sha, n) in seen:
+                continue
+            seen.add((sha, n))
+            data = objects.get(sha)
+            if data is None:
+                add(-1, "OBJECT", f"missing object {sha}")
+            elif sha256_bytes(data) != sha:
+                add(-1, "OBJECT", f"changed object {sha} (digest mismatch)")
+            elif len(data) != n:
+                add(-1, "LENGTH", f"object {sha} is {len(data)} bytes but declared {n}")
     return errs
 
 
 def derive_disclosure(events):
     acked, intent_acked = set(), False
     for i, e in enumerate(events):
-        if e["type"] == "evidence_ack":
-            acked.update(range(e["payload"]["acked_seq"] + 1))
+        if isinstance(e, dict) and e.get("type") == "evidence_ack":
+            a = _pl(e).get("acked_seq")
+            if _int(a) and 0 <= a < i:
+                acked.update(range(a + 1))
     for i, e in enumerate(events):
-        if e["type"] == "disclosure_intent" and i in acked:
+        if isinstance(e, dict) and e.get("type") == "disclosure_intent" and i in acked:
             intent_acked = True
-    if any(e["type"] == "provider_accepted" for e in events):
+    if any(isinstance(e, dict) and e.get("type") == "provider_accepted" for e in events):
         return "disclosed"
     return "unknown" if intent_acked else "none"
 

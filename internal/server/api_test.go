@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/oidc"
 	"github.com/Zutfen-LLC/charter/internal/oidc/syntheticidp"
 	"github.com/Zutfen-LLC/charter/internal/store"
@@ -74,7 +75,8 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.auth = &Auth{Verifier: v, Store: st, Logf: func(string, ...any) {}}
+	e.auth = &Auth{Verifier: v, Store: st, Logf: func(string, ...any) {},
+		Evidence: &evidence.Recorder{Backend: evidence.PG{DB: pool}, Policy: StubPolicy()}}
 	e.h = New(pool, TestFixtureBackend(), WithAuth(e.auth))
 	return e
 }

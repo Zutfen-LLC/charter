@@ -12,8 +12,13 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/oidc"
 )
 
-// Evidence backend kinds. Only the test fixture exists in the pilot scaffold.
-const EvidenceBackendTestFixture = "test-fixture"
+// Evidence backend kinds. Both names select the PostgreSQL append-only evidence
+// tables; NEITHER is retention-enforced storage (docs/evidence-capture.md).
+// "test-fixture" is kept as an alias so existing environments keep working.
+const (
+	EvidenceBackendTestFixture    = "test-fixture"
+	EvidenceBackendPostgresAppend = "postgres-append-only"
+)
 
 // OIDC settings. Entra mode needs the designated test tenant's id; nothing
 // tenant-specific is committed to the repository.
@@ -33,17 +38,27 @@ type OIDC struct {
 }
 
 type Config struct {
-	Addr            string
-	DatabaseURL     string
-	EvidenceBackend string
-	OIDC            OIDC
+	Addr string
+	// DatabaseURL is the WORKSPACE serving credential (role member of
+	// charter_workspace_app). EvidenceDatabaseURL is the separate EVIDENCE
+	// serving credential (charter_evidence_app). MigrateDatabaseURL is the schema
+	// OWNER credential for `charter migrate` only: the serving process refuses to
+	// start if it is present in its environment. For `migrate` alone,
+	// DatabaseURL is accepted as a development fallback.
+	DatabaseURL         string
+	EvidenceDatabaseURL string
+	MigrateDatabaseURL  string
+	EvidenceBackend     string
+	OIDC                OIDC
 }
 
 func Load() Config {
 	return Config{
-		Addr:            get("CHARTER_ADDR", "127.0.0.1:8080"),
-		DatabaseURL:     os.Getenv("CHARTER_DATABASE_URL"),
-		EvidenceBackend: get("CHARTER_EVIDENCE_BACKEND", EvidenceBackendTestFixture),
+		Addr:                get("CHARTER_ADDR", "127.0.0.1:8080"),
+		DatabaseURL:         os.Getenv("CHARTER_DATABASE_URL"),
+		EvidenceDatabaseURL: os.Getenv("CHARTER_EVIDENCE_DATABASE_URL"),
+		MigrateDatabaseURL:  os.Getenv("CHARTER_MIGRATE_DATABASE_URL"),
+		EvidenceBackend:     get("CHARTER_EVIDENCE_BACKEND", EvidenceBackendPostgresAppend),
 		OIDC: OIDC{
 			Issuer:   os.Getenv("CHARTER_OIDC_ISSUER"),
 			Audience: os.Getenv("CHARTER_OIDC_AUDIENCE"),

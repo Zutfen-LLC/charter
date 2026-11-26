@@ -14,3 +14,5 @@ Applies to the event schema, export manifest, canonical hashing rules and the or
 ## Changelog
 
 - 1.0.0 (proposed): initial contract. Review fixes before freeze: R4 now requires an `allow` decision; canonicalization pinned to UTF-16 key order with cross-language vectors; purge specified as tombstone + conditional delete.
+- 1.0.0 (proposed, #4): implementation adds only optional fields, no hash or rule change: `turn_received.payload.{request_id,input}`, `policy_decision.payload.destination`, `disclosure_intent.payload.model_id`, `provider_accepted.payload.model_id`, `evidence_ack.payload.storage_level`, and `deny` reasons. The Go verifier reproduces every golden fixture hash.
+- 1.0.0 (proposed, #4 review round): PATCH clarifications only, see ADR 0001 amendment A1. New optional field `turn_received.payload.request_fingerprint`; interrupted reasons `cancelled_before_dispatch` and `release_denied` are additional values of an existing free-text field. The strict verifier and 21 correctly rehashed negative fixtures (`fixtures/contracts/negative/`) are shared by the Go and Python implementations; golden hashes are unchanged.
