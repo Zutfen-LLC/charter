@@ -33,6 +33,7 @@ func TestC06CrossLanguageBindings(t *testing.T) {
 	var fixtures []struct {
 		goldenFile
 		Name, Diagnostic string
+		Tolerate         []string
 	}
 	if err := json.Unmarshal(fixture(t, "c06-source-bindings.json"), &fixtures); err != nil {
 		t.Fatal(err)
@@ -52,14 +53,27 @@ func TestC06CrossLanguageBindings(t *testing.T) {
 				objs[h] = []byte(s)
 			}
 			errs := VerifyCurrentFull(evs, objs)
+			tolerated := func(e string) bool {
+				for _, code := range f.Tolerate {
+					if strings.Contains(e, "["+code+"]") {
+						return true
+					}
+				}
+				return false
+			}
 			if f.Diagnostic == "" {
-				if len(errs) != 0 {
-					t.Fatal(errs)
+				// Positive controls: a nonterminal pre-seal prefix may
+				// legitimately keep the offline terminal-event complaint,
+				// which fixtures declare via tolerate.
+				for _, e := range errs {
+					if !tolerated(e) {
+						t.Fatal(errs)
+					}
 				}
 				return
 			}
 			for _, e := range errs {
-				if !strings.Contains(e, "[C06]") {
+				if !strings.Contains(e, "[C06]") && !tolerated(e) {
 					t.Fatalf("fixture failed unrelated validation: %v", errs)
 				}
 			}

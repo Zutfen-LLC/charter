@@ -106,6 +106,69 @@ def cases():
         yield dict(seal(f), name=name, diagnostic=diagnostic)
 
 
+def cut(f, keep):
+    """Reduce the complete turn to a pre-seal prefix: no context_sealed."""
+    f["events"] = [e for e in f["events"] if e["type"] in keep]
+    return f
+
+
+def terminate(f, stamp, reason="operator-cancelled"):
+    """Append a valid terminal interruption to a pre-seal prefix."""
+    terminal = copy.deepcopy(f["events"][-1])
+    terminal.update(type="turn_interrupted", recorded_at=stamp)
+    terminal["payload"] = {"reason": reason, "disclosure": "none"}
+    f["events"].append(terminal)
+    return f
+
+
+def pre_seal_cases():
+    # A legitimate partial or interrupted C06 turn can reserve usage before
+    # context_sealed exists. The requested/reserved registry-model invariant
+    # does not depend on context sealing, so these fixtures exercise the
+    # reservation checks without any seal: terminal interruptions and
+    # nonterminal prefixes (the latter keep the offline verifier's terminal
+    # R3 complaint, tolerated explicitly).
+    for name, diagnostic, tolerate, mutation, keep, interrupted in (
+        ("pre-seal-explicit-binding", "", (),
+         lambda f: None, ("turn_received", "policy_decision", "usage_reserved"), True),
+        ("pre-seal-default-binding", "", (),
+         lambda f: (p(f, "turn_received").pop("model_registry_id"), p(f, "usage_reserved").update(registry_model="det-a")),
+         ("turn_received", "policy_decision", "usage_reserved"), True),
+        ("pre-seal-interrupt-before-reservation", "", (),
+         lambda f: None, ("turn_received", "policy_decision"), True),
+        ("pre-seal-mismatched-registry-model",
+         "reserved registry model differs from the explicitly requested registry model", (),
+         lambda f: p(f, "usage_reserved").update(registry_model="registry-b"),
+         ("turn_received", "policy_decision", "usage_reserved"), True),
+        ("pre-seal-omitted-model-nondefault",
+         "reserved registry model must be the documented default resolution", (),
+         lambda f: (p(f, "turn_received").pop("model_registry_id"), p(f, "usage_reserved").update(registry_model="registry-b")),
+         ("turn_received", "policy_decision", "usage_reserved"), True),
+        ("pre-seal-missing-accounting",
+         "C06 usage reservation requires C05 governed accounting", (),
+         lambda f: (p(f, "usage_reserved").pop("accounting_version"), p(f, "usage_reserved").pop("registry_model")),
+         ("turn_received", "policy_decision", "usage_reserved"), True),
+        ("pre-seal-prefix-mismatched-registry-model",
+         "reserved registry model differs from the explicitly requested registry model", ("R3",),
+         lambda f: p(f, "usage_reserved").update(registry_model="registry-b"),
+         ("turn_received", "policy_decision", "usage_reserved"), False),
+        ("pre-seal-prefix-valid", "", ("R3",),
+         lambda f: None, ("turn_received", "policy_decision", "usage_reserved"), False),
+        ("sealed-interrupted", "", (),
+         lambda f: None,
+         ("turn_received", "policy_decision", "usage_reserved", "context_sealed", "disclosure_intent"), True),
+    ):
+        f = build()
+        mutation(f)
+        bind(f)  # keeps the admission fingerprint coherent with the mutation
+        stamp = by_type(f, "turn_completed")["recorded_at"]
+        cut(f, keep)
+        if interrupted:
+            terminate(f, stamp)
+        yield dict(seal(f), name=name, diagnostic=diagnostic, tolerate=list(tolerate))
+
+
 if __name__ == "__main__":
     (ROOT / "c06-source-bindings.json").write_text("[\n" + ",\n".join(
-        json.dumps(f, ensure_ascii=False, sort_keys=True, separators=(",", ":")) for f in cases()) + "\n]\n")
+        json.dumps(f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for f in list(cases()) + list(pre_seal_cases())) + "\n]\n")

@@ -19,11 +19,16 @@ class C06VerifierTests(unittest.TestCase):
         for fixture in test_contracts.load("c06-source-bindings.json"):
             with self.subTest(fixture=fixture["name"]):
                 errors = verify_current_full(fixture["events"], test_contracts.objs(fixture))
+                tolerate = tuple(fixture.get("tolerate", ()))
+                tolerated = lambda e: any(f"[{code}]" in e for code in tolerate)
                 if fixture["diagnostic"]:
-                    self.assertTrue(all("[C06]" in e for e in errors), errors)
+                    self.assertTrue(all("[C06]" in e or tolerated(e) for e in errors), errors)
                     self.assertTrue(any(fixture["diagnostic"] in e for e in errors), errors)
                 else:
-                    self.assertEqual([], errors)
+                    # Positive controls: a nonterminal pre-seal prefix may
+                    # legitimately keep the offline terminal-event complaint,
+                    # which fixtures declare via tolerate.
+                    self.assertTrue(all(tolerated(e) for e in errors), errors)
 
     def test_output_without_source_provenance_is_rejected(self):
         fixture = test_contracts.load("complete-turn.json")
