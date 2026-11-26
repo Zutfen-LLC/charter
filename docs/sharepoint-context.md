@@ -3,7 +3,8 @@
 ## Implementation invariants (pre-change design)
 
 - Only the authenticated model-call route can request an external excerpt. Client input is an opaque document ID, expected provider-native version, and byte range, never a URL, credential, provider response, identity assertion, or cached permission. Workspace IDs remain distinct. Membership precedes any connector operation. The server owns one tenant/project/site/library scope and an authenticated user-to-delegated-subject mapping.
-- Connector output is not prompt context unless a fresh delegated read proves authorization and exact version/bytes. Revalidate the same binding before disclosure intent, at final dispatch, at initial release, at recorder delivery (including replay), and at the HTTP write. No permission cache, subset fallback, or identity substitution. Cancellation and current membership checks remain mandatory. External ACL visibility and the interval between the last external response and the subsequent local action cannot be made atomic by Charter.
+- Connector output is not prompt context unless a fresh delegated read proves authorization and exact version/bytes. Revalidate the same binding before source-derived request construction and context sealing (context eligibility), before disclosure intent, at final dispatch, at initial release, at recorder delivery (including replay), and at the HTTP write. No permission cache, subset fallback, or identity substitution. Cancellation and current membership checks remain mandatory. External ACL visibility and the interval between the last external response and the subsequent local action cannot be made atomic by Charter.
+- Route authorization follows the same discipline: the pinned route is re-resolved after the final delegated source revalidation and as close to actual invocation as practicable, so only local checks (caller liveness and the ownership fence) sit between route verification and the model call. Invoke itself performs no route resolution. A routing-policy change committed during the connector operations must be observed before dispatch; a change committed after the route re-resolution completes but before the local checks and the call can still be missed — Charter does not claim distributed atomicity between the routing policy store and the provider call. The same non-atomic interval applies between the final delegated source check and the call.
 - Contributed content and its derivative outputs exist only in scoped turn evidence and the original actor's authorized response. Workspace list, search, direct artifact/content lookup and workspace reuse continue to query only workspace artifacts; no API publishes an excerpt or derivative there. Holds/exports do not become content routes in C06. There is no share/write/import endpoint. Copying content manually after lawful delivery is outside this control boundary.
 - Ordered source bindings contribute to a new request fingerprint version only for external-source turns. The request and excerpt objects are sealed before provider work, and acknowledged intent and exact-version storage checks remain authoritative. Replay is scoped to the original custodian and selection and can return only the verified original output; a fresh delegated read is authorization/version proof, never historical reconstruction. Recovery must not contact the connector or model. Evidence reconstruction does not concern current access and uses retained bytes only.
 - External-source turns use C05 governance exclusively. Pre-dispatch refusal is not a billable call; post-dispatch refusal does not remove incurred obligations. Existing configuration and retained network isolation do not gain any authority to contact Microsoft.
@@ -39,11 +40,17 @@ model without binding the timestamp of a fresh observation. `context_sealed`
 keeps the original decision and observation; `output_recorded` and
 `response_released` bind the exact sealed source list by digest. Offline full
 verification compares the recorded source objects against the actual canonical
-request. `response_released` remains authorization, not client receipt. No
-successful current delivery may be inferred from an old record. Historical C03–
-C05 evidence and fingerprints are unmodified. The retained profile keeps its
-existing signed receipt/version references and coordination authority. Only
-excerpts are preserved, not whole external documents or the library.
+request, and requires the governed accounting reservation to bind the same
+registry model the turn explicitly requested — or the documented default
+resolution (`det-a`) when no model was requested. Registry identifiers are
+never provider-native destination model identifiers, so the policy
+destination is not part of that comparison, and the verifier never
+reconstructs mutable historical routing configuration. `response_released`
+remains authorization, not client receipt. No
+successful current delivery may be inferred from an old record. Historical
+C03–C05 evidence and fingerprints are unmodified. The retained profile keeps
+its existing signed receipt/version references and coordination authority.
+Only excerpts are preserved, not whole external documents or the library.
 
 ## Separate live smoke procedure — not authorized or run here
 
