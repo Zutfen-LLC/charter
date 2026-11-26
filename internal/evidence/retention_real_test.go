@@ -262,6 +262,7 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 				return
 			}
 			if tc.name == "concurrent_admissions" {
+				allow := func(context.Context) error { return nil }
 				entered, release := make(chan struct{}), make(chan struct{})
 				defer close(release)
 				first := make(chan error, 1)
@@ -270,7 +271,7 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 						close(entered)
 						<-release
 						return model(c, b)
-					}, nil)
+					}, allow)
 					first <- err
 				}()
 				select {
@@ -282,10 +283,10 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 				}
 				conflict := req
 				conflict.Input = []byte("different synthetic input")
-				if _, err := rec.Process(ctx, conflict, model, nil); !errors.Is(err, ErrIdempotencyMismatch) {
+				if _, err := rec.Process(ctx, conflict, model, allow); !errors.Is(err, ErrIdempotencyMismatch) {
 					t.Fatalf("conflicting admission: %v", err)
 				}
-				if _, err := rec.Process(ctx, req, model, nil); !errors.Is(err, ErrTurnInFlight) {
+				if _, err := rec.Process(ctx, req, model, allow); !errors.Is(err, ErrTurnInFlight) {
 					t.Fatalf("identical in-flight admission: %v", err)
 				}
 				// Release only once, and ensure the owning turn finishes before the
@@ -415,7 +416,7 @@ func TestRealRetainedBoundaryFailures(t *testing.T) {
 					}
 					return
 				}
-				result, e := clean.Process(ctx, req, model, nil)
+				result, e := clean.Process(ctx, req, model, func(context.Context) error { return nil })
 				if e == nil || len(result.Output) != 0 || dispatch.Load() != tc.calls {
 					t.Fatalf("recovery redispatched or leaked output: calls=%d err=%v", dispatch.Load(), e)
 				}

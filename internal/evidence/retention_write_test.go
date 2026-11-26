@@ -42,7 +42,10 @@ func TestRetainedRecorderReconstructsAndIgnoresLatestSubstitution(t *testing.T) 
 		calls.Add(1)
 		return ModelOutcome{Accepted: true, Complete: true, Output: out}, nil
 	}
-	r, err := rec.Process(ctx, req, call, nil)
+	if missing, err := rec.Process(ctx, req, call, nil); !errors.Is(err, ErrFailClosed) || len(missing.Output) != 0 || missing.TurnID != "" || calls.Load() != 0 || len(m.objects) != 0 {
+		t.Fatalf("missing fresh gate reached admission or dispatch: calls=%d objects=%d err=%v", calls.Load(), len(m.objects), err)
+	}
+	r, err := rec.Process(ctx, req, call, func(context.Context) error { return nil })
 	if err != nil || string(r.Output) != string(out) {
 		t.Fatalf("synthetic turn: %v", err)
 	}

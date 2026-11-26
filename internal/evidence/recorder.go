@@ -310,6 +310,9 @@ func (rc *Recorder) Process(ctx context.Context, req Request, call ModelFunc, ga
 	if err := ctx.Err(); err != nil {
 		return Result{}, &AbortedError{Stage: "admission", Cause: err}
 	}
+	if _, retained := rc.Backend.(retainedTurnBackend); retained && gate == nil {
+		return Result{}, fmt.Errorf("%w: retained turns require fresh delivery authorization", ErrFailClosed)
+	}
 	if err := rc.Fence.Check(ctx); err != nil {
 		return Result{}, err
 	}
