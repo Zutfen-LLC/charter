@@ -128,3 +128,39 @@ func TestC05GovernedHTTPReceiverAccountingAndReplay(t *testing.T) {
 		t.Fatal("incorrect usage projection")
 	}
 }
+
+func TestC05HTTPMeasuredOverrunWithholdsOutputAndFreezes(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	b := evidence.PG{DB: e.st.DB}
+	if err := b.SetPolicy(ctx, evidence.BudgetPolicy{TenantID: e.tenant, ProjectID: e.p1, LocalOnly: true, ProjectCap: 10000, AllowedModels: []string{"local-http"}}); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sent, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		calls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": "one byte too much", "usage": map[string]int{"input_bytes": len(sent), "output_bytes": len("one byte too much")}})
+	}))
+	defer receiver.Close()
+	cfg := routing.DefaultConfig()
+	cfg.Endpoint = receiver.URL
+	cfg.MaxOutputBytes = int64(len("one byte too much") - 1)
+	e.auth.Evidence = &evidence.Recorder{Backend: b, Governance: routing.Governance(cfg, b, false, nil), Accounting: b.ReconcileBudget}
+	const body = `{"input":"synthetic","model_id":"local-http"}`
+	if status, out, _ := e.post("alice", e.p1, body, "Idempotency-Key", "overrun"); status != 503 || strings.Contains(out, "one byte") {
+		t.Fatalf("overrun delivered: %d %s", status, out)
+	}
+	s, err := b.Summary(ctx, e.tenant, e.p1)
+	if err != nil || !s.Frozen || s.Outstanding != 0 || s.Settled <= 0 || s.Unknown != 0 || s.Remaining != 0 {
+		t.Fatalf("overrun not accounted: %+v %v", s, err)
+	}
+	if status, _, _ := e.post("alice", e.p1, body, "Idempotency-Key", "after-overrun"); status != 403 || calls.Load() != 1 {
+		t.Fatal("overrun did not freeze future dispatches")
+	}
+}

@@ -105,6 +105,9 @@ func Governance(cfg Config, budget evidence.PG, syntheticRetention bool, countSy
 					out.UsageUnits = &zero
 				} else if out.Accepted && !o.UsageMissing && !o.UsageInconsistent && !o.UsageExcessive {
 					if n, ok := cost(m, o.InputBytes, o.OutputBytes); ok {
+						// Preserve the observed value for retained settlement even if the
+						// coordination write fails. The response must still fail closed.
+						out.UsageUnits = &n
 						if n > reserved {
 							hold, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Timeout)
 							note := budget.NoteOverrun(hold, receipt.ID, n)
@@ -113,7 +116,6 @@ func Governance(cfg Config, budget evidence.PG, syntheticRetention bool, countSy
 								return out, errors.New("routing: budget overrun not durably recorded")
 							}
 						}
-						out.UsageUnits = &n
 					} else {
 						return out, fmt.Errorf("routing: usage exceeds numeric domain")
 					}
