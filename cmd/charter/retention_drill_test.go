@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 
 	"net/http"
 	"os"
@@ -313,6 +315,187 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 		}
 	}
 	dump("alternate-events.json", alternateBaseline)
+	stop()
+	connector, sourceFixture, err := c06RetainedSource(tenant, project, actor)
+	must(err)
+	member, err := st.CreateUser(ctx, tenant, "member-without-source", "synthetic unprivileged member")
+	must(err)
+	must(st.SeedMember(ctx, tenant, project, member))
+	c.OIDC = config.OIDC{Issuer: idp.Issuer, JWKSURL: idp.JWKSURL(), Audience: "charter-retention-drill", TenantID: "synthetic-a", RequiredScope: "charter.access", AllowInsecureLoopback: true}
+	var sourceLogs bytes.Buffer
+	oldLogs := log.Writer()
+	log.SetOutput(&sourceLogs)
+	t.Cleanup(func() { log.SetOutput(oldLogs) })
+	c06stop, err := startC06Retained(ctx, c, connector, client, addr)
+	must(err)
+	t.Cleanup(func() { _ = c06stop() })
+	const sourceKey = "c06-source-reconstruction-drill"
+	sourceBody := []byte(`{"input":"synthetic SharePoint test","sharepoint_sources":[{"document_id":"sp-original-doc","version":"1.0","offset":8,"length":21}]}`)
+	sourceResponse := postRequest(alice, sourceBody, sourceKey, 200)
+	sourceTurn := sourceResponse["turn_id"].(string)
+	_ = postRequest(idp.Token("member-without-source"), sourceBody, sourceKey, 404)
+	sourceBaseline, err := readonly.Load(ctx, tenant, sourceTurn)
+	must(err)
+	sourceObjects, err := readonly.LoadRetainedObjects(ctx, tenant, sourceTurn, sourceBaseline)
+	must(err)
+	must(checkC06Retained(sourceBaseline, sourceObjects, sourceResponse["output"].(string)))
+	beforeChange := postRequest(alice, sourceBody, sourceKey, 200)
+	if beforeChange["replayed"] != true || beforeChange["output"] != sourceResponse["output"] {
+		t.Fatal("C06 replay changed output")
+	}
+	// C06 correction regressions against the actual retained serving
+	// composition. Turn identity is discovered from the retained admission
+	// registry (S3), the authority the retained composition actually uses.
+	admissionTurns := func() (map[string]string, error) {
+		refs, err := storage.Versions(ctx, "charter/v1/"+sc.Deployment+"/"+tenant+"/admissions/")
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]string{}
+		for _, ref := range refs {
+			v, err := storage.Read(ctx, ref.Key, ref.VersionID)
+			if err != nil {
+				return nil, err
+			}
+			// Admissions are signed envelopes whose payload is the canonical
+			// retained-commit JSON; only the turn identity is needed here.
+			var envelope struct {
+				Payload string `json:"payload"`
+			}
+			var commit struct {
+				Turn string `json:"turn"`
+			}
+			if err := json.Unmarshal(v.Data, &envelope); err != nil {
+				return nil, err
+			}
+			if err := json.Unmarshal([]byte(envelope.Payload), &commit); err != nil {
+				return nil, err
+			}
+			if commit.Turn == "" {
+				return nil, fmt.Errorf("admission without turn identity: %s", ref.Key)
+			}
+			out[ref.Key] = commit.Turn
+		}
+		return out, nil
+	}
+	newTurn := func(before map[string]string) (string, error) {
+		after, err := admissionTurns()
+		if err != nil {
+			return "", err
+		}
+		found := ""
+		for k, turn := range after {
+			if _, ok := before[k]; ok {
+				continue
+			}
+			if found != "" {
+				return "", errors.New("ambiguous new admission")
+			}
+			found = turn
+		}
+		if found == "" {
+			return "", errors.New("no new admission was recorded")
+		}
+		return found, nil
+	}
+	// First: context eligibility precedes sealing. Revoke the delegated grant
+	// between the completed selection read and the first revalidation (the
+	// request's second connector read); nothing may be sealed into model
+	// context.
+	eligibilityBefore, err := admissionTurns()
+	must(err)
+	eligibilityBase := sourceFixture.ReadCalls.Load()
+	sourceFixture.BeforeRead = func() {
+		if sourceFixture.ReadCalls.Load() == eligibilityBase+2 {
+			sourceFixture.Grant("sp-original-doc", "synthetic-delegate", false)
+		}
+	}
+	dump("c06-eligibility-response.json", postRequest(alice, sourceBody, "c06-context-eligibility-drill", 404))
+	sourceFixture.BeforeRead = nil
+	sourceFixture.Grant("sp-original-doc", "synthetic-delegate", true)
+	eligibilityTurn, err := newTurn(eligibilityBefore)
+	must(err)
+	eligibilityEvents, err := readonly.Load(ctx, tenant, eligibilityTurn)
+	must(err)
+	for _, ev := range eligibilityEvents {
+		switch ev["type"] {
+		case "context_sealed":
+			t.Fatal("retained: source revoked before context eligibility was sealed")
+		case "disclosure_intent":
+			t.Fatal("retained: disclosure intent recorded for an ineligible source")
+		}
+	}
+	if last := eligibilityEvents[len(eligibilityEvents)-1]; last["type"] != evidence.TypeTurnInterrupted ||
+		last["payload"].(map[string]any)["reason"] != "context_eligibility_denied" ||
+		last["payload"].(map[string]any)["disclosure"] != "none" {
+		t.Fatalf("retained: eligibility refusal evidence: %v", last)
+	}
+	dump("c06-eligibility-events.json", eligibilityEvents)
+	// Second: route authorization is re-resolved after the final delegated
+	// source revalidation. Commit an allowlist change that disallows the
+	// pinned model during that revalidation (the request's fourth connector
+	// read), with source ACLs, version, bytes and membership still valid,
+	// and require zero invocations.
+	routeBefore, err := admissionTurns()
+	must(err)
+	routeBase := sourceFixture.ReadCalls.Load()
+	var routeHookErr error
+	sourceFixture.AfterRead = func() {
+		if routeHookErr == nil && sourceFixture.ReadCalls.Load() == routeBase+4 {
+			routeHookErr = (evidence.PG{DB: owner}).SetPolicy(ctx, evidence.BudgetPolicy{TenantID: tenant, ProjectID: project, LocalOnly: true, AllowedModels: []string{"det-b"}, ProjectCap: 10000000})
+		}
+	}
+	dump("c06-route-revocation-response.json", postRequest(alice, sourceBody, "c06-route-revocation-drill", 403))
+	sourceFixture.AfterRead = nil
+	must(routeHookErr)
+	must((evidence.PG{DB: owner}).SetPolicy(ctx, evidence.BudgetPolicy{TenantID: tenant, ProjectID: project, LocalOnly: true, AllowedModels: []string{"det-a", "det-b"}, ProjectCap: 10000000}))
+	if bytes.Count(sourceLogs.Bytes(), []byte("synthetic retention provider invoked")) != 1 {
+		t.Fatal("retained: eligibility refusal or route revocation dispatched the model")
+	}
+	routeTurn, err := newTurn(routeBefore)
+	must(err)
+	routeEvents, err := readonly.Load(ctx, tenant, routeTurn)
+	must(err)
+	for _, ev := range routeEvents {
+		switch ev["type"] {
+		case "provider_accepted", "output_recorded", "response_released":
+			t.Fatalf("retained: authorization or output followed the route revocation: %v", ev["type"])
+		}
+	}
+	if last := routeEvents[len(routeEvents)-1]; last["type"] != evidence.TypeTurnInterrupted ||
+		last["payload"].(map[string]any)["reason"] != "route_revoked_before_dispatch" {
+		t.Fatalf("retained: route revocation evidence: %v", last)
+	}
+	dump("c06-route-revocation-events.json", routeEvents)
+	sourceFixture.Grant("sp-original-doc", "synthetic-delegate", false)
+	_ = postRequest(alice, sourceBody, sourceKey, 404)
+	sourceFixture.Grant("sp-original-doc", "synthetic-delegate", true)
+	modifyRetainedSource(sourceFixture)
+	_ = postRequest(alice, sourceBody, sourceKey, 409)
+	deleteRetainedSource(sourceFixture)
+	_ = postRequest(alice, sourceBody, sourceKey, 404)
+	must(c06stop())
+	if bytes.Count(sourceLogs.Bytes(), []byte("synthetic retention provider invoked")) != 1 {
+		t.Fatal("C06 model invocation count mismatch")
+	}
+	sourceFixture.SetOutage(errors.New("synthetic connector offline"))
+	sourceLogs.Reset()
+	beforeStartup := sourceFixture.MetadataCalls.Load()
+	c06restart, err := startC06Retained(ctx, c, connector, client, addr)
+	must(err)
+	t.Cleanup(func() { _ = c06restart() })
+	if beforeStartup != sourceFixture.MetadataCalls.Load() {
+		t.Fatal("startup tried to regenerate source context")
+	}
+	dump("c06-offline-retry.json", postRequest(alice, sourceBody, sourceKey, 503))
+	must(c06restart())
+	if bytes.Contains(sourceLogs.Bytes(), []byte("synthetic retention provider invoked")) {
+		t.Fatal("C06 restart or denied replay redispatched")
+	}
+	log.SetOutput(oldLogs)
+	dump("c06-events.json", sourceBaseline)
+	dump("c06-objects.json", sourceObjects)
+	dump("c06-operations.json", map[string]any{"initial_model_invocations": 1, "restart_model_invocations": 0, "connector_operations_before_restart": beforeStartup, "connector_operations_at_end": sourceFixture.MetadataCalls.Load()})
 	refs, err := storage.Versions(ctx, "charter/v1/"+sc.Deployment+"/"+tenant+"/")
 	must(err)
 	var inventory []map[string]any
@@ -345,6 +528,16 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	}
 	dump("reconstructed-events.json", recovered)
 	dump("reconstructed-objects.json", after)
+	sourceRecovered, err := readonly.Load(ctx, tenant, sourceTurn)
+	must(err)
+	sourceAfter, err := readonly.LoadRetainedObjects(ctx, tenant, sourceTurn, sourceRecovered)
+	must(err)
+	must(checkC06Retained(sourceRecovered, sourceAfter, sourceResponse["output"].(string)))
+	if !reflect.DeepEqual(sourceBaseline, sourceRecovered) || !reflect.DeepEqual(sourceObjects, sourceAfter) {
+		t.Fatal("independent C06 recovery changed chain or bytes")
+	}
+	dump("c06-reconstructed-events.json", sourceRecovered)
+	dump("c06-reconstructed-objects.json", sourceAfter)
 	altRecovered, err := readonly.Load(ctx, tenant, alternateTurn)
 	must(err)
 	altAfter, err := readonly.LoadRetainedObjects(ctx, tenant, alternateTurn, altRecovered)

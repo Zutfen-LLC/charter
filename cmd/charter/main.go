@@ -22,6 +22,7 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/oidc"
 	"github.com/Zutfen-LLC/charter/internal/routing"
 	"github.com/Zutfen-LLC/charter/internal/server"
+	"github.com/Zutfen-LLC/charter/internal/sharepoint"
 	"github.com/Zutfen-LLC/charter/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -172,6 +173,17 @@ func openServing(ctx context.Context, cfg config.Config) (*Serving, error) {
 }
 
 func serve(ctx context.Context, cfg config.Config) error {
+	// No external SharePoint transport is enabled in the standard executable.
+	return serveWithSharePoint(ctx, cfg, nil)
+}
+
+// serveWithSharePoint is the trusted composition seam; an Auth client cannot
+// choose, instantiate or configure it. Synthetic retained serving refuses any
+// connector other than the in-memory deterministic implementation.
+func serveWithSharePoint(ctx context.Context, cfg config.Config, connector *sharepoint.Connector) error {
+	if connector != nil && cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 && !connector.Synthetic() {
+		return errors.New("retained synthetic profile does not admit external source transports")
+	}
 	if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
 		if err := validateSyntheticOIDC(cfg.OIDC); err != nil {
 			return err
@@ -241,7 +253,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 		if err != nil {
 			return err
 		}
-		auth := &server.Auth{Verifier: v, Store: &store.Store{DB: deps.Workspace}, Evidence: rec, Budget: ledger.Summary}
+		auth := &server.Auth{Verifier: v, Store: &store.Store{DB: deps.Workspace}, Evidence: rec, Budget: ledger.Summary, SharePoint: connector}
 		opts = append(opts, server.WithAuth(auth))
 		log.Printf("OIDC enabled: issuer=%s tenant=%s", o.Issuer, o.TenantID)
 		if o.AllowInsecureLoopback {
