@@ -10,6 +10,7 @@ import (
 
 	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/oidc"
+	"github.com/Zutfen-LLC/charter/internal/sharepoint"
 	"github.com/Zutfen-LLC/charter/internal/store"
 )
 
@@ -43,6 +44,8 @@ type Auth struct {
 	// Model performs the outbound call with the exact sealed request bytes. If
 	// nil, Work is used (the legacy stub, which ignores the request bytes).
 	Model evidence.ModelFunc
+	// SharePoint is installed by trusted server composition only; nil disables it.
+	SharePoint *sharepoint.Connector
 
 	routes []string // every registered pattern, for tests
 }

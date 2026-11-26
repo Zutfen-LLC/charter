@@ -59,9 +59,10 @@ type Decision struct {
 // Source is one retrieved excerpt: the exact bytes placed in the context and
 // the version they came from (ADR versioning rule 7).
 type Source struct {
-	ID      string
-	Version int
-	Bytes   []byte
+	ID       string
+	Version  int
+	Bytes    []byte
+	External *ExternalSource
 }
 
 // Request is everything the recorder needs to admit one turn.
@@ -72,6 +73,8 @@ type Request struct {
 	ModelID                                    string // stable registry key, not a provider model override
 	Input                                      []byte
 	Sources                                    []Source
+	// AuthorizeSources freshly verifies every external binding for the trusted serving principal.
+	AuthorizeSources func(context.Context) error
 }
 
 // ModelOutcome is what an adapter reports. Accepted means the provider took
@@ -198,7 +201,13 @@ func ref(b []byte) map[string]any { return map[string]any{"sha256": SHA256(b), "
 func RenderRequest(d Destination, input []byte, sources []Source) ([]byte, error) {
 	ex := make([]any, 0, len(sources))
 	for _, s := range sources {
-		ex = append(ex, map[string]any{"source_id": s.ID, "version": s.Version, "text": string(s.Bytes)})
+		src := map[string]any{"source_id": s.ID, "text": string(s.Bytes)}
+		if s.External == nil {
+			src["version"] = s.Version
+		} else {
+			src["provider_version"] = s.External.ProviderVersion
+		}
+		ex = append(ex, src)
 	}
 	return Canonical(map[string]any{"model": d.ModelID, "input": string(input), "excerpts": ex})
 }
@@ -327,6 +336,15 @@ func (rc *Recorder) Process(ctx context.Context, req Request, call ModelFunc, ga
 	if err := rc.Fence.Check(ctx); err != nil {
 		return Result{}, err
 	}
+	if req.external() {
+		if req.AuthorizeSources == nil || rc.Governance == nil || rc.Accounting == nil {
+			return Result{}, fmt.Errorf("%w: external context requires source authorization and governed accounting", ErrFailClosed)
+		}
+		membership := gate
+		gate = func(ctx context.Context) error {
+			return req.checkAccess(ctx, membership)
+		}
+	}
 	t, replay, err := rc.admit(ctx, req)
 	if err != nil {
 		return Result{}, err
@@ -358,6 +376,13 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 			"evidence_profile": profile, "custodian_id": req.CustodianID,
 			"objects": []any{ref(req.Input)}, "request_fingerprint": fp},
 		"prev_hash": nil,
+	}
+	if req.external() {
+		p := payload(first)
+		p["source_binding_version"] = 1
+		if req.ModelID != "" {
+			p["model_registry_id"] = req.ModelID
+		}
 	}
 	if err := Seal(first); err != nil {
 		return nil, nil, err
@@ -511,6 +536,7 @@ func (rc *Recorder) finalGate(ctx context.Context, gate func(context.Context) er
 }
 
 func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFunc, gate func(context.Context) error) (Result, error) {
+	external := req.external()
 	reconciled := false
 	defer func() {
 		if rc.Accounting != nil && !reconciled {
@@ -606,7 +632,7 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 			return fail("evidence_write_failed", err)
 		}
 		objects = append(objects, ref(s.Bytes))
-		sources = append(sources, map[string]any{"source_id": s.ID, "version": s.Version, "sha256": SHA256(s.Bytes)})
+		sources = append(sources, s.descriptor(external, true))
 	}
 	if err := rc.put(ctx, t.tenant, sent); err != nil {
 		return fail("evidence_write_failed", err)
@@ -618,12 +644,36 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	}
 	// R1: the intent, naming the exact request bytes and the actual destination,
 	// must be durable and acknowledged before the model call below.
-	if err := t.emitAcked(ctx, "disclosure_intent", map[string]any{"provider": d.Destination.Provider,
-		"endpoint_id": d.Destination.EndpointID, "model_id": d.Destination.ModelID, "request": ref(sent)}); err != nil {
+	intent := map[string]any{"provider": d.Destination.Provider,
+		"endpoint_id": d.Destination.EndpointID, "model_id": d.Destination.ModelID, "request": ref(sent)}
+	var provenance, dispatchAuthorization string
+	if external {
+		canonical, err := Canonical(sources)
+		if err != nil {
+			return fail("source_binding_failed", err)
+		}
+		provenance = SHA256(canonical)
+		if err := gate(ctx); err != nil {
+			rc.abort(ctx, t, "dispatch_denied")
+			return Result{}, err
+		}
+		intent["source_authorized_at"] = rc.stamp()
+	}
+	if err := t.emitAcked(ctx, "disclosure_intent", intent); err != nil {
 		return fail("evidence_write_failed", err)
 	}
 	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
 		return fail("retained_readback_failed", err)
+	}
+	if external {
+		if _, retained := rc.Backend.(retainedTurnBackend); !retained {
+			wc, done := rc.wctx(ctx)
+			objects, err := loadObjects(wc, rc.Backend, t.tenant, t.events)
+			done()
+			if err != nil || len(verifyChain(t.events, objects, true, true)) != 0 {
+				return fail("source_binding_failed", errors.New("source evidence readback failed"))
+			}
+		}
 	}
 	if rc.Governance != nil {
 		if err := plan.Arm(ctx, t.id); err != nil {
@@ -638,6 +688,9 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		if err := gate(ctx); err != nil {
 			rc.abort(ctx, t, "dispatch_denied")
 			return Result{}, err
+		}
+		if external {
+			dispatchAuthorization = rc.stamp()
 		}
 	}
 
@@ -660,7 +713,11 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	// adapter can return buffered bytes after an ambiguous failure; preserve
 	// them as partial, but do not invent an acceptance or authorize release.
 	if out.Accepted {
-		if _, _, err := t.emit(ctx, "provider_accepted", dest); err != nil {
+		accepted := map[string]any{"provider": d.Destination.Provider, "endpoint_id": d.Destination.EndpointID, "model_id": d.Destination.ModelID}
+		if external {
+			accepted["source_authorized_at"] = dispatchAuthorization
+		}
+		if _, _, err := t.emit(ctx, "provider_accepted", accepted); err != nil {
 			return fail("evidence_write_failed", err)
 		}
 	}
@@ -670,6 +727,9 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 			return fail("evidence_write_failed", err)
 		}
 		p := map[string]any{"complete": complete, "objects": []any{ref(out.Output)}}
+		if external {
+			p["source_provenance_sha256"] = provenance
+		}
 		if rc.Governance != nil && out.Accepted && out.UsageUnits != nil && safeBudgetAmount(*out.UsageUnits) {
 			p["provider_cost_units"] = *out.UsageUnits
 		}
@@ -706,7 +766,12 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 			return Result{}, err
 		}
 	}
-	if _, _, err := t.emit(ctx, "response_released", map[string]any{}); err != nil {
+	release := map[string]any{}
+	if external {
+		release["source_provenance_sha256"] = provenance
+		release["source_authorized_at"] = rc.stamp()
+	}
+	if _, _, err := t.emit(ctx, "response_released", release); err != nil {
 		rc.abort(ctx, t, "evidence_write_failed")
 		return Result{}, fmt.Errorf("%w: release record: %v", ErrFailClosed, err)
 	}

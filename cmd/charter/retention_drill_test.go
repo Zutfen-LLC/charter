@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 
 	"net/http"
 	"os"
@@ -313,6 +315,63 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 		}
 	}
 	dump("alternate-events.json", alternateBaseline)
+	stop()
+	connector, sourceFixture, err := c06RetainedSource(tenant, project, actor)
+	must(err)
+	member, err := st.CreateUser(ctx, tenant, "member-without-source", "synthetic unprivileged member")
+	must(err)
+	must(st.SeedMember(ctx, tenant, project, member))
+	c.OIDC = config.OIDC{Issuer: idp.Issuer, JWKSURL: idp.JWKSURL(), Audience: "charter-retention-drill", TenantID: "synthetic-a", RequiredScope: "charter.access", AllowInsecureLoopback: true}
+	var sourceLogs bytes.Buffer
+	oldLogs := log.Writer()
+	log.SetOutput(&sourceLogs)
+	t.Cleanup(func() { log.SetOutput(oldLogs) })
+	c06stop, err := startC06Retained(ctx, c, connector, client, addr)
+	must(err)
+	t.Cleanup(func() { _ = c06stop() })
+	const sourceKey = "c06-source-reconstruction-drill"
+	sourceBody := []byte(`{"input":"synthetic SharePoint test","sharepoint_sources":[{"document_id":"sp-original-doc","version":"1.0","offset":8,"length":21}]}`)
+	sourceResponse := postRequest(alice, sourceBody, sourceKey, 200)
+	sourceTurn := sourceResponse["turn_id"].(string)
+	_ = postRequest(idp.Token("member-without-source"), sourceBody, sourceKey, 404)
+	sourceBaseline, err := readonly.Load(ctx, tenant, sourceTurn)
+	must(err)
+	sourceObjects, err := readonly.LoadRetainedObjects(ctx, tenant, sourceTurn, sourceBaseline)
+	must(err)
+	must(checkC06Retained(sourceBaseline, sourceObjects, sourceResponse["output"].(string)))
+	beforeChange := postRequest(alice, sourceBody, sourceKey, 200)
+	if beforeChange["replayed"] != true || beforeChange["output"] != sourceResponse["output"] {
+		t.Fatal("C06 replay changed output")
+	}
+	sourceFixture.Grant("sp-original-doc", "synthetic-delegate", false)
+	_ = postRequest(alice, sourceBody, sourceKey, 404)
+	sourceFixture.Grant("sp-original-doc", "synthetic-delegate", true)
+	modifyRetainedSource(sourceFixture)
+	_ = postRequest(alice, sourceBody, sourceKey, 409)
+	deleteRetainedSource(sourceFixture)
+	_ = postRequest(alice, sourceBody, sourceKey, 404)
+	must(c06stop())
+	if bytes.Count(sourceLogs.Bytes(), []byte("synthetic retention provider invoked")) != 1 {
+		t.Fatal("C06 model invocation count mismatch")
+	}
+	sourceFixture.SetOutage(errors.New("synthetic connector offline"))
+	sourceLogs.Reset()
+	beforeStartup := sourceFixture.MetadataCalls.Load()
+	c06restart, err := startC06Retained(ctx, c, connector, client, addr)
+	must(err)
+	t.Cleanup(func() { _ = c06restart() })
+	if beforeStartup != sourceFixture.MetadataCalls.Load() {
+		t.Fatal("startup tried to regenerate source context")
+	}
+	dump("c06-offline-retry.json", postRequest(alice, sourceBody, sourceKey, 503))
+	must(c06restart())
+	if bytes.Contains(sourceLogs.Bytes(), []byte("synthetic retention provider invoked")) {
+		t.Fatal("C06 restart or denied replay redispatched")
+	}
+	log.SetOutput(oldLogs)
+	dump("c06-events.json", sourceBaseline)
+	dump("c06-objects.json", sourceObjects)
+	dump("c06-operations.json", map[string]any{"initial_model_invocations": 1, "restart_model_invocations": 0, "connector_operations_before_restart": beforeStartup, "connector_operations_at_end": sourceFixture.MetadataCalls.Load()})
 	refs, err := storage.Versions(ctx, "charter/v1/"+sc.Deployment+"/"+tenant+"/")
 	must(err)
 	var inventory []map[string]any
@@ -345,6 +404,16 @@ func TestRetentionReconstructionDrill(t *testing.T) {
 	}
 	dump("reconstructed-events.json", recovered)
 	dump("reconstructed-objects.json", after)
+	sourceRecovered, err := readonly.Load(ctx, tenant, sourceTurn)
+	must(err)
+	sourceAfter, err := readonly.LoadRetainedObjects(ctx, tenant, sourceTurn, sourceRecovered)
+	must(err)
+	must(checkC06Retained(sourceRecovered, sourceAfter, sourceResponse["output"].(string)))
+	if !reflect.DeepEqual(sourceBaseline, sourceRecovered) || !reflect.DeepEqual(sourceObjects, sourceAfter) {
+		t.Fatal("independent C06 recovery changed chain or bytes")
+	}
+	dump("c06-reconstructed-events.json", sourceRecovered)
+	dump("c06-reconstructed-objects.json", sourceAfter)
 	altRecovered, err := readonly.Load(ctx, tenant, alternateTurn)
 	must(err)
 	altAfter, err := readonly.LoadRetainedObjects(ctx, tenant, alternateTurn, altRecovered)

@@ -533,6 +533,162 @@ def verify_turn(events, objects=None):
                 add(-1, "OBJECT", f"changed object {sha} (digest mismatch)")
             elif len(data) != n:
                 add(-1, "LENGTH", f"object {sha} is {len(data)} bytes but declared {n}")
+    errs.extend(_verify_c06(events, objects))
+    return errs
+
+
+def _verify_c06(events, objects):
+    """Strict verifier for the versioned permission-bound excerpt contract."""
+    errs = []
+    if not events or not isinstance(events[0], dict):
+        return errs
+    received = _pl(events[0])
+    if "source_binding_version" not in received:
+        # A provenance marker is never valid outside a C06-bound turn.
+        for e in events:
+            if not isinstance(e, dict):
+                continue
+            p = _pl(e)
+            if {"source_provenance_sha256", "source_authorized_at", "model_registry_id"} & p.keys():
+                return ["[C06] orphan source provenance marker"]
+            if e.get("type") == "context_sealed" and isinstance(p.get("sources"), list) and any(
+                    isinstance(s, dict) and "external" in s for s in p["sources"]):
+                return ["[C06] orphan external source marker"]
+        return errs
+    def add(i, message):
+        errs.append((f"seq {i}: " if i >= 0 else "") + "[C06] " + message)
+    if not _int(received.get("source_binding_version")) or received["source_binding_version"] != 1:
+        add(0, "unsupported source binding version")
+    if "model_registry_id" in received and (not isinstance(received["model_registry_id"], str) or
+                                               not ID_RE.fullmatch(received["model_registry_id"])):
+        add(0, "model_registry_id must be an explicit model identifier")
+    sealed_i = next((i for i, e in enumerate(events) if isinstance(e, dict) and e.get("type") == "context_sealed"), -1)
+    if sealed_i < 0:
+        # A partial prefix may not yet have a sealed snapshot.
+        return errs
+    sources = _pl(events[sealed_i]).get("sources")
+    if not isinstance(sources, list):
+        add(sealed_i, "sealed sources must be an ordered list")
+        return errs
+    if received.get("evidence_profile") not in ("charter-postgres-v1", "charter-s3-compliance-v1"):
+        add(0, "source binding needs an explicit supported evidence profile")
+    sealed = _pl(events[sealed_i])
+    lengths = {r["sha256"]: r["bytes"] for r in sealed.get("objects", []) if _ref(r)} if isinstance(sealed.get("objects"), list) else {}
+    external_seen = False
+    bound_scope = None
+    excerpts = []
+    def text(sha):
+        if objects is None or not isinstance(sha, str):
+            return ""
+        try:
+            return objects.get(sha, b"").decode("utf-8")
+        except (UnicodeError, AttributeError):
+            add(sealed_i, "sealed input or excerpt is not valid UTF-8")
+            return ""
+    for source in sources:
+        if not isinstance(source, dict):
+            add(sealed_i, "source entry must be an object"); continue
+        sha = source.get("sha256")
+        length = source.get("bytes")
+        if not isinstance(sha, str) or not _int(length) or length < 0 or lengths.get(sha) != length:
+            add(sealed_i, "C06 source byte length does not match sealed object")
+        expected = {"sha256", "bytes", "version", "source_id"}
+        if set(source) != expected | ({"external"} if "external" in source else set()):
+            add(sealed_i, "source descriptor has missing or unknown fields")
+        ext = source.get("external")
+        if "external" not in source:
+            excerpts.append({"source_id": source.get("source_id"), "version": source.get("version"), "text": text(sha)})
+            continue
+        external_seen = True
+        required = {"connector_id", "provider", "external_tenant_id", "site_id", "library_id", "document_id",
+                    "provider_version", "etag", "document_sha256", "delegated_subject", "custodian_id", "offset", "length",
+                    "extraction", "decision", "observed_at"}
+        if not isinstance(ext, dict) or set(ext) != required:
+            add(sealed_i, "external source descriptor has missing or unknown fields"); continue
+        if (ext["provider"] != "sharepoint" or ext["extraction"] != "utf8-byte-range-v1" or
+                ext["decision"] != "allow" or not _int(source.get("version")) or source["version"] != 0 or
+                source.get("source_id") != ext["document_id"]):
+            add(sealed_i, "external source identity or extraction binding is invalid")
+        for key in ("connector_id", "external_tenant_id", "site_id", "library_id", "document_id",
+                    "provider_version", "etag", "delegated_subject", "custodian_id"):
+            if not isinstance(ext.get(key), str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,256}", ext[key]):
+                add(sealed_i, f"external source identifier is invalid: {key}")
+        offset, size = ext["offset"], ext["length"]
+        if (not _int(offset) or not _int(size) or offset < 0 or not 0 < size <= 64 << 10 or
+                offset > (8 << 20) - size or size != length or
+                not isinstance(ext["document_sha256"], str) or not SHA_RE.fullmatch(ext["document_sha256"])):
+            add(sealed_i, "external byte range or source digest invalid")
+        if ext["custodian_id"] != received.get("custodian_id"):
+            add(sealed_i, "source custodian differs from admitted identity")
+        scope = tuple(ext[k] for k in ("connector_id", "external_tenant_id", "site_id", "library_id", "delegated_subject", "custodian_id"))
+        if bound_scope is not None and scope != bound_scope:
+            add(sealed_i, "inconsistent external source scope")
+        bound_scope = scope
+        excerpts.append({"source_id": source.get("source_id"), "provider_version": ext["provider_version"], "text": text(sha)})
+        observed = ext.get("observed_at")
+        if not isinstance(observed, str) or not TS_RE.fullmatch(observed):
+            add(sealed_i, "external observed_at must be UTC milliseconds")
+    if not external_seen:
+        add(sealed_i, "source binding version 1 requires an external source")
+    fingerprint_sources = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        stable = dict(source)
+        if isinstance(source.get("external"), dict):
+            stable_external = {k: v for k, v in source["external"].items() if k not in ("observed_at", "decision")}
+            stable["external"] = stable_external
+        fingerprint_sources.append(stable)
+    fingerprint_identity = {
+        "v": 3, "tenant_id": events[0].get("tenant_id"), "project_id": events[0].get("project_id"),
+        "matter_id": events[0].get("matter_id"), "custodian_id": received.get("custodian_id"),
+        "input": received.get("input"), "sources": fingerprint_sources,
+        "model_id": received.get("model_registry_id", ""),
+    }
+    try:
+        if received.get("request_fingerprint") != sha256_bytes(canonical(fingerprint_identity)):
+            add(0, "stable v3 request fingerprint mismatch")
+    except ValueError:
+        add(0, "stable v3 request fingerprint is not canonicalizable")
+    if objects is not None:
+        policy = next((_pl(e) for e in events if isinstance(e, dict) and e.get("type") == "policy_decision"), {})
+        dest, inp = policy.get("destination"), received.get("input")
+        model = dest.get("model_id") if isinstance(dest, dict) else None
+        request_sha = sealed.get("request_sha256")
+        try:
+            render = canonical({"model": model, "input": text(inp.get("sha256") if isinstance(inp, dict) else None), "excerpts": excerpts})
+            if not model or not isinstance(request_sha, str) or render != objects.get(request_sha):
+                add(sealed_i, "exact rendered request differs from sealed input or excerpts")
+        except ValueError:
+            add(sealed_i, "exact rendered request is not canonicalizable")
+    try:
+        provenance = sha256_bytes(canonical(sources))
+    except ValueError:
+        add(sealed_i, "sealed sources are not canonicalizable")
+        return errs
+    sealed_at = events[sealed_i].get("recorded_at", "")
+    latest_auth = sealed_at
+    for i, e in enumerate(events):
+        if not isinstance(e, dict):
+            continue
+        typ, p = e.get("type"), _pl(e)
+        if typ in ("output_recorded", "response_released") and p.get("source_provenance_sha256") != provenance:
+            add(i, "output and release must bind the complete sealed source provenance")
+        if typ == "usage_reserved":
+            if p.get("accounting_version") != "charter-budget-v1" or not isinstance(p.get("registry_model"), str) or not ID_RE.fullmatch(p["registry_model"]):
+                add(i, "C06 usage reservation requires C05 governed accounting")
+        if typ in ("disclosure_intent", "provider_accepted", "response_released"):
+            ts = p.get("source_authorized_at")
+            if not isinstance(ts, str) or not TS_RE.fullmatch(ts):
+                add(i, f"{typ}.source_authorized_at must be UTC milliseconds")
+            elif not isinstance(latest_auth, str) or not isinstance(e.get("recorded_at"), str) or ts > e["recorded_at"] or ts < latest_auth:
+                add(i, f"{typ}.source_authorized_at is out of order")
+            else:
+                latest_auth = ts
+    for source in sources:
+        ext = source.get("external") if isinstance(source, dict) else None
+        if isinstance(ext, dict) and isinstance(ext.get("observed_at"), str) and ext["observed_at"] > sealed_at:
+            add(sealed_i, "source observation cannot follow context_sealed")
     return errs
 
 

@@ -9,6 +9,7 @@ import (
 	"regexp"
 
 	"github.com/Zutfen-LLC/charter/internal/evidence"
+	"github.com/Zutfen-LLC/charter/internal/sharepoint"
 	"github.com/Zutfen-LLC/charter/internal/store"
 )
 
@@ -39,9 +40,10 @@ type gateError struct {
 func (e *gateError) Error() string { return e.msg }
 
 type callBody struct {
-	Input       string   `json:"input"`
-	ArtifactIDs []string `json:"artifact_ids"`
-	ModelID     string   `json:"model_id"`
+	Input             string                 `json:"input"`
+	ArtifactIDs       []string               `json:"artifact_ids"`
+	ModelID           string                 `json:"model_id"`
+	SharePointSources []sharepoint.Selection `json:"sharepoint_sources"`
 }
 
 // modelCall runs one governed turn. Evidence (ADR 0001 R1-R4) is written by
@@ -89,6 +91,8 @@ func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Princip
 		return
 	}
 	pidC, _ := store.CanonicalID(pid) // ProjectMatter has just proven it is a valid, authorized id
+	ctx, cancel := context.WithTimeout(r.Context(), a.WorkTimeout)
+	defer cancel()
 	var sources []evidence.Source
 	seen := map[string]bool{}
 	for _, raw := range body.ArtifactIDs {
@@ -101,7 +105,7 @@ func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Princip
 			continue
 		}
 		seen[id] = true
-		art, err := a.Store.GetArtifact(r.Context(), p, id)
+		art, err := a.Store.GetArtifact(ctx, p, id)
 		if err != nil || art.ProjectID != pidC { // another project's artifact is "not found"
 			deny(w, http.StatusNotFound, "not found")
 			return
@@ -111,8 +115,19 @@ func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Princip
 	req := evidence.Request{TenantID: p.TenantID, ProjectID: pidC, MatterID: matter, CustodianID: p.UserID,
 		IdempotencyKey: key, RequestID: evidence.NewUUID(), ModelID: body.ModelID, Input: []byte(body.Input), Sources: sources}
 
-	ctx, cancel := context.WithTimeout(r.Context(), a.WorkTimeout)
-	defer cancel()
+	if len(body.SharePointSources) != 0 {
+		if a.SharePoint == nil || a.Evidence.Governance == nil || a.Evidence.Accounting == nil {
+			deny(w, http.StatusServiceUnavailable, "unavailable")
+			return
+		}
+		external, authorize, err := a.externalSources(ctx, p, pidC, body.SharePointSources)
+		if err != nil {
+			a.callError(w, err)
+			return
+		}
+		req.Sources = append(req.Sources, external...)
+		req.AuthorizeSources = authorize
+	}
 	model := a.Model
 	if model == nil {
 		model = func(ctx context.Context, _ []byte) (evidence.ModelOutcome, error) {
@@ -141,6 +156,18 @@ func (a *Auth) modelCall(w http.ResponseWriter, r *http.Request, p store.Princip
 		a.callError(w, err)
 		return
 	}
+	// No evidence or accounting mutation follows this last-mile check.
+	if req.AuthorizeSources != nil {
+		if err := req.AuthorizeSources(ctx); err != nil {
+			a.callError(w, err)
+			return
+		}
+		if err := gate(ctx); err != nil {
+			a.callError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	// The recorder has returned; check at the actual HTTP delivery boundary too.
 	if err := a.Evidence.Fence.Check(ctx); err != nil {
 		a.callError(w, err)
@@ -166,6 +193,10 @@ func (a *Auth) readCallBody(w http.ResponseWriter, r *http.Request) (callBody, b
 	}
 	if len(b.ArtifactIDs) > maxArtifacts {
 		deny(w, http.StatusBadRequest, "too many artifact_ids")
+		return b, false
+	}
+	if len(b.SharePointSources) > 4 || len(b.ArtifactIDs)+len(b.SharePointSources) > maxArtifacts {
+		deny(w, http.StatusBadRequest, "too many sources")
 		return b, false
 	}
 	return b, true

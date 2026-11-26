@@ -486,6 +486,7 @@ func verifyChain(events []Event, objects map[string][]byte, full, allowUnfinishe
 			}
 		}
 	}
+	errs = append(errs, verifyC06(events, objects, full)...)
 	return errs
 }
 

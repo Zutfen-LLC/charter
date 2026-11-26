@@ -9,14 +9,17 @@ package evidence
 func Fingerprint(r Request) (string, error) {
 	srcs := make([]any, 0, len(r.Sources))
 	for _, s := range r.Sources {
-		srcs = append(srcs, map[string]any{"source_id": s.ID, "version": s.Version,
-			"sha256": SHA256(s.Bytes), "bytes": len(s.Bytes)})
+		srcs = append(srcs, s.descriptor(true, false))
 	}
 	identity := map[string]any{
 		"v": 1, "tenant_id": r.TenantID, "project_id": r.ProjectID, "matter_id": r.MatterID,
 		"custodian_id": r.CustodianID, "input": ref(r.Input), "sources": srcs}
 	if r.ModelID != "" {
 		identity["v"] = 2
+		identity["model_id"] = r.ModelID
+	}
+	if r.external() {
+		identity["v"] = 3
 		identity["model_id"] = r.ModelID
 	}
 	c, err := Canonical(identity)
