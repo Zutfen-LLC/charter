@@ -47,6 +47,32 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// slotSeqOf returns the numeric event-slot sequence of an
+// <prefix>/events/<turn>/<seq> key, or "" when the key is not an event slot.
+func slotSeqOf(key string) string {
+	i := strings.LastIndex(key, "/")
+	if i < 0 || i == len(key)-1 {
+		return ""
+	}
+	tail := key[i+1:]
+	if tail == "" || !isNumeric(tail) {
+		return ""
+	}
+	return tail
+}
+
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func TestC07ReviewCorrectionDrill(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
@@ -373,9 +399,15 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	// Delete a mid-chain event slot: the turn stays enumerable from its
 	// admission, but its exact version set is no longer verifiable (an
 	// incomplete chain fails closed instead of truncating silently).
+	// The event-slot keys are <prefix>/events/<turn>/<seq> (a bare numeric
+	// sequence); the data events live under /data/events/ and do not break
+	// the walk when deleted.
 	slot2 := ""
 	for _, r := range refs2 {
-		if strings.Contains(r.Key, "/events/"+r2Turn+"/") {
+		if !strings.Contains(r.Key, "/events/"+r2Turn+"/") || strings.Contains(r.Key, "/data/") {
+			continue
+		}
+		if tail := slotSeqOf(r.Key); tail != "" {
 			slot2 = r.Key + "|" + r.Version
 			break
 		}
