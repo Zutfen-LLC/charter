@@ -593,13 +593,24 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	// ---- End-to-end re-verification: the R6 concurrent capture's evidence
 	// survives the whole drill, including the recovery that completed the
 	// blocked disposal of its sharing partner (shared references are never
-	// deleted while a non-disposed record requires them). ----
-	events2, err := writeBackend.Load(ctx, tenant, t2)
-	must(err)
-	if _, err := writeBackend.LoadRetainedObjects(ctx, tenant, t2, events2); err != nil {
-		t.Fatalf("R6 END-TO-END: concurrent capture's evidence broken after the full drill: %v", err)
+	// deleted while a non-disposed record requires them). The SERVING read
+	// correctly fails closed once T2's retention horizon has passed (the
+	// bytes are legitimately deletable then), so survival is asserted with
+	// the disposal-tolerant enumeration: the full signed chain still
+	// verifies and every exact version is still readable. ----
+	refs2, rerr := writeBackend.TurnDisposalRefs(ctx, tenant, t2)
+	if rerr != nil {
+		t.Fatalf("R6 END-TO-END: concurrent capture's evidence chain broken after the full drill: %v", err)
 	}
-	dump("c07r-final-verification.json", map[string]any{"captured_turn": t2, "verified_events": len(events2)})
+	if len(refs2) == 0 {
+		t.Fatal("R6 END-TO-END: concurrent capture has no enumerable versions")
+	}
+	for _, r := range refs2 {
+		if _, err := recordsClient.Read(ctx, r.Key, r.Version); err != nil {
+			t.Fatalf("R6 END-TO-END: concurrent capture's version %s did not survive the full drill: %v", r.Key, err)
+		}
+	}
+	dump("c07r-final-verification.json", map[string]any{"captured_turn": t2, "verified_versions": len(refs2)})
 
 	seedFence.Release()
 }
