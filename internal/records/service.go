@@ -21,6 +21,13 @@ type RecordsStorage interface {
 	LegalHold(ctx context.Context, key, version string) (string, error)
 	SetLegalHold(ctx context.Context, key, version string, on bool) error
 	DeleteVersion(ctx context.Context, key, version string) error
+	// Head probes ONE exact version's physical presence. It is the ONLY
+	// authoritative presence probe: the legal-hold lookup is unusable for
+	// presence because the retained storage 404s it for versions that
+	// carry no object-lock metadata (indistinguishable there from a
+	// missing version). nil = present, ErrObjectAbsent = gone, any other
+	// error = unknown (fail closed).
+	Head(ctx context.Context, key, version string) error
 }
 
 // Hooks supports deterministic concurrency tests: every named point is
@@ -599,8 +606,8 @@ func (s *Service) coverPlanTurn(ctx context.Context, h *Hold, it Item, report *R
 		case OutcomeDeleted, OutcomeAbsent:
 			continue // already dispositioned gone
 		}
-		if _, perr := s.Storage.LegalHold(ctx, row.Key, row.Version); perr != nil {
-			if errors.Is(perr, s3transport.ErrObjectAbsent) {
+		if herr := s.Storage.Head(ctx, row.Key, row.Version); herr != nil {
+			if errors.Is(herr, s3transport.ErrObjectAbsent) {
 				// Storage-verified partial loss: the plan keeps its durable
 				// version identity and the loss stays attributable.
 				missing++
@@ -612,7 +619,7 @@ func (s *Service) coverPlanTurn(ctx context.Context, h *Hold, it Item, report *R
 			// The presence probe itself failed: coverage is unknown for
 			// this record; the establishment fails (retryable) rather than
 			// acknowledging silently incomplete coverage.
-			return fmt.Errorf("records: plan presence probe %s: %w", row.Key, perr)
+			return fmt.Errorf("records: plan presence probe %s: %w", row.Key, herr)
 		}
 		protect = append(protect, VersionRef{Key: row.Key, Version: row.Version})
 	}

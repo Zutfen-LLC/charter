@@ -287,6 +287,32 @@ func clean(err error) error {
 
 // LegalHold reports the version's legal-hold state: "ON", "OFF", or "" when
 // no legal hold was ever recorded for the version.
+// Head probes ONE exact object version's physical presence. Presence must
+// never be inferred from the legal-hold lookup: the retained storage 404s
+// GetObjectLegalHold for versions that simply carry no object-lock
+// metadata (observed against the pinned real-storage composition), which
+// is indistinguishable there from a missing version. HeadObject by
+// version id is the authoritative presence probe: nil means present,
+// ErrObjectAbsent means the version is gone, anything else is an unknown
+// outcome the caller must fail closed on.
+func (c *Client) Head(ctx context.Context, key, versionID string) error {
+	if key == "" || !validVersion(versionID) {
+		return &Error{"invalid request"}
+	}
+	_, e := c.api.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key), VersionId: aws.String(versionID)})
+	if e != nil {
+		if code, ok := apiErrorCode(e); ok && (code == "NoSuchVersion" || code == "NoSuchKey" || code == "NotFound") {
+			return ErrObjectAbsent
+		}
+		var re *smithyhttp.ResponseError
+		if errors.As(e, &re) && re.HTTPStatusCode() == 404 {
+			return ErrObjectAbsent
+		}
+		return clean(e)
+	}
+	return nil
+}
+
 func (c *Client) LegalHold(ctx context.Context, key, versionID string) (string, error) {
 	if key == "" || !validVersion(versionID) {
 		return "", &Error{"invalid request"}

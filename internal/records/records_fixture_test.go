@@ -234,6 +234,25 @@ func (f *fakeStorage) LegalHold(ctx context.Context, key, version string) (strin
 	return f.legalHold[vkey(key, version)], nil
 }
 
+// Head mirrors the retained transport's presence probe: ErrObjectAbsent
+// for deleted versions, the injected transient failure, nil otherwise.
+// It deliberately does NOT consult the legal-hold map: presence and hold
+// state are different questions (the real storage 404s legal-hold lookups
+// for versions without lock metadata).
+func (f *fakeStorage) Head(ctx context.Context, key, version string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failRead != nil {
+		if once, _ := f.failOnce.LoadOrStore("head", true); once.(bool) && f.failRead != errClearOnce {
+			return f.failRead
+		}
+	}
+	if f.deleted[vkey(key, version)] {
+		return s3transport.ErrObjectAbsent
+	}
+	return nil
+}
+
 func (f *fakeStorage) SetLegalHold(ctx context.Context, key, version string, on bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

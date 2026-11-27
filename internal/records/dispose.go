@@ -115,9 +115,12 @@ func (s *Service) FinishPurge(ctx context.Context, actor *store.Principal, turnI
 				// Physical absence is verified by ACTUAL STORAGE READBACK,
 				// never by the delete response alone (C07 round-2 finding
 				// 4): a lying or lossy acknowledgment cannot become a
-				// disposal claim.
-				if _, lerr := s.Storage.LegalHold(ctx, v.Key, v.Version); lerr != nil {
-					if errors.Is(lerr, s3transport.ErrObjectAbsent) {
+				// disposal claim. Presence is probed by HEAD (the
+				// legal-hold lookup 404s for versions without lock
+				// metadata and cannot distinguish present-unheld from
+				// gone).
+				if herr := s.Storage.Head(ctx, v.Key, v.Version); herr != nil {
+					if errors.Is(herr, s3transport.ErrObjectAbsent) {
 						if err == nil {
 							outcomes[v.Key+"|"+v.Version] = OutcomeDeleted
 						} else {
@@ -125,7 +128,7 @@ func (s *Service) FinishPurge(ctx context.Context, actor *store.Principal, turnI
 						}
 						continue
 					}
-					return nil, fmt.Errorf("delete readback %s: absence unverified: %w", v.Key, lerr)
+					return nil, fmt.Errorf("delete readback %s: absence unverified: %w", v.Key, herr)
 				}
 				return nil, fmt.Errorf("delete readback %s: the version is still readable after the delete acknowledged success", v.Key)
 			case errors.Is(err, s3transport.ErrObjectProtected):
@@ -170,12 +173,12 @@ func (s *Service) verifyPlanVersions(ctx context.Context, plan []PlanRow) (map[s
 			out[id] = "absent" // plan-verified
 			continue
 		}
-		if _, err := s.Storage.LegalHold(ctx, row.Key, row.Version); err != nil {
-			if errors.Is(err, s3transport.ErrObjectAbsent) {
+		if herr := s.Storage.Head(ctx, row.Key, row.Version); herr != nil {
+			if errors.Is(herr, s3transport.ErrObjectAbsent) {
 				out[id] = "absent"
 				continue
 			}
-			return nil, fmt.Errorf("records: plan presence probe %s: %w", row.Key, err)
+			return nil, fmt.Errorf("records: plan presence probe %s: %w", row.Key, herr)
 		}
 		out[id] = "present"
 	}

@@ -108,6 +108,15 @@ func (m *fenceMem) LegalHold(_ context.Context, key, version string) (string, er
 	return m.legalHold[key+"|"+version], nil
 }
 
+func (m *fenceMem) Head(_ context.Context, key, version string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.deleted[key+"|"+version] {
+		return s3transport.ErrObjectAbsent
+	}
+	return nil
+}
+
 func (m *fenceMem) SetLegalHold(_ context.Context, key, version string, on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
