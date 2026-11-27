@@ -560,6 +560,23 @@ func (b *RetentionBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnI
 		}
 		seqs[seq] = r.VersionID
 	}
+	// Chain contiguity: an event-slot set with a hole (a deleted or missing
+	// middle slot while higher slots remain) means the turn's exact version
+	// set is UNVERIFIABLE - silently truncating the walk would acknowledge
+	// partial coverage as complete (C07 review finding 2). Fail closed.
+	if len(seqs) > 0 {
+		maxSeq := uint64(0)
+		for seq := range seqs {
+			if seq > maxSeq {
+				maxSeq = seq
+			}
+		}
+		for i := uint64(1); i <= maxSeq; i++ {
+			if _, ok := seqs[i]; !ok {
+				return nil, ErrConflict
+			}
+		}
+	}
 	var prevMarker *retainedMarkerReceipt
 	for i := uint64(0); ; i++ {
 		var key, version string

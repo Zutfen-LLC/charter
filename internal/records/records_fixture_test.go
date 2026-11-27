@@ -56,13 +56,6 @@ func newFakeBackend() *fakeBackend {
 	return &fakeBackend{turns: map[string][]evidence.TurnIdentity{}, refs: map[string][]evidence.VersionRef{}, commits: map[string][]fakeCommit{}, missing: map[string]bool{}, noRefs: map[string]bool{}, failEnum: map[string]error{}, expired: map[string]bool{}, nonterminal: map[string]bool{}}
 }
 
-func (b *fakeBackend) addTurn(t evidence.TurnIdentity, refs []evidence.VersionRef) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.turns[t.TenantID] = append(b.turns[t.TenantID], t)
-	b.refs[t.TurnID] = refs
-}
-
 // addCommitTurn registers a turn with an explicit commit chain so the
 // disposal walk can model slot deletion semantics.
 func (b *fakeBackend) addCommitTurn(t evidence.TurnIdentity, commits []fakeCommit) {
@@ -151,6 +144,24 @@ func (b *fakeBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnID str
 	}
 	if gone(commits[0].slot) {
 		return nil, evidence.ErrNotFound
+	}
+	// Chain contiguity, like the retained backend: a deleted middle slot
+	// while higher slots remain means the version set is unverifiable -
+	// never silently truncated partial coverage.
+	if n := len(commits); n > 1 {
+		highest := -1
+		for i, c := range commits[1:] {
+			if !gone(c.slot) {
+				highest = i
+			}
+		}
+		if highest >= 0 {
+			for i := 0; i <= highest; i++ {
+				if gone(commits[1+i].slot) {
+					return nil, evidence.ErrConflict
+				}
+			}
+		}
 	}
 	out := []evidence.VersionRef{commits[0].slot}
 	for _, c := range commits[1:] {

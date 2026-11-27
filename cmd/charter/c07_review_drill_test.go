@@ -252,9 +252,22 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	refs2, err := writeBackend.TurnDisposalRefs(ctx, tenant, r2Turn)
 	must(err)
 	// The versions' base retention is still within its short horizon; wait
-	// for it so the records transport can delete the admission marker.
+	// for it so the records transport can delete a mid-chain event slot: the
+	// turn stays enumerable from its admission, but its exact version set is
+	// no longer verifiable (an incomplete chain).
 	time.Sleep(11 * time.Second)
-	must(recordsClient.DeleteVersion(ctx, refs2[0].Key, refs2[0].Version))
+	slot2 := ""
+	for _, r := range refs2 {
+		if strings.Contains(r.Key, "/events/"+r2Turn+"/") {
+			slot2 = r.Key + "|" + r.Version
+			break
+		}
+	}
+	if slot2 == "" {
+		t.Fatal("R2: no event-slot version found")
+	}
+	slotKey, slotVersion, _ := strings.Cut(slot2, "|")
+	must(recordsClient.DeleteVersion(ctx, slotKey, slotVersion))
 	h, err := svc.Store.PlaceHold(ctx, officer1, records.Scope{MatterID: matter1}, "R2 hold", "c07r-h2u")
 	must(err)
 	// A pending hold recovered with an uncovered record must NOT become
