@@ -1007,12 +1007,58 @@ class GuardedStore(Store):
 
     def _establish(self, hold, now):
         report = {"items": [], "disposed_before_hold": [], "uncovered": [],
-                  "protected_versions": [], "already_expired": []}
+                  "partially_disposed": [], "protected_versions": [],
+                  "already_expired": []}
         for it in self.items.values():
             if not _scope_only(hold, it):
                 continue
             if it["state"] == "disposed":
                 report["disposed_before_hold"].append(it["id"])
+                continue
+            if it.get("root_gone"):
+                # The live enumeration root is gone (mid-deletion or a
+                # restored record): coverage comes from the DURABLE
+                # DISPOSAL PLAN (partially disposed - the loss is explicit,
+                # the remaining versions are protected), or the record is
+                # unverifiable and blocks the effective transition
+                # (C07 round-2 finding 1).
+                plan = self.plans.get(it["id"])
+                if not plan:
+                    report["uncovered"].append(it["id"])
+                    continue
+                missing, protected = 0, 0
+                failed = False
+                for (key, version), d in sorted(plan.items()):
+                    if d in ("deleted", "absent"):
+                        continue
+                    if (key, version) in self.deleted:
+                        # Storage-verified partial loss, recorded in the
+                        # plan: the inventory is never destroyed.
+                        plan[(key, version)] = "absent"
+                        missing += 1
+                        continue
+                    try:
+                        self.set_legal_hold(key, version, True)
+                        if self.legal_hold_state(key, version) != "ON":
+                            failed = True
+                    except StorageUnavailable:
+                        failed = True
+                    if failed:
+                        break
+                    self.claims.setdefault(hold["id"], set()).add((key, version))
+                    report["protected_versions"].append((key, version))
+                    protected += 1
+                if failed:
+                    report["uncovered"].append(it["id"])
+                    continue
+                report["partially_disposed"].append(it["id"])
+                entry = dict(id=it["id"], custodian_id=it["custodian_id"],
+                             recorded_at=it["recorded_at"], versions=protected,
+                             partially_disposed=True, missing_versions=missing)
+                if now >= it["retention_expires_at"]:
+                    entry["already_expired"] = True
+                    report["already_expired"].append(it["id"])
+                report["items"].append(entry)
                 continue
             refs = self.versions_of(it["id"])
             for key, version in refs:
@@ -1144,18 +1190,18 @@ class GuardedStore(Store):
         irreversible deletion (finding 5), and the deletes then run under the
         conditional-delete fence with per-version dispositions. It refuses on
         epoch change like Store, and never deletes a version another
-        non-disposed record references."""
+        non-disposed record references. A restore over a partially deleted
+        plan requires verified completeness; partial loss keeps the plan
+        (the exact-version inventory) and a later release and disposal stay
+        recoverable (C07 round-2 finding 4)."""
         it = self.items[item_id]
         if it["state"] != "purging":
             return "not_purging"
         if self.epoch != it["observed_epoch"]:
             if self.held(it):
-                it["state"] = "active"
-                self.plans.pop(item_id, None)
-                return "restored_active"
+                return self._restore_active(item_id)
             it["state"] = "disposal_pending"
-            self.plans.pop(item_id, None)
-            return "stale_retry"
+            return "stale_retry"  # the plan is kept: the resume reuses it
         # Plan phase: the exact-version plan, committed before any deletion.
         plan = self.plans.setdefault(item_id, {})
         for key, version in self.versions_of(item_id):
@@ -1178,12 +1224,45 @@ class GuardedStore(Store):
             return "disposed"
         return "incomplete"
 
+    def _restore_active(self, item_id):
+        """Restore a purging item to active because a hold intervened.
+        With a durable plan the restoration requires VERIFIED completeness
+        (actual storage state per planned version). Completeness counts
+        EVERY planned version, including rows already dispositioned gone
+        (a durable record of loss is a loss, not intactness): partial
+        deletion keeps the plan with the loss recorded, and every planned
+        version gone completes the disposal honestly."""
+        it = self.items[item_id]
+        plan = self.plans.get(item_id)
+        if not plan:
+            it["state"] = "active"
+            return "restored_active"
+        missing = []
+        for (key, version), d in sorted(plan.items()):
+            if d in ("deleted", "absent"):
+                missing.append([key, version])
+                continue
+            if (key, version) in self.deleted:
+                plan[(key, version)] = "absent"
+                missing.append([key, version])
+        if plan and len(missing) == len(plan):
+            it["state"] = "disposed"
+            return "disposed_ambiguous"
+        it["state"] = "active"
+        if missing:
+            return "restored_active_partial"
+        del self.plans[item_id]  # verified complete: nothing left to lose
+        return "restored_active"
+
     def recover(self, now=0):
         """Startup recovery of the corrected implementation: re-establish
         pending/failed holds under the authoritative acceptance rule,
-        reconcile every hold's outstanding protection claims, complete
-        purging items from their durable plans, and classify presence so a
-        storage failure never becomes proof of disposal (finding 4)."""
+        comprehensively repair the missing protection of EFFECTIVE holds
+        (interrupted, denied or recovered captures whose terminal paths
+        could not complete protection - C07 round-2 finding 2), reconcile
+        every hold's outstanding protection claims, complete purging items
+        from their durable plans, and classify presence so a storage
+        failure never becomes proof of disposal (finding 4)."""
         # 1. Holds awaiting verified protection.
         for hold_id in list(self.holds):
             h = self.holds[hold_id]
@@ -1192,6 +1271,16 @@ class GuardedStore(Store):
                     self.reestablish(hold_id, now)
                 except EstablishmentError:
                     pass  # recorded failed/pending; the fence stands
+        # 1b. Effective holds: repair any protection their acknowledged
+        # guarantees require but the storage lacks (no state transition:
+        # an effective hold is never downgraded).
+        for hold_id in list(self.holds):
+            h = self.holds[hold_id]
+            if h["state"] == HOLD_EFFECTIVE:
+                try:
+                    self._establish(h, now)
+                except StorageUnavailable:
+                    pass  # retried by the next recovery; claims record progress
         # 2. Outstanding protection claims of every hold converge.
         for hold_id in list(self.holds):
             if self.claims.get(hold_id):

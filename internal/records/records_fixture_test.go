@@ -41,7 +41,13 @@ type fakeBackend struct {
 	failEnum    map[string]error                   // turn -> enumeration transport error
 	expired     map[string]bool                    // turn -> strict enumeration refuses (retention expired)
 	nonterminal map[string]bool                    // turn -> capture still in flight
-	storage     *fakeStorage                       // deletion cross-check for the walk
+	// namespaceFail: the turn's namespace enumeration hits an unreadable
+	// event-slot marker (transient storage read failure).
+	namespaceFail map[string]bool
+	// namespaceCorrupt: the turn's namespace enumeration hits a listed slot
+	// whose signed candidate cannot be verified (invalid metadata).
+	namespaceCorrupt map[string]bool
+	storage          *fakeStorage // deletion cross-check for the walk
 }
 
 // fakeCommit is one signed commit of the fake turn: its slot marker, its data
@@ -53,7 +59,7 @@ type fakeCommit struct {
 }
 
 func newFakeBackend() *fakeBackend {
-	return &fakeBackend{turns: map[string][]evidence.TurnIdentity{}, refs: map[string][]evidence.VersionRef{}, commits: map[string][]fakeCommit{}, missing: map[string]bool{}, noRefs: map[string]bool{}, failEnum: map[string]error{}, expired: map[string]bool{}, nonterminal: map[string]bool{}}
+	return &fakeBackend{turns: map[string][]evidence.TurnIdentity{}, refs: map[string][]evidence.VersionRef{}, commits: map[string][]fakeCommit{}, missing: map[string]bool{}, noRefs: map[string]bool{}, failEnum: map[string]error{}, expired: map[string]bool{}, nonterminal: map[string]bool{}, namespaceFail: map[string]bool{}, namespaceCorrupt: map[string]bool{}}
 }
 
 // addCommitTurn registers a turn with an explicit commit chain so the
@@ -200,6 +206,9 @@ type fakeStorage struct {
 	failOnce         sync.Map
 	legalHoldAfter   string // when set, readback reports this regardless of writes
 	partialDeleteKey string // when set with failOnce, this key deletes; others fail
+	// lieDelete: DeleteVersion acknowledges success without deleting the
+	// version (a storage whose delete response cannot be trusted).
+	lieDelete bool
 }
 
 func newFakeStorage() *fakeStorage {
@@ -247,6 +256,11 @@ func (f *fakeStorage) SetLegalHold(ctx context.Context, key, version string, on 
 func (f *fakeStorage) DeleteVersion(ctx context.Context, key, version string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.lieDelete {
+		// Acknowledge without effect: the caller must not accept the
+		// response as proof of physical absence.
+		return nil
+	}
 	if f.failDelete != nil {
 		if once, _ := f.failOnce.LoadOrStore("delete", true); once.(bool) && f.failDelete != errClearOnce {
 			if f.partialDeleteKey == "" || f.partialDeleteKey != vkey(key, version) {

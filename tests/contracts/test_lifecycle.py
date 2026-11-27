@@ -351,3 +351,128 @@ class ReviewCorrections(unittest.TestCase):
         s.items["A"]["terminal"] = True
         s.sweep(200)
         self.assertEqual(s.items["A"]["state"], "disposal_pending")
+
+
+class Round2Corrections(unittest.TestCase):
+    """C07 round-2 review corrections: coverage of partially disposed
+    records, verified plan restoration, and effective-hold repair."""
+
+    def test_partially_disposed_record_is_covered_not_silent(self):
+        # Finding 1: a matching record whose root is gone but whose plan
+        # still holds live rows is covered from the plan: the loss is
+        # explicit, the remaining versions protected, the hold effective.
+        s = guarded(ITEMS)
+        s.sweep(200)
+        self.assertTrue(s.begin_purge("A", 300, True))
+        plan = s.plans.setdefault("A", {})
+        for key, version in s.versions_of("A"):
+            plan.setdefault((key, version), "planned")
+        # The admission marker was physically deleted mid-disposal; the
+        # item stays purging and its enumeration root is gone.
+        s.deleted.add(("A/admissions", "v-A-0"))
+        s.items["A"]["root_gone"] = True
+        h = s.place_hold_verified(H1, now=0)
+        self.assertEqual(h["state"], "effective")
+        report = s.reports["H1"]
+        self.assertIn("A", report["partially_disposed"])
+        entry = [i for i in report["items"] if i["id"] == "A"][0]
+        self.assertTrue(entry["partially_disposed"])
+        self.assertEqual(entry["missing_versions"], 1)
+        for key, version in s.versions_of("A"):
+            if (key, version) in s.deleted:
+                # Gone before the hold: no legal hold is recorded for a
+                # version that no longer exists.
+                self.assertEqual(s.legal_hold_state(key, version), "")
+            else:
+                self.assertEqual(s.legal_hold_state(key, version), "ON")
+        # The loss is durably recorded in the plan.
+        self.assertEqual(plan[("A/admissions", "v-A-0")], "absent")
+
+    def test_unverifiable_restored_record_blocks_effective(self):
+        # Finding 1: a root-gone record without a plan is unverifiable: it
+        # is reported uncovered and the hold cannot be acknowledged.
+        s = guarded(ITEMS)
+        s.sweep(200)
+        s.items["A"]["root_gone"] = True
+        with self.assertRaises(EstablishmentError):
+            s.place_hold_verified(H1, now=0)
+        self.assertIn("A", s.reports["H1"]["uncovered"])
+
+    def _crash_window(self, s, missing):
+        """begin_purge with a plan, one physical delete committed while the
+        disposition transaction rolled back, a matching hold placed, and
+        the item still observed purging with the pre-hold epoch (the
+        restore path runs instead of the placement restore)."""
+        s.sweep(200)
+        observed = s.epoch
+        self.assertTrue(s.begin_purge("A", 300, True))
+        observed = s.items["A"]["observed_epoch"]
+        plan = s.plans.setdefault("A", {})
+        for key, version in s.versions_of("A"):
+            plan.setdefault((key, version), "planned")
+        for key, version in missing:
+            s.deleted.add((key, version))
+        s.items["A"]["root_gone"] = True
+        h = s.place_hold_verified(H1, now=0)
+        # The delete-phase transaction never committed: the item is still
+        # purging with the epoch begin_purge observed.
+        s.items["A"]["state"] = "purging"
+        s.items["A"]["observed_epoch"] = observed
+        return h
+
+    def test_restore_keeps_plan_after_partial_deletion(self):
+        # Finding 4: partial physical deletion followed by a hold: the
+        # restore keeps the plan (the exact-version inventory) with the
+        # loss recorded, and a later release and disposal stay recoverable.
+        s = guarded(ITEMS)
+        self._crash_window(s, [("A/admissions", "v-A-0")])
+        self.assertEqual(s.finish_purge_shared("A", 0), "restored_active_partial")
+        self.assertEqual(s.plans["A"][("A/admissions", "v-A-0")], "absent")
+        self.assertEqual(s.items["A"]["state"], "active")
+        # Release the hold: the remaining bytes are unprotected again and
+        # the eventual disposal completes from the plan.
+        s.release_hold_verified("H1")
+        s.items["A"]["state"] = "purging"
+        s.items["A"]["observed_epoch"] = s.epoch
+        outcome = s.finish_purge_shared("A", 0)
+        if outcome == "stale_retry":
+            s.items["A"]["state"] = "purging"
+            s.items["A"]["observed_epoch"] = s.epoch
+            outcome = s.finish_purge_shared("A", 0)
+        self.assertEqual(outcome, "disposed")
+        for key, version in s.versions_of("A"):
+            self.assertIn((key, version), s.deleted)
+
+    def test_verified_complete_restore_clears_the_plan(self):
+        # Finding 4: only verified completeness may clear the plan.
+        s = guarded(ITEMS)
+        self._crash_window(s, [])
+        self.assertEqual(s.finish_purge_shared("A", 0), "restored_active")
+        self.assertNotIn("A", s.plans)
+        self.assertEqual(s.items["A"]["state"], "active")
+
+    def test_fully_vanished_restore_completes_disposal(self):
+        # Finding 4: every outstanding planned version gone: the restore
+        # must not claim active evidence that does not exist.
+        s = guarded(ITEMS)
+        missing = [(k, v) for k, v in s.versions_of("A")]
+        self._crash_window(s, missing)
+        self.assertEqual(s.finish_purge_shared("A", 0), "disposed_ambiguous")
+        self.assertEqual(s.items["A"]["state"], "disposed")
+
+    def test_recovery_repairs_missing_protection_of_effective_hold(self):
+        # Finding 2: a matching record published while the guard could not
+        # complete its protection is repaired at recovery, without a user
+        # retry.
+        s = guarded(ITEMS)
+        s.place_hold_verified(H1, now=0)
+        # A matching record is admitted whose protection never completed
+        # (the interrupted/denied capture window under reproduction).
+        s.admit_new_work("N", "m-0001", "c1", now=10, recorded_at="2026-02-01")
+        for claimed in s.claims.values():
+            claimed.difference_update(s.versions_of("N"))
+        for key, version in s.versions_of("N"):
+            s.legal_hold.pop((key, version), None)
+        s.recover(now=10)
+        for key, version in s.versions_of("N"):
+            self.assertEqual(s.legal_hold_state(key, version), "ON")
