@@ -11,6 +11,7 @@ import (
 
 	"github.com/Zutfen-LLC/charter/internal/records"
 	"github.com/Zutfen-LLC/charter/internal/store"
+	"github.com/jackc/pgx/v5"
 )
 
 // recordsGuard refuses every lifecycle route when the records service is not
@@ -216,7 +217,7 @@ func (a *Auth) purgeBegin(w http.ResponseWriter, r *http.Request, p store.Princi
 	// Presence is classified, never guessed: a storage failure surfaces as
 	// an error (never as proof of disposal) and only plan-verified absence
 	// may complete a disposal (C07 review finding 4).
-	outcome, err := a.Records.Store.BeginPurge(r.Context(), p, r.PathValue("turn"), func(ctx context.Context, turnID string) (bool, error) {
+	outcome, err := a.Records.Store.BeginPurge(r.Context(), p, r.PathValue("turn"), func(ctx context.Context, _ pgx.Tx, turnID string) (bool, error) {
 		switch a.Records.PresenceClassified(ctx, p.TenantID, turnID) {
 		case records.PresencePresent, records.PresencePartial:
 			return true, nil

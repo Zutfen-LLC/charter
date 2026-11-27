@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"io"
 	"net/http"
 	"os"
@@ -482,7 +483,7 @@ func TestC07HoldRetentionLifecycleDrill(t *testing.T) {
 	if marked == 0 {
 		t.Fatal("no disposal-eligible control marked")
 	}
-	outcome, err := disposalService.Store.BeginPurge(ctx, officer2, control2, func(context.Context, string) (bool, error) {
+	outcome, err := disposalService.Store.BeginPurge(ctx, officer2, control2, func(context.Context, pgx.Tx, string) (bool, error) {
 		return disposalService.VersionPresent(ctx, tenant, control2), nil
 	})
 	if err != nil || outcome != "purging" {
@@ -508,7 +509,7 @@ func TestC07HoldRetentionLifecycleDrill(t *testing.T) {
 	if _, err := disposalService.Sweep(ctx, officer1); err != nil {
 		t.Fatal(err)
 	}
-	if outcome, err := disposalService.Store.BeginPurge(ctx, officer2, release3, func(context.Context, string) (bool, error) {
+	if outcome, err := disposalService.Store.BeginPurge(ctx, officer2, release3, func(context.Context, pgx.Tx, string) (bool, error) {
 		return disposalService.VersionPresent(ctx, tenant, release3), nil
 	}); err != nil || outcome != "not_eligible" {
 		t.Fatalf("held control must not be purge-eligible: %s %v", outcome, err)
@@ -521,7 +522,7 @@ func TestC07HoldRetentionLifecycleDrill(t *testing.T) {
 	if _, err := disposalService.Sweep(ctx, officer1); err != nil {
 		t.Fatal(err)
 	}
-	if outcome, err := disposalService.Store.BeginPurge(ctx, officer2, release3, func(context.Context, string) (bool, error) {
+	if outcome, err := disposalService.Store.BeginPurge(ctx, officer2, release3, func(context.Context, pgx.Tx, string) (bool, error) {
 		return disposalService.VersionPresent(ctx, tenant, release3), nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("purge begin (release control): %s %v", outcome, err)
@@ -545,7 +546,7 @@ func TestC07HoldRetentionLifecycleDrill(t *testing.T) {
 	if _, err := restarted.Sweep(ctx, officer1); err != nil {
 		t.Fatal(err)
 	}
-	if outcome, err := restarted.Store.BeginPurge(ctx, officer2, raceTurn, func(context.Context, string) (bool, error) {
+	if outcome, err := restarted.Store.BeginPurge(ctx, officer2, raceTurn, func(context.Context, pgx.Tx, string) (bool, error) {
 		return restarted.VersionPresent(ctx, tenant, raceTurn), nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("race purge begin: %s %v", outcome, err)

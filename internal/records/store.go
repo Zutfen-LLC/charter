@@ -919,7 +919,7 @@ func (s *Store) CatalogTurn(ctx context.Context, tenantID string, t evidence.Tur
 // closed (never marked). Disposal eligibility requires a verified terminal
 // capture state: an admitted, actively executing turn must never be swept
 // into disposal by ordinary expiry (C07 review finding 6A).
-type TerminalCheck func(context.Context, evidence.TurnIdentity) (bool, error)
+type TerminalCheck func(context.Context, pgx.Tx, evidence.TurnIdentity) (bool, error)
 
 // Sweep marks eligible items disposal_pending: retention expired AND not
 // held AND capture terminal, per matter epoch observed under the same lock.
@@ -953,7 +953,7 @@ func (s *Store) Sweep(ctx context.Context, p store.Principal, turns []evidence.T
 				// No verified terminal state: fail closed, never mark.
 				return nil
 			}
-			done, err := terminal(ctx, t)
+			done, err := terminal(ctx, tx, t)
 			if err != nil {
 				// Unknown capture state: fail closed for this turn.
 				return nil
@@ -1001,10 +1001,21 @@ func (s *Store) Items(ctx context.Context, p store.Principal) ([]Item, error) {
 }
 
 func (s *Store) itemsOfTenant(ctx context.Context, tenantID string) ([]Item, error) {
-	rows, err := s.DB.Query(ctx, `SELECT tenant_id::text, turn_id::text, matter_id::text, project_id::text, custodian_id::text,
+	return s.itemsOf(ctx, s.DB, tenantID)
+}
+
+func (s *Store) itemsOf(ctx context.Context, q queryRunner, tenantID string) ([]Item, error) {
+	rows, err := q.Query(ctx, `SELECT tenant_id::text, turn_id::text, matter_id::text, project_id::text, custodian_id::text,
 		recorded_at, retention_expires_at, state, observed_epoch, pending_since, sweep_by::text, purge_by::text, tombstoned_at, purged_at
 		FROM retention_items WHERE tenant_id=$1 ORDER BY recorded_at, turn_id`, tenantID)
 	return scanItems(rows, err)
+}
+
+// queryRunner is the read subset shared by the pool and an open
+// transaction, so in-transaction helpers can reuse the transaction's
+// connection (see planOf).
+type queryRunner interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 func scanItems(rows pgx.Rows, err error) ([]Item, error) {
@@ -1028,7 +1039,7 @@ func scanItems(rows pgx.Rows, err error) ([]Item, error) {
 // the matter epoch, marks the item purging (unreadable; bytes retained) with
 // the epoch it observed, and requires a records officer OTHER than the one
 // whose sweep requested disposal (separation of duties).
-func (s *Store) BeginPurge(ctx context.Context, p store.Principal, turnID string, verifyBytes func(context.Context, string) (bool, error)) (string, error) {
+func (s *Store) BeginPurge(ctx context.Context, p store.Principal, turnID string, verifyBytes func(context.Context, pgx.Tx, string) (bool, error)) (string, error) {
 	p, ok := canonP(p)
 	turnID, valid := store.CanonicalID(turnID)
 	if !ok || !valid {
@@ -1082,7 +1093,7 @@ func (s *Store) BeginPurge(ctx context.Context, p store.Principal, turnID string
 			return audit(ctx, tx, p.TenantID, &p.UserID, "purge.begin", map[string]any{"turn_id": turnID, "outcome": outcome})
 		}
 		if verifyBytes != nil {
-			present, err := verifyBytes(ctx, turnID)
+			present, err := verifyBytes(ctx, tx, turnID)
 			if err != nil {
 				return err
 			}
@@ -1248,7 +1259,7 @@ func (s *Store) lockActor(ctx context.Context, tx pgx.Tx, actor store.Principal)
 // physical deletion must never be represented as intact active evidence
 // (C07 round-2 finding 4).
 func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenantID, turnID string,
-	deleter func(context.Context, Item) (map[string]string, error), verifyBytes func(context.Context, string) (bool, error),
+	deleter func(context.Context, pgx.Tx, Item) (map[string]string, error), verifyBytes func(context.Context, pgx.Tx, string) (bool, error),
 	verifyVersions func(context.Context, []PlanRow) (map[string]string, error), outcome *string) error {
 	run := func(tx pgx.Tx) error {
 		// The protection fence serializes the deletes with every protection
@@ -1401,7 +1412,7 @@ func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenan
 					return nil
 				}
 				if verifyBytes != nil {
-					present, err = verifyBytes(ctx, it.TurnID)
+					present, err = verifyBytes(ctx, tx, it.TurnID)
 					if err != nil {
 						return err
 					}
@@ -1438,7 +1449,7 @@ func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenan
 			}
 			return nil
 		}
-		results, err := deleter(ctx, it)
+		results, err := deleter(ctx, tx, it)
 		if err != nil {
 			return err
 		}
@@ -1687,7 +1698,16 @@ func InsertPlan(ctx context.Context, tx pgx.Tx, tenantID, turnID string, refs []
 
 // PlanOf loads the turn's disposal plan.
 func (s *Store) PlanOf(ctx context.Context, tenantID, turnID string) ([]PlanRow, error) {
-	rows, err := s.DB.Query(ctx, `SELECT tenant_id::text, turn_id::text, key, version, disposition, plan_epoch
+	return s.planOf(ctx, s.DB, tenantID, turnID)
+}
+
+// planOf loads the turn's disposal plan through the given runner: callers
+// executing INSIDE an open transaction pass the transaction so the read
+// reuses its connection instead of acquiring a second pooled one (pool
+// exhaustion under concurrent finishes would otherwise deadlock - C07
+// round-3 CI follow-up).
+func (s *Store) planOf(ctx context.Context, q queryRunner, tenantID, turnID string) ([]PlanRow, error) {
+	rows, err := q.Query(ctx, `SELECT tenant_id::text, turn_id::text, key, version, disposition, plan_epoch
 		FROM disposal_plans WHERE tenant_id=$1 AND turn_id=$2 ORDER BY key, version`, tenantID, turnID)
 	if err != nil {
 		return nil, err

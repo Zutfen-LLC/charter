@@ -1,10 +1,15 @@
 package records_test
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Zutfen-LLC/charter/internal/records"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Round-3 follow-up review findings (independent adversarial review,
@@ -122,5 +127,88 @@ END $$ LANGUAGE plpgsql`); err != nil {
 	}
 	if n, err := countAudit(f, "hold.protection_repair_pending"); err != nil || n != 1 {
 		t.Fatalf("the retried recovery did not record the audit row (n=%d err=%v)", n, err)
+	}
+}
+
+// Concurrent finish retries against a CI-class SMALL pool: the finisher
+// must never acquire a SECOND pooled connection while its fence
+// transaction is open (the round-3 hosted-CI deadlock - every
+// catalog/plan read inside the deleter and verify callbacks reuses the
+// transaction's connection). The buggy shape hangs; this test fails fast
+// through the watchdog instead.
+func TestConcurrentFinishRetriesUnderExhaustedPool(t *testing.T) {
+	f := newRfx(t)
+	ctx := context.Background()
+	schema := f.pool.Config().ConnConfig.RuntimeParams["search_path"]
+	cfg, err := pgxpool.ParseConfig(os.Getenv("CHARTER_TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	cfg.ConnConfig.RuntimeParams["application_name"] = schema + "-smallpool"
+	cfg.MaxConns = 2
+	small, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer small.Close()
+	f.rs.DB = small
+
+	id := f.seedTurn("T-R3S", f.p1, f.m1, f.u["alice"])
+	f.sweepAs("carol")
+	if outcome, err := f.rs.BeginPurge(f.ctx(), f.principal("erin"), f.turnID("T-R3S"), nil); err != nil || outcome != "purging" {
+		t.Fatalf("begin outcome %s err %v", outcome, err)
+	}
+	_ = id
+
+	type result struct {
+		outcome string
+		err     error
+	}
+	results := make(chan result, 4)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				outcome, _, err := f.svc.FinishPurge(f.ctx(), ptrPrincipal(f.principal("erin")), f.turnID("T-R3S"))
+				results <- result{outcome: outcome, err: err}
+			}()
+		}
+		wg.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		// Unwedge the workers before failing so the schema cleanup does
+		// not block on their locks: force-abort the small pool's
+		// backends (the stuck row-lock waits error out, the blocked pool
+		// acquires see the pool closed) and give them a moment to unwind.
+		_, _ = f.pool.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name=$1`, schema+"-smallpool")
+		small.Close()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+		t.Fatal("REVIEW FINDING (CI): concurrent finishes deadlocked on the connection pool - a nested pooled acquisition runs inside the open fence transaction")
+	}
+	disposed := 0
+	for i := 0; i < 4; i++ {
+		r := <-results
+		if r.err != nil && r.outcome != "disposed" && r.outcome != "stale_retry" {
+			t.Fatalf("finish error: %v (outcome %q)", r.err, r.outcome)
+		}
+		if r.outcome == "disposed" {
+			disposed++
+		}
+	}
+	if disposed != 1 {
+		t.Fatalf("exactly one finish must dispose, got %d", disposed)
+	}
+	if it := f.itemByID(f.turnID("T-R3S")); it.State != records.ItemDisposed {
+		t.Fatalf("the purged item is not disposed: %s", it.State)
 	}
 }

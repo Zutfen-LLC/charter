@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -537,7 +538,7 @@ func TestStorageOutageIsNotDisposalAtBeginPurge(t *testing.T) {
 	f.seedTurn("T-O1", f.p1, f.m1, f.u["alice"])
 	f.sweepAs("carol")
 	f.fb.failEnum[f.turnID("T-O1")] = errors.New("listing timeout")
-	outcome, err := f.rs.BeginPurge(f.ctx(), f.principal("erin"), f.turnID("T-O1"), func(ctx context.Context, turnID string) (bool, error) {
+	outcome, err := f.rs.BeginPurge(f.ctx(), f.principal("erin"), f.turnID("T-O1"), func(ctx context.Context, _ pgx.Tx, turnID string) (bool, error) {
 		return f.svc.VersionPresent(ctx, f.tenant, turnID), nil
 	})
 	if err == nil && outcome == "disposed_ambiguous" {
@@ -583,7 +584,7 @@ func TestMissingAdmissionWithSurvivingVersionsIsNotDisposal(t *testing.T) {
 	if err := f.fs.DeleteVersion(f.ctx(), refs[0].Key, refs[0].Version); err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := f.rs.BeginPurge(f.ctx(), f.principal("erin"), f.turnID("T-O3"), func(ctx context.Context, turnID string) (bool, error) {
+	outcome, err := f.rs.BeginPurge(f.ctx(), f.principal("erin"), f.turnID("T-O3"), func(ctx context.Context, _ pgx.Tx, turnID string) (bool, error) {
 		return f.svc.VersionPresent(ctx, f.tenant, turnID), nil
 	})
 	if err == nil && outcome == "disposed_ambiguous" {
@@ -860,7 +861,7 @@ func TestFinishPurgeSerializesWithCaptureReferenceFence(t *testing.T) {
 	if got := f.sweepAs("carol"); got == 0 {
 		t.Fatal("expired control must be sweep-eligible")
 	}
-	terminal := func(context.Context, string) (bool, error) { return true, nil }
+	terminal := func(context.Context, pgx.Tx, string) (bool, error) { return true, nil }
 	if _, err := f.rs.BeginPurge(f.ctx(), f.principal("erin"), turn, terminal); err != nil {
 		t.Fatalf("begin purge failed: %v", err)
 	}

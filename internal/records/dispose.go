@@ -8,6 +8,7 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/evidence/s3transport"
 	"github.com/Zutfen-LLC/charter/internal/store"
+	"github.com/jackc/pgx/v5"
 )
 
 // Version disposal outcomes (per exact version).
@@ -67,8 +68,12 @@ func (s *Service) FinishPurge(ctx context.Context, actor *store.Principal, turnI
 		return outcome, outcomes, err
 	}
 	// Phase 2: the fenced conditional delete.
-	err := s.Store.FinishPurgeTx(ctx, actor, tenantID, turnID, func(ctx context.Context, it Item) (map[string]string, error) {
-		plan, err := s.Store.PlanOf(ctx, it.TenantID, it.TurnID)
+	err := s.Store.FinishPurgeTx(ctx, actor, tenantID, turnID, func(ctx context.Context, tx pgx.Tx, it Item) (map[string]string, error) {
+		// Every catalog/plan read inside this callback reuses the fence
+		// transaction's connection: a second pooled acquisition while the
+		// transaction is open deadlocks the pool under concurrent finishes
+		// (observed as the C07 round-3 CI hang in TestConcurrentFinishRetries).
+		plan, err := s.Store.planOf(ctx, tx, it.TenantID, it.TurnID)
 		if err != nil {
 			return nil, err
 		}
@@ -92,7 +97,7 @@ func (s *Service) FinishPurge(ctx context.Context, actor *store.Principal, turnI
 				refs = append(refs, VersionRef(r))
 			}
 		}
-		shared, err := s.sharedReferences(ctx, it)
+		shared, err := s.sharedReferences(ctx, tx, it)
 		if err != nil {
 			return nil, err
 		}
@@ -142,8 +147,8 @@ func (s *Service) FinishPurge(ctx context.Context, actor *store.Principal, turnI
 			return nil, ErrBlockedStorage
 		}
 		return outcomes, nil
-	}, func(ctx context.Context, turnID string) (bool, error) {
-		p, detail := s.classifyPresence(ctx, tenantID, turnID)
+	}, func(ctx context.Context, tx pgx.Tx, turnID string) (bool, error) {
+		p, detail := s.classifyPresence(ctx, tx, tenantID, turnID)
 		switch p {
 		case PresencePresent, PresencePartial:
 			return true, nil
@@ -199,12 +204,14 @@ func (s *Service) verifyPlanVersions(ctx context.Context, plan []PlanRow) (map[s
 // one (C07 round-2 finding 3). The scan covers the union of live turns
 // and non-disposed catalog records, so a record whose live root is gone
 // still fences through its durable plan.
-func (s *Service) sharedReferences(ctx context.Context, it Item) (map[VersionRef]bool, error) {
+func (s *Service) sharedReferences(ctx context.Context, tx pgx.Tx, it Item) (map[VersionRef]bool, error) {
 	turns, err := s.inventory(ctx, it.TenantID)
 	if err != nil {
 		return nil, err
 	}
-	items, err := s.retentionIndex(ctx, it.TenantID)
+	// Catalog and plan reads reuse the caller's fence transaction
+	// connection (see turnReferenceSet).
+	items, err := s.retentionIndex(ctx, tx, it.TenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +221,7 @@ func (s *Service) sharedReferences(ctx context.Context, it Item) (map[VersionRef
 	}
 	mine, err := s.disposalRefs(ctx, it.TenantID, it.TurnID)
 	if err != nil {
-		planRefs := s.planRefs(ctx, it)
+		planRefs := s.planRefs(ctx, tx, it)
 		if len(planRefs) > 0 {
 			// The enumeration root may already be gone mid-plan; the plan
 			// remains the authoritative version set.
@@ -235,7 +242,7 @@ func (s *Service) sharedReferences(ctx context.Context, it Item) (map[VersionRef
 		if known && state == ItemDisposed {
 			return nil
 		}
-		refs, res, rerr := s.turnReferenceSet(ctx, it.TenantID, turnID)
+		refs, res, rerr := s.turnReferenceSet(ctx, tx, it.TenantID, turnID)
 		switch res {
 		case refSetVerified, refSetPlan:
 			for _, r := range refs {
@@ -273,8 +280,8 @@ func (s *Service) sharedReferences(ctx context.Context, it Item) (map[VersionRef
 }
 
 // planRefs projects the turn's disposal plan as its exact version set.
-func (s *Service) planRefs(ctx context.Context, it Item) []evidence.VersionRef {
-	plan, err := s.Store.PlanOf(ctx, it.TenantID, it.TurnID)
+func (s *Service) planRefs(ctx context.Context, q queryRunner, it Item) []evidence.VersionRef {
+	plan, err := s.Store.planOf(ctx, q, it.TenantID, it.TurnID)
 	if err != nil {
 		return nil
 	}
@@ -407,7 +414,7 @@ func (s *Service) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, it := range ambiguous {
-		p, detail := s.classifyPresence(ctx, it.TenantID, it.TurnID)
+		p, detail := s.classifyPresence(ctx, s.Store.DB, it.TenantID, it.TurnID)
 		switch p {
 		case PresenceAbsent:
 			if err := s.Store.MarkDisposedAmbiguous(ctx, it); err != nil {

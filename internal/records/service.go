@@ -152,7 +152,12 @@ const (
 // plan supplies the exact version identity; the namespace fallback is used
 // only when it enumerates COMPLETELY. An unknown reference set is never
 // silently treated as an absent one.
-func (s *Service) turnReferenceSet(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, refSetResolution, error) {
+// turnReferenceSet resolves the turn's authoritative reference set. The
+// runner is the caller's connection: callers executing inside an open
+// transaction pass it so the plan lookup reuses the transaction's
+// connection (pool exhaustion under concurrent finishes would otherwise
+// deadlock - C07 round-3 CI follow-up).
+func (s *Service) turnReferenceSet(ctx context.Context, q queryRunner, tenantID, turnID string) ([]evidence.VersionRef, refSetResolution, error) {
 	refs, err := s.disposalRefs(ctx, tenantID, turnID)
 	if err == nil {
 		return refs, refSetVerified, nil
@@ -161,7 +166,7 @@ func (s *Service) turnReferenceSet(ctx context.Context, tenantID, turnID string)
 	// any deletion holds the turn's complete exact-version identity, so
 	// known partial disposal stays recoverable without wedging unrelated
 	// valid operations.
-	if plan, perr := s.Store.PlanOf(ctx, tenantID, turnID); perr == nil && len(plan) > 0 {
+	if plan, perr := s.Store.planOf(ctx, q, tenantID, turnID); perr == nil && len(plan) > 0 {
 		var out []evidence.VersionRef
 		for _, row := range plan {
 			if row.Disposition == OutcomeDeleted || row.Disposition == OutcomeAbsent {
@@ -225,9 +230,11 @@ func (p Presence) String() string {
 // disposal plan first (authoritative exact-version verification) and from
 // live enumeration otherwise. It never converts an enumeration error into
 // absence.
-func (s *Service) classifyPresence(ctx context.Context, tenantID, turnID string) (Presence, string) {
+func (s *Service) classifyPresence(ctx context.Context, q queryRunner, tenantID, turnID string) (Presence, string) {
 	if s.Retained {
-		plan, err := s.Store.PlanOf(ctx, tenantID, turnID)
+		// Runner-aware: in-transaction callers (the finisher's callbacks)
+		// pass their transaction so the plan lookup reuses its connection.
+		plan, err := s.Store.planOf(ctx, q, tenantID, turnID)
 		if err != nil {
 			return PresenceUnknown, fmt.Sprintf("plan load: %v", err)
 		}
@@ -267,7 +274,7 @@ func (s *Service) classifyPresence(ctx context.Context, tenantID, turnID string)
 // PRESENT, because absence claims require authoritative exact-version
 // verification.
 func (s *Service) versionPresent(ctx context.Context, tenantID, turnID string) bool {
-	p, _ := s.classifyPresence(ctx, tenantID, turnID)
+	p, _ := s.classifyPresence(ctx, s.Store.DB, tenantID, turnID)
 	return p != PresenceAbsent
 }
 
@@ -782,8 +789,8 @@ func (s *Service) protectForHold(ctx context.Context, h *Hold, refs []VersionRef
 
 // retentionIndex loads the tenant's lifecycle catalog as a map. A catalog
 // load failure is an error, never an empty catalog (C07 round-2 finding 1).
-func (s *Service) retentionIndex(ctx context.Context, tenantID string) (map[string]Item, error) {
-	items, err := s.Store.itemsOfTenant(ctx, tenantID)
+func (s *Service) retentionIndex(ctx context.Context, q queryRunner, tenantID string) (map[string]Item, error) {
+	items, err := s.Store.itemsOf(ctx, q, tenantID)
 	if err != nil {
 		s.logf("records: catalog load: %v", err)
 		return nil, err
@@ -924,7 +931,9 @@ func (s *Service) requiredVersions(ctx context.Context, tx pgx.Tx, tenantID stri
 	if err != nil {
 		return nil, err
 	}
-	items, err := s.retentionIndex(ctx, tenantID)
+	// The index and reference resolution reuse the caller's transaction
+	// connection (see turnReferenceSet).
+	items, err := s.retentionIndex(ctx, tx, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -953,7 +962,7 @@ func (s *Service) requiredVersions(ctx context.Context, tx pgx.Tx, tenantID stri
 		if !needed {
 			return nil
 		}
-		refs, res, rerr := s.turnReferenceSet(ctx, tenantID, turnID)
+		refs, res, rerr := s.turnReferenceSet(ctx, tx, tenantID, turnID)
 		switch res {
 		case refSetVerified, refSetPlan:
 			for _, r := range refs {
@@ -1058,7 +1067,7 @@ func (s *Service) Sweep(ctx context.Context, p store.Principal) (int, error) {
 // never-disposed turn) is decided by the live probe alone and fails
 // closed on verification errors - nothing may infer terminality from a
 // missing probe answer.
-func (s *Service) terminalCheck(ctx context.Context, t evidence.TurnIdentity) (bool, error) {
+func (s *Service) terminalCheck(ctx context.Context, tx pgx.Tx, t evidence.TurnIdentity) (bool, error) {
 	var (
 		terminal bool
 		perr     error
@@ -1074,7 +1083,10 @@ func (s *Service) terminalCheck(ctx context.Context, t evidence.TurnIdentity) (b
 		return true, nil
 	}
 	if s.Retained {
-		if plan, err := s.Store.PlanOf(ctx, t.TenantID, t.TurnID); err == nil && len(plan) > 0 {
+		// The plan lookup reuses the sweep transaction's connection (the
+		// check runs inside it): no second pooled acquisition while the
+		// item lock is held (C07 round-3 CI follow-up).
+		if plan, err := s.Store.planOf(ctx, tx, t.TenantID, t.TurnID); err == nil && len(plan) > 0 {
 			// Durable proof of previously verified terminality, bound to
 			// this exact turn's authorized disposal lifecycle.
 			return true, nil
@@ -1095,7 +1107,7 @@ func (s *Service) VersionPresent(ctx context.Context, tenantID, turnID string) b
 
 // PresenceClassified reports the turn's classified byte presence.
 func (s *Service) PresenceClassified(ctx context.Context, tenantID, turnID string) Presence {
-	p, _ := s.classifyPresence(ctx, tenantID, turnID)
+	p, _ := s.classifyPresence(ctx, s.Store.DB, tenantID, turnID)
 	return p
 }
 

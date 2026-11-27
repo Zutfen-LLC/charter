@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,7 +252,7 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	} else if marked == 0 {
 		t.Fatal("R6: no disposal-eligible turn")
 	}
-	if outcome, err := svc.Store.BeginPurge(ctx, officer2, r6Turn, func(context.Context, string) (bool, error) {
+	if outcome, err := svc.Store.BeginPurge(ctx, officer2, r6Turn, func(context.Context, pgx.Tx, string) (bool, error) {
 		return true, nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("R6 begin: %s %v", outcome, err)
@@ -513,7 +514,7 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 			t.Fatalf("R4: turn not eligible: %q", s)
 		}
 	}
-	if outcome, err := svc.Store.BeginPurge(ctx, officer2, r4Turn, func(context.Context, string) (bool, error) {
+	if outcome, err := svc.Store.BeginPurge(ctx, officer2, r4Turn, func(context.Context, pgx.Tx, string) (bool, error) {
 		return true, nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("R4 begin: %s %v", outcome, err)

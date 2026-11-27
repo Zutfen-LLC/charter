@@ -18,6 +18,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"sort"
 	"strings"
 	"sync"
@@ -273,7 +274,7 @@ func TestDisposalCannotDeleteVersionAcquiredByConcurrentCapture(t *testing.T) {
 	if marked, err := f.svc.Sweep(ctx, f.principal("carol")); err != nil || marked != 1 {
 		t.Fatalf("sweep marked %d (err %v), want 1", marked, err)
 	}
-	if outcome, err := f.rs.BeginPurge(ctx, f.principal("erin"), t1, func(c context.Context, turnID string) (bool, error) {
+	if outcome, err := f.rs.BeginPurge(ctx, f.principal("erin"), t1, func(c context.Context, _ pgx.Tx, turnID string) (bool, error) {
 		return f.svc.VersionPresent(c, f.tenant, turnID), nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("begin outcome %s err %v", outcome, err)

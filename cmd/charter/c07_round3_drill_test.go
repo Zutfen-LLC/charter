@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/jackc/pgx/v5"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -325,7 +326,7 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 	} else if marked == 0 {
 		t.Fatal("S1: no disposal-eligible turn")
 	}
-	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s1A, func(context.Context, string) (bool, error) {
+	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s1A, func(context.Context, pgx.Tx, string) (bool, error) {
 		return true, nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("S1 begin: %s %v", outcome, err)
@@ -473,7 +474,7 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 		if it := itemState(turn); it != records.ItemDisposalPending {
 			t.Fatalf("%s setup: record not disposal-eligible before the purge (state %s)", label, it)
 		}
-		if outcome, err := svc.Store.BeginPurge(ctx, officer2, turn, func(context.Context, string) (bool, error) {
+		if outcome, err := svc.Store.BeginPurge(ctx, officer2, turn, func(context.Context, pgx.Tx, string) (bool, error) {
 			return true, nil
 		}); err != nil || outcome != "purging" {
 			t.Fatalf("%s begin: %s %v", label, outcome, err)
@@ -532,7 +533,7 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 		if it := itemState(turn); it != records.ItemDisposalPending {
 			t.Fatalf("%s FINDING 3: the sweep never re-marked the interrupted-disposal record (missing durable proof of previously verified terminality; state %s)", label, it)
 		}
-		if outcome, err := svc.Store.BeginPurge(ctx, officer2, turn, func(context.Context, string) (bool, error) {
+		if outcome, err := svc.Store.BeginPurge(ctx, officer2, turn, func(context.Context, pgx.Tx, string) (bool, error) {
 			return true, nil
 		}); err != nil || outcome != "purging" {
 			t.Fatalf("%s second begin: %s %v", label, outcome, err)
