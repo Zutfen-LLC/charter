@@ -30,6 +30,7 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/records"
 	"github.com/Zutfen-LLC/charter/internal/store"
 	"github.com/Zutfen-LLC/charter/internal/testdb"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // fenceMem is an in-memory retained transport with the storage-native
@@ -135,19 +136,11 @@ func (m *fenceMem) DeleteVersion(_ context.Context, key, version string) error {
 	return nil
 }
 
-func (m *fenceMem) isDeleted(key, version string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.deleted[key+"|"+version]
-}
-
 // rfxRetained is a records fixture whose backend is a REAL RetentionBackend
 // over the in-memory transport, driven through the REAL recorder.
 type rfxRetained struct {
-	t    *testing.T
-	pool interface {
-		Exec(context.Context, string, ...any) (interface{ RowsAffected() int64 }, error)
-	}
+	t        *testing.T
+	pool2    *pgxpool.Pool
 	rs       *records.Store
 	svc      *records.Service
 	st       *store.Store
@@ -183,9 +176,7 @@ func newRfxRetained(t *testing.T) *rfxRetained {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &rfxRetained{t: t, st: st, mem: mem, backend: b, fence: fence,
-		tenant: "11111111-1111-1111-1111-111111111111", project: "22222222-2222-2222-2222-222222222222",
-		matter: "33333333-3333-3333-3333-333333333333", custodian: "44444444-4444-4444-4444-444444444444"}
+	f := &rfxRetained{t: t, st: st, mem: mem, backend: b, fence: fence, pool2: pool}
 	ok := func(s string, err error) string {
 		t.Helper()
 		if err != nil {
@@ -194,7 +185,6 @@ func newRfxRetained(t *testing.T) *rfxRetained {
 		return s
 	}
 	f.tenant = ok(st.CreateTenant(ctx, issuer, "tid-r", "R"))
-	_ = f.project
 	p := ok(st.CreateProject(ctx, f.tenant, "PR"))
 	f.project = p
 	var matter string
@@ -388,3 +378,31 @@ func TestDisposalCannotDeleteVersionAcquiredByConcurrentCapture(t *testing.T) {
 }
 
 var _ = errors.New
+
+// TestGuardedCaptureUnderEffectiveHold completes: the R3 drill shape (a hold
+// effective over the matter, then new matching work through the recorder).
+func TestGuardedCaptureUnderEffectiveHold(t *testing.T) {
+	f := newRfxRetained(t)
+	ctx := context.Background()
+	t1, err := f.processTurn("idem-g1", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("baseline capture failed: %v", err)
+	}
+	var matter string
+	if err := f.pool2.QueryRow(ctx, `SELECT matter_id::text FROM projects WHERE id=$1`, f.project).Scan(&matter); err != nil {
+		t.Fatal(err)
+	}
+	h, err := f.svc.Place(ctx, f.principal("carol"), records.Scope{MatterID: matter}, "R3 local", "idem-g-hold")
+	if err != nil {
+		t.Fatalf("hold placement failed: %v", err)
+	}
+	if h.State != records.HoldEffective {
+		t.Fatalf("hold state %s", h.State)
+	}
+	// New matching work admitted while the hold is effective.
+	_, err = f.processTurn("idem-g2", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("FINDING R3: guarded capture failed: %v", err)
+	}
+	_ = t1
+}

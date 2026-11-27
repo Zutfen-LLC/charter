@@ -66,14 +66,6 @@ func (s *Service) inventory(ctx context.Context, tenantID string) ([]evidence.Tu
 	return inv.InventoryTurns(ctx, tenantID)
 }
 
-func (s *Service) versionRefs(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, error) {
-	v, ok := evidence.VersionsOf(s.Backend)
-	if !ok {
-		return nil, errors.New("records: backend cannot enumerate versions")
-	}
-	return v.TurnVersionRefs(ctx, tenantID, turnID)
-}
-
 // disposalRefs enumerates the turn's versions for disposal: expired
 // retention is tolerated (disposal is exactly what operates on expired
 // evidence); the storage still refuses to delete any protected version.

@@ -174,7 +174,9 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	svc := recordsServiceFor(owner, writeBackend, recordsClient)
 	// The recorder carries the lifecycle guard: admissions, appends and
 	// object staging acquire the tenant protection fence (finding 6B).
-	recorder := &evidence.Recorder{Backend: writeBackend, Fence: seedFence, Lifecycle: svc, Logf: func(string, ...any) {},
+	recorder := &evidence.Recorder{Backend: writeBackend, Fence: seedFence, Lifecycle: svc, Logf: func(f string, a ...any) {
+		t.Logf("recorder: "+f, a...)
+	},
 		Policy: func(context.Context, evidence.Request) (evidence.Decision, error) {
 			return evidence.Decision{Allow: true, PolicyVersion: "c07-review-drill", Destination: evidence.Destination{Provider: "synthetic", EndpointID: "seed", ModelID: "det-a"}}, nil
 		}}
@@ -450,6 +452,23 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	dump("c07r-r2-uncovered.json", map[string]any{"turn": r2Turn, "state": after2.State, "uncovered": after2.Report.Uncovered})
 	if _, err := svc.Release(ctx, officer1, h.ID, "R2 release"); err != nil {
 		t.Fatal(err)
+	}
+
+	// ---- R0: new captures coexist with retention-expired evidence ----
+	// The seed turns' storage retention has expired by now; the namespace
+	// still admits and appends new turns (the serving read and append
+	// verify their OWN chains' durability, never unrelated expired
+	// admissions).
+	if _, err := writeBackend.PutObject(ctx, tenant, []byte("r0-unique-content")); err != nil {
+		t.Fatalf("R0 object stage: %v", err)
+	}
+	if _, err := recorder.Process(ctx, evidence.Request{
+		TenantID: tenant, ProjectID: p2, MatterID: matter2, CustodianID: bob,
+		IdempotencyKey: "c07r-r0-coexist", Input: []byte("r0 coexistence input"),
+	}, func(ctx context.Context, sent []byte) (evidence.ModelOutcome, error) {
+		return evidence.ModelOutcome{Accepted: true, Complete: true, Output: []byte("r0 output")}, nil
+	}, func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("R0 FINDING (coexistence): capture after other turns' retention expired: %v", err)
 	}
 
 	// ---- R3: future matching work is cleared when the final hold releases ----

@@ -201,7 +201,15 @@ func (b *RetentionBackend) eventData(ctx context.Context, ent *retainedEntry) er
 	}
 	return nil
 }
-func (b *RetentionBackend) admissions(ctx context.Context, refs []s3transport.Ref) ([]retainedEntry, error) {
+
+// admissionsRelaxed enumerates every admission marker of the namespace with
+// signature and identity verification but WITHOUT the active-retention
+// requirement: retention-expired evidence legally coexists with new captures
+// (the C07 lifecycle disposes expired turns while the tenant keeps serving),
+// so an unrelated expired admission must not abort a serving read or append.
+// The strict durability requirement applies to the entries the caller
+// actually uses (the target turn of a read, the target of an append).
+func (b *RetentionBackend) admissionsRelaxed(ctx context.Context, refs []s3transport.Ref) ([]retainedEntry, error) {
 	keys := map[string]bool{}
 	for _, r := range refs {
 		p := strings.Split(strings.TrimPrefix(r.Key, b.prefix), "/")
@@ -215,7 +223,7 @@ func (b *RetentionBackend) admissions(ctx context.Context, refs []s3transport.Re
 	}
 	var out []retainedEntry
 	for key := range keys {
-		e, err := b.slot(ctx, key, refs)
+		e, err := b.slotRelaxed(ctx, key, refs)
 		if err != nil {
 			return nil, err
 		}
@@ -283,18 +291,33 @@ func (b *RetentionBackend) readTurn(ctx context.Context, tenant, turn string) ([
 	if err != nil {
 		return nil, err
 	}
-	admissions, err := b.admissions(ctx, refs)
+	admissions, err := b.admissionsRelaxed(ctx, refs)
 	if err != nil {
 		return nil, err
 	}
 	var found *retainedEntry
-	for _, a := range admissions {
-		if a.commit.Tenant == tenant && a.commit.Turn == turn {
-			if found != nil {
-				return nil, ErrConflict
-			}
-			found = &a
+	for i := range admissions {
+		a := admissions[i]
+		if a.commit.Turn != turn {
+			continue
 		}
+		if a.commit.Tenant != tenant {
+			return nil, ErrConflict
+		}
+		if found != nil {
+			return nil, ErrConflict
+		}
+		// The TARGET admission must itself be durable (active COMPLIANCE
+		// retention) for a serving read or append; unrelated expired
+		// admissions are enumerated relaxed above.
+		v, err := b.store.Read(ctx, a.commit.Slot, a.marker.Version)
+		if err != nil {
+			return nil, err
+		}
+		if !b.retentionOK(v, a.marker.Version) {
+			return nil, ErrNotDurable
+		}
+		found = &a
 	}
 	if found == nil {
 		return nil, ErrNotFound
@@ -350,7 +373,7 @@ func (b *RetentionBackend) OpenTurns(ctx context.Context, before time.Time) ([]T
 	if err != nil {
 		return nil, err
 	}
-	admissions, err := b.admissions(ctx, refs)
+	admissions, err := b.admissionsRelaxed(ctx, refs)
 	if err != nil {
 		return nil, err
 	}
@@ -363,6 +386,12 @@ func (b *RetentionBackend) OpenTurns(ctx context.Context, before time.Time) ([]T
 		}
 		seen[id] = true
 		es, err := b.turnFrom(ctx, a, refs)
+		if errors.Is(err, ErrNotDurable) {
+			// A retention-expired open turn cannot be durably recovered;
+			// its lifecycle disposal is the correct next step. Skipped
+			// conservatively - never a silent corruption pass-through.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
