@@ -140,11 +140,15 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	must(err)
 	p2, err := st.CreateProject(ctx, tenant, "review in-flight project")
 	must(err)
-	var matter1, matter2 string
+	p3, err := st.CreateProject(ctx, tenant, "review future-work project")
+	must(err)
+	var matter1, matter2, matter3 string
 	must(owner.QueryRow(ctx, `SELECT matter_id::text FROM projects WHERE id=$1`, p1).Scan(&matter1))
 	must(owner.QueryRow(ctx, `SELECT matter_id::text FROM projects WHERE id=$1`, p2).Scan(&matter2))
+	must(owner.QueryRow(ctx, `SELECT matter_id::text FROM projects WHERE id=$1`, p3).Scan(&matter3))
 	must(st.SeedMember(ctx, tenant, p1, alice))
 	must(st.SeedMember(ctx, tenant, p2, bob))
+	must(st.SeedMember(ctx, tenant, p3, alice))
 	must(st.SeedRole(ctx, tenant, r1, store.RoleRecordsOfficer))
 	must(st.SeedRole(ctx, tenant, r2, store.RoleRecordsOfficer))
 	officer1 := store.Principal{TenantID: tenant, UserID: r1, Roles: map[string]bool{store.RoleRecordsOfficer: true}}
@@ -449,14 +453,16 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	}
 
 	// ---- R3: future matching work is cleared when the final hold releases ----
-	h3, err := svc.Place(ctx, officer1, records.Scope{MatterID: matter1}, "R3 hold", "c07r-h3")
+	// (Its own matter: R2 deliberately left an uncovered turn in matter1,
+	// and a hold over that matter correctly refuses to become effective.)
+	h3, err := svc.Place(ctx, officer1, records.Scope{MatterID: matter3}, "R3 hold", "c07r-h3")
 	must(err)
 	if h3.State != records.HoldEffective {
 		t.Fatalf("R3: H3 not effective: %v", h3)
 	}
 	// New matching work captured through the real recorder after activation
 	// (the guard protects it and claims it durably).
-	r3Turn := seedTurn(alice, p1, matter1, "r3-future-work")
+	r3Turn := seedTurn(alice, p3, matter3, "r3-future-work")
 	refs3, err := writeBackend.TurnDisposalRefs(ctx, tenant, r3Turn)
 	must(err)
 	for _, r := range refs3 {
