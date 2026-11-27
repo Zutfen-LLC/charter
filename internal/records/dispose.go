@@ -316,15 +316,48 @@ func (s *Service) Recover(ctx context.Context) error {
 	// transition (an effective hold is never downgraded); the claims ledger
 	// records durable progress and the audit row records any repair
 	// failure, so the outcome stays recoverable without a user retry.
+	// INCOMPLETE COVERAGE IS ALWAYS DURABLY AND OPERATIONALLY VISIBLE
+	// (C07 round-3 finding 4): a coverage pass that returns UNCOVERED
+	// records with a nil error records PENDING repair state (attributable
+	// audit row + the hold's durable report), a pass that errors records
+	// FAILED repair, and a subsequent successful pass resolves the
+	// outstanding state as VERIFIED without erasing the historical failure
+	// evidence (the audit trail is append-only). All repair-state writes
+	// are bound to the hold's current scope revision, so a stale recovery
+	// result can never overwrite the newer scope's coverage information.
 	effective, err := s.Store.HoldsInState(ctx, HoldEffective)
 	if err != nil {
 		return err
 	}
 	for _, h := range effective {
-		if _, err := s.establish(ctx, h); err != nil {
+		report, err := s.establish(ctx, h)
+		switch {
+		case err != nil:
 			s.logf("records: recover effective hold %s protection: %v", h.ID, err)
 			if aerr := s.Store.AuditProtectionRepairFailed(ctx, h.TenantID, h.ID, err.Error()); aerr != nil {
 				s.logf("records: repair audit: %v", aerr)
+			}
+			if merr := s.Store.MarkRepairState(ctx, h.ID, report.Uncovered, err.Error(), h.Epoch); merr != nil {
+				s.logf("records: repair state: %v", merr)
+			}
+		case len(report.Uncovered) > 0:
+			// Pending repair: the uncovered condition is never silently
+			// discarded.
+			s.logf("records: recover effective hold %s: %d uncovered records await repair", h.ID, len(report.Uncovered))
+			if aerr := s.Store.AuditProtectionRepairPending(ctx, h.TenantID, h.ID, report.Uncovered); aerr != nil {
+				s.logf("records: repair audit: %v", aerr)
+			}
+			if merr := s.Store.MarkRepairState(ctx, h.ID, report.Uncovered, "", h.Epoch); merr != nil {
+				s.logf("records: repair state: %v", merr)
+			}
+		case len(h.Report.RepairPending) > 0 || h.Report.RepairError != "":
+			// Verified repair: resolve the outstanding state; the
+			// append-only audit trail keeps the historical evidence.
+			if aerr := s.Store.AuditProtectionRepairComplete(ctx, h.TenantID, h.ID); aerr != nil {
+				s.logf("records: repair audit: %v", aerr)
+			}
+			if merr := s.Store.MarkRepairState(ctx, h.ID, nil, "", h.Epoch); merr != nil {
+				s.logf("records: repair state: %v", merr)
 			}
 		}
 	}

@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/evidence/s3transport"
 	"github.com/Zutfen-LLC/charter/internal/records"
+	"github.com/jackc/pgx/v5"
 )
 
 // C07 round-3 review corrections: every test here is executable RED
@@ -539,5 +541,288 @@ func TestRecoveryRepairFailureIsDistinguishableAndRetryable(t *testing.T) {
 	}
 	if stored, err := f.rs.GetHold(f.ctx(), f.principal("carol"), h.ID); err != nil || stored.State != records.HoldReleased {
 		t.Fatalf("FINDING 4: the hold must converge to released: %v %+v", err, stored)
+	}
+}
+
+// The newly applicable hold's ownership claims are visible from an
+// INDEPENDENT database connection before the first native mutation: proof
+// that the claims-commit transaction is committed durably ahead of the
+// mutation, not merely updated inside the still-open native transaction.
+func TestCommittedClaimsVisibleFromIndependentConnectionBeforeNativeMutation(t *testing.T) {
+	f := newRfx(t)
+	id := f.seedTurn("T-R3N", f.p1, f.m1, f.u["alice"])
+	refs := refsOf(f, id)
+	var h2 *records.Hold
+	var hookErr error
+	f.svc.Hooks.BeforeApplicableReload = func() {
+		f.svc.Hooks.BeforeApplicableReload = nil
+		h2, hookErr = f.rs.PlaceHold(f.ctx(), f.principal("erin"), records.Scope{MatterID: f.m1}, "concurrently applicable hold", "idem-r3-visible")
+	}
+	defer func() { f.svc.Hooks.BeforeApplicableReload = nil }()
+	visible := -1
+	f.svc.Hooks.BeforeNativeProtect = func() {
+		f.svc.Hooks.BeforeNativeProtect = nil
+		// A NEW session (not the fence transaction's connection).
+		conn, err := pgx.ConnectConfig(context.Background(), f.pool.Config().ConnConfig)
+		if err != nil {
+			hookErr = err
+			return
+		}
+		defer conn.Close(context.Background()) //nolint:errcheck
+		var n int
+		if err := conn.QueryRow(context.Background(), `SELECT count(*) FROM hold_version_claims WHERE hold_id=$1`, h2.ID).Scan(&n); err != nil {
+			hookErr = err
+			return
+		}
+		visible = n
+	}
+	defer func() { f.svc.Hooks.BeforeNativeProtect = nil }()
+	if err := f.svc.EnsureProtected(f.ctx(), f.tenant, f.m1, f.u["alice"], id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if hookErr != nil {
+		t.Fatal(hookErr)
+	}
+	if h2 == nil {
+		t.Fatal("setup: the concurrent hold was not placed")
+	}
+	if visible != len(refs) {
+		t.Fatalf("FINDING 2: only %d of %d ownership claims were visible from an independent connection before the native mutation", visible, len(refs))
+	}
+	for _, r := range refs {
+		if state := f.fs.holdState(r.Key, r.Version); state != "ON" {
+			t.Fatalf("FINDING 2: version %s not protected (state %q)", r.Key, state)
+		}
+	}
+}
+
+// The changed-applicable-set variant: H1 is fully released (state AND
+// claims reconciled) between the claims-commit phase and the native phase,
+// H2 becomes applicable, and the crash lands after the native mutation.
+// Every crash boundary converges: no native protection is left without a
+// committed owner, and both holds' ledgers converge after release.
+func TestReleasedAndReplacedHoldNeverLeavesUnownedProtection(t *testing.T) {
+	f := newRfx(t)
+	id := f.seedTurn("T-R3O", f.p1, f.m1, f.u["alice"])
+	refs := refsOf(f, id)
+	h1, err := f.rs.PlaceHold(f.ctx(), f.principal("carol"), records.Scope{MatterID: f.m1}, "first applicable hold", "idem-r3-replaced-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h2 *records.Hold
+	var hookErr error
+	f.svc.Hooks.BeforeNativeProtect = func() {
+		f.svc.Hooks.BeforeNativeProtect = nil
+		// The full release (state transition + claims reconciliation) runs
+		// in the fence-free window between the two transactions.
+		if _, rerr := f.svc.Release(f.ctx(), f.principal("carol"), h1.ID, "released between the phases"); rerr != nil {
+			hookErr = rerr
+			return
+		}
+		h2, hookErr = f.rs.PlaceHold(f.ctx(), f.principal("erin"), records.Scope{MatterID: f.m1}, "replacement applicable hold", "idem-r3-replaced-2")
+	}
+	defer func() { f.svc.Hooks.BeforeNativeProtect = nil }()
+	// Crash after the native mutation, before the native transaction
+	// commits.
+	f.svc.Hooks.StorageFault = func(stage string) error {
+		if stage == "readback" {
+			f.svc.Hooks.StorageFault = nil
+			return errors.New("injected crash after the native mutation")
+		}
+		return nil
+	}
+	defer func() { f.svc.Hooks.StorageFault = nil }()
+	if err := f.svc.EnsureProtected(f.ctx(), f.tenant, f.m1, f.u["alice"], id, time.Now()); err == nil {
+		t.Fatal("setup: the injected crash must fail the protection pass")
+	}
+	if hookErr != nil {
+		t.Fatal(hookErr)
+	}
+	if h2 == nil {
+		t.Fatal("setup: the replacement hold was not placed")
+	}
+	// H2 is released before any repair: everything converges.
+	if _, err := f.svc.Release(f.ctx(), f.principal("erin"), h2.ID, "release before repair"); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range refs {
+		if state := f.fs.holdState(r.Key, r.Version); state == "ON" {
+			t.Fatalf("FINDING 2: native protection left ON for %s with no committed owner after the changed-set crash boundary", r.Key)
+		}
+	}
+	for _, holdID := range []string{h1.ID, h2.ID} {
+		var claims int
+		if err := f.pool.QueryRow(f.ctx(), `SELECT count(*) FROM hold_version_claims WHERE hold_id=$1`, holdID).Scan(&claims); err != nil {
+			t.Fatal(err)
+		}
+		if claims != 0 {
+			t.Fatalf("FINDING 2: %d claims remain for hold %s after convergence", claims, holdID)
+		}
+	}
+}
+
+// Repeated changes in the applicable hold set stay BOUNDED: a churn storm
+// between the claims-commit and native phases fails closed after a bounded
+// number of attempts WITHOUT any native mutation, and the next pass (churn
+// stopped) converges normally.
+func TestRepeatedApplicableHoldChangesRemainBounded(t *testing.T) {
+	f := newRfx(t)
+	id := f.seedTurn("T-R3P", f.p1, f.m1, f.u["alice"])
+	refs := refsOf(f, id)
+	firings := 0
+	placed := []*records.Hold{}
+	f.svc.Hooks.BeforeNativeProtect = func() {
+		firings++
+		h, err := f.rs.PlaceHold(f.ctx(), f.principal("carol"), records.Scope{MatterID: f.m1}, "churn hold", "idem-r3-churn-"+string(rune('a'+firings)))
+		if err == nil {
+			placed = append(placed, h)
+		}
+	}
+	defer func() { f.svc.Hooks.BeforeNativeProtect = nil }()
+	err := f.svc.EnsureProtected(f.ctx(), f.tenant, f.m1, f.u["alice"], id, time.Now())
+	if err == nil {
+		t.Fatal("setup: the churn storm must fail closed")
+	}
+	// Bounded: the hook fired at most one more time than the attempt bound.
+	if firings > 5+1 {
+		t.Fatalf("FINDING 2: the retry loop is unbounded (%d hook firings)", firings)
+	}
+	// No native mutation happened under the churn.
+	for _, r := range refs {
+		if state := f.fs.holdState(r.Key, r.Version); state == "ON" {
+			t.Fatalf("FINDING 2: a version was natively protected while the applicable set kept changing (%s)", r.Key)
+		}
+	}
+	// The churn stops: the next pass converges, and EVERY applicable hold
+	// owns a durable claim for every protected version.
+	f.svc.Hooks.BeforeNativeProtect = nil
+	if err := f.svc.EnsureProtected(f.ctx(), f.tenant, f.m1, f.u["alice"], id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range refs {
+		if state := f.fs.holdState(r.Key, r.Version); state != "ON" {
+			t.Fatalf("FINDING 2: version %s not protected after convergence (state %q)", r.Key, state)
+		}
+	}
+	for _, h := range placed {
+		claims, cerr := f.rs.ClaimsOfHold(f.ctx(), h.ID)
+		if cerr != nil {
+			t.Fatal(cerr)
+		}
+		claimed := map[string]bool{}
+		for _, c := range claims {
+			claimed[c.Key+"|"+c.Version] = true
+		}
+		for _, r := range refs {
+			if !claimed[r.Key+"|"+r.Version] {
+				t.Fatalf("FINDING 2: hold %s received native protection without a durable claim on %s", h.ID, r.Key)
+			}
+		}
+	}
+}
+
+// A stale repair result (the hold's scope revision moved) must never
+// overwrite the current coverage information: the repair-state write is
+// bound to the hold's current scope epoch.
+func TestStaleScopeRevisionCannotOverwriteRepairState(t *testing.T) {
+	f := newRfx(t)
+	h := f.placeHold("carol", f.m1, "effective hold before a scope change")
+	if h.State != records.HoldEffective {
+		t.Fatalf("setup: hold not effective: %s", h.State)
+	}
+	// A pending repair state is recorded (durable visibility of a gap).
+	id := f.seedTurn("T-R3Q", f.p1, f.m1, f.u["alice"])
+	f.fb.failEnum[id] = &transportErr{}
+	if err := f.svc.Recover(f.ctx()); err != nil {
+		t.Fatal(err)
+	}
+	var reportRaw []byte
+	if err := f.pool.QueryRow(f.ctx(), `SELECT report FROM holds WHERE id=$1`, h.ID).Scan(&reportRaw); err != nil {
+		t.Fatal(err)
+	}
+	stored := map[string]any{}
+	if err := json.Unmarshal(reportRaw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := stored["repair_pending"].([]any); len(pending) == 0 {
+		t.Fatalf("setup: the repair state was not recorded (%v)", stored)
+	}
+	f.fb.failEnum[id] = nil
+	// The scope changes: the hold moves to a new scope revision.
+	if _, err := f.rs.ChangeScope(f.ctx(), f.principal("carol"), h.ID, records.Scope{MatterID: f.m1, CustodianIDs: []string{f.u["alice"]}}, "narrowed scope"); err != nil {
+		t.Fatal(err)
+	}
+	var currentEpoch int64
+	if err := f.pool.QueryRow(f.ctx(), `SELECT epoch FROM holds WHERE id=$1`, h.ID).Scan(&currentEpoch); err != nil {
+		t.Fatal(err)
+	}
+	if currentEpoch == h.Epoch {
+		t.Fatal("setup: the scope change did not move the epoch")
+	}
+	// A repair-state write bound to the PREVIOUS scope revision is refused.
+	if err := f.rs.MarkRepairState(f.ctx(), h.ID, []string{"stale-turn"}, "", h.Epoch); err == nil {
+		t.Fatal("FINDING 4: a stale repair-state write bound to a superseded scope revision was accepted")
+	}
+	if err := f.pool.QueryRow(f.ctx(), `SELECT report FROM holds WHERE id=$1`, h.ID).Scan(&reportRaw); err != nil {
+		t.Fatal(err)
+	}
+	if s := string(reportRaw); strings.Contains(s, "stale-turn") {
+		t.Fatal("FINDING 4: the stale repair state overwrote the current coverage information")
+	}
+}
+
+// A FAILED repair (the coverage pass errors) is distinguishable from a
+// PENDING repair (uncovered without an error): both are durably visible.
+func TestFailedRepairIsDistinguishedFromPendingRepair(t *testing.T) {
+	f := newRfx(t)
+	hPending := f.placeHold("carol", f.m1, "hold with a pending repair")
+	if hPending.State != records.HoldEffective {
+		t.Fatalf("setup: hold not effective: %s", hPending.State)
+	}
+	id := f.seedTurn("T-R3R", f.p1, f.m1, f.u["alice"])
+	f.fb.failEnum[id] = &transportErr{}
+	if err := f.svc.Recover(f.ctx()); err != nil {
+		t.Fatal(err)
+	}
+	var raw []byte
+	if err := f.pool.QueryRow(f.ctx(), `SELECT report FROM holds WHERE id=$1`, hPending.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	pending := map[string]any{}
+	if err := json.Unmarshal(raw, &pending); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := pending["repair_pending"].([]any); len(p) == 0 {
+		t.Fatalf("setup: pending repair state not recorded (%v)", pending)
+	}
+	if e, _ := pending["repair_error"].(string); e != "" {
+		t.Fatalf("setup: a pending repair must not carry a failure detail (%q)", e)
+	}
+	// A FAILED repair: the coverage pass itself errors (a storage fault
+	// during protection).
+	hFailed := f.placeHold("erin", f.m2, "hold with a failed repair")
+	if hFailed.State != records.HoldEffective {
+		t.Fatalf("setup: hold not effective: %s", hFailed.State)
+	}
+	f.seedTurn("T-R3S", f.p2, f.m2, f.u["bob"])
+	f.svc.Hooks.StorageFault = func(stage string) error {
+		if stage == "protect" {
+			return errors.New("injected protection failure")
+		}
+		return nil
+	}
+	if err := f.svc.Recover(f.ctx()); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.Hooks.StorageFault = nil
+	if err := f.pool.QueryRow(f.ctx(), `SELECT report FROM holds WHERE id=$1`, hFailed.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	failed := map[string]any{}
+	if err := json.Unmarshal(raw, &failed); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := failed["repair_error"].(string); e == "" {
+		t.Fatalf("FINDING 4: the failed repair is not distinguished from a pending repair (%v)", failed)
 	}
 }

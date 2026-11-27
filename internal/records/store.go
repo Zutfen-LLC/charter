@@ -1751,6 +1751,80 @@ func (s *Store) AuditProtectionRepairFailed(ctx context.Context, tenantID, holdI
 	return tx.Commit(ctx)
 }
 
+// AuditProtectionRepairPending durably records that an effective hold's
+// recovery coverage pass left records UNCOVERED with a nil error: the
+// repair state is pending (attributable, retryable), never silently
+// discarded (C07 round-3 finding 4).
+func (s *Store) AuditProtectionRepairPending(ctx context.Context, tenantID, holdID string, uncovered []string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if err := audit(ctx, tx, tenantID, nil, "hold.protection_repair_pending", map[string]any{
+		"hold_id": holdID, "uncovered": uncovered,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// AuditProtectionRepairComplete durably records that a subsequent recovery
+// resolved an effective hold's outstanding repair state (verified repair).
+// The append-only audit trail keeps the historical failure and pending
+// evidence.
+func (s *Store) AuditProtectionRepairComplete(ctx context.Context, tenantID, holdID string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if err := audit(ctx, tx, tenantID, nil, "hold.protection_repair_complete", map[string]any{
+		"hold_id": holdID,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// MarkRepairState durably merges the protection-repair state of an
+// EFFECTIVE hold into its stored report: pending (uncovered records whose
+// protection could not be verified), failed (establishment error detail)
+// or verified (both cleared - resolution). The update is BOUND to the
+// hold's current scope epoch: a stale recovery result completing after a
+// scope change can never overwrite the newer scope's coverage information.
+// The update merges into the stored report (Items, gaps and other fields
+// are preserved); the append-only audit trail keeps the historical
+// failure evidence.
+func (s *Store) MarkRepairState(ctx context.Context, holdID string, pending []string, repairErr string, wantEpoch int64) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var id string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM holds WHERE id=$1 AND epoch=$2 FOR UPDATE`, holdID, wantEpoch).Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: repair state for hold %s is bound to a superseded scope revision", ErrStaleEstablishment, holdID)
+		}
+		return err
+	}
+	h, err := loadHold(ctx, tx, holdID)
+	if err != nil {
+		return err
+	}
+	h.Report.RepairPending = pending
+	h.Report.RepairError = repairErr
+	b, err := json.Marshal(h.Report)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE holds SET report=$2 WHERE id=$1`, holdID, b); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func scanPlanRows(rows pgx.Rows) ([]PlanRow, error) {
 	var out []PlanRow
 	for rows.Next() {

@@ -87,6 +87,19 @@ type Report struct {
 	// legal hold cleared because the storage was unavailable). Conservative:
 	// pending cleanup means OVER-protection, never under-protection.
 	ReleaseCleanupPending []VersionRef `json:"release_cleanup_pending,omitempty"`
+	// RepairPending: turn IDs whose protection repair is OUTSTANDING -
+	// uncovered records observed by an effective hold's recovery coverage
+	// pass (their exact-version inventory was unverifiable or their native
+	// protection could not be established). Distinguished from failed
+	// repair (RepairError) and from verified repair (both empty): an
+	// effective hold is never downgraded, but incomplete coverage is
+	// always durably and operationally visible (C07 round-3 finding 4).
+	RepairPending []string `json:"repair_pending,omitempty"`
+	// RepairError: the last repair FAILURE detail (the coverage pass
+	// returned an error). Empty while the outstanding state is pending
+	// (uncovered without an error); the historical failure evidence stays
+	// in the append-only audit trail after the state resolves.
+	RepairError string `json:"repair_error,omitempty"`
 	// Last establishment error detail, when state is failed.
 	Error string `json:"error,omitempty"`
 }
