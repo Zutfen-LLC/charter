@@ -1111,6 +1111,16 @@ func (s *Service) PresenceClassified(ctx context.Context, tenantID, turnID strin
 	return p
 }
 
+// PresenceClassifiedIn reports the turn's classified byte presence
+// reusing the given transaction's connection: callers whose callback
+// runs INSIDE an open transaction (the purge-begin verify callback) must
+// not acquire a second pooled connection while it is held (the pool
+// would otherwise deadlock under exhaustion).
+func (s *Service) PresenceClassifiedIn(ctx context.Context, tx pgx.Tx, tenantID, turnID string) Presence {
+	p, _ := s.classifyPresence(ctx, tx, tenantID, turnID)
+	return p
+}
+
 // ItemHeld reports whether the records officer's tenant holds the item.
 func (s *Service) ItemHeld(ctx context.Context, p store.Principal, turnID string) (bool, Item, error) {
 	p, ok := canonP(p)

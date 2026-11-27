@@ -217,8 +217,12 @@ func (a *Auth) purgeBegin(w http.ResponseWriter, r *http.Request, p store.Princi
 	// Presence is classified, never guessed: a storage failure surfaces as
 	// an error (never as proof of disposal) and only plan-verified absence
 	// may complete a disposal (C07 review finding 4).
-	outcome, err := a.Records.Store.BeginPurge(r.Context(), p, r.PathValue("turn"), func(ctx context.Context, _ pgx.Tx, turnID string) (bool, error) {
-		switch a.Records.PresenceClassified(ctx, p.TenantID, turnID) {
+	outcome, err := a.Records.Store.BeginPurge(r.Context(), p, r.PathValue("turn"), func(ctx context.Context, tx pgx.Tx, turnID string) (bool, error) {
+		// Classify presence through the transaction's connection: the
+		// callback runs inside BeginPurge's transaction, and a second
+		// pooled acquisition here deadlocks the pool under exhaustion
+		// (the same defect the finisher fix removed).
+		switch a.Records.PresenceClassifiedIn(ctx, tx, p.TenantID, turnID) {
 		case records.PresencePresent, records.PresencePartial:
 			return true, nil
 		case records.PresenceAbsent:
