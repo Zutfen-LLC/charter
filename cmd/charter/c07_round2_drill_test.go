@@ -178,13 +178,13 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 		}}
 	}
 	recorder := newRecorder(writeBackend)
-	seedTurn := func(project, matter, custodian, input string) string {
+	seedTurn := func(project, matter, custodian, label, input string) string {
 		t.Helper()
 		res, err := recorder.Process(ctx, evidence.Request{
 			TenantID: tenant, ProjectID: project, MatterID: matter, CustodianID: custodian,
-			IdempotencyKey: "c07r2-" + input, Input: []byte(input),
+			IdempotencyKey: "c07r2-" + label, Input: []byte(input),
 		}, func(ctx context.Context, sent []byte) (evidence.ModelOutcome, error) {
-			return evidence.ModelOutcome{Accepted: true, Complete: true, Output: []byte("round2 output " + input)}, nil
+			return evidence.ModelOutcome{Accepted: true, Complete: true, Output: []byte("round2 output " + label)}, nil
 		}, func(context.Context) error { return nil })
 		must(err)
 		return res.TurnID
@@ -209,6 +209,26 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 		must(err)
 		return refs
 	}
+	// listTenant reports the version count under the tenant's storage
+	// prefix (diagnostics for the S1 vanishing-versions investigation).
+	tenantPrefix := "charter/v1/" + sc.Deployment + "-c07r2/" + tenant + "/"
+	listTenant := func(tag string) {
+		t.Helper()
+		refs, lerr := writeClient.Versions(ctx, tenantPrefix)
+		if lerr != nil {
+			t.Logf("LIST %s: error %v", tag, lerr)
+			return
+		}
+		var sample []string
+		for i, r := range refs {
+			if i >= 3 {
+				break
+			}
+			sample = append(sample, r.Key+"@"+r.VersionID)
+		}
+		t.Logf("LIST %s: %d versions under %s (sample %v)", tag, len(refs), tenantPrefix, sample)
+	}
+	listTenant("after-backends")
 	allProtected := func(turn, tag string) {
 		t.Helper()
 		refs := refsOf(turn)
@@ -257,14 +277,15 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	}
 
 	// ---- Seed the scenario turns (before the retention wait) ----
-	s1Turn := seedTurn(pS1, mS1, alice, "r2s1-partial-coverage")
-	s3A := seedTurn(pS3, mS3, alice, "r2s3-shared-input")
-	s3B := seedTurn(pS3, mS3, alice, "r2s3-shared-input") // same input bytes: one shared exact version
-	s4Turn := seedTurn(pS4, mS4, alice, "r2s4-plan-restore")
-	s6Turn := seedTurn(pS6, mS6, bob, "r2s6-claims-interleave")
+	s1Turn := seedTurn(pS1, mS1, alice, "r2s1-partial-coverage", "r2s1-partial-coverage")
+	s3A := seedTurn(pS3, mS3, alice, "s3-a", "r2s3-shared-input")
+	s3B := seedTurn(pS3, mS3, alice, "s3-b", "r2s3-shared-input") // same input bytes, distinct idempotency key: two records sharing one exact version
+	s4Turn := seedTurn(pS4, mS4, alice, "r2s4-plan-restore", "r2s4-plan-restore")
+	s6Turn := seedTurn(pS6, mS6, bob, "r2s6-claims-interleave", "r2s6-claims-interleave")
 	dump("c07r2-seed-turns.json", map[string]string{"s1": s1Turn, "s3a": s3A, "s3b": s3B, "s4": s4Turn, "s6": s6Turn})
 	s1Refs := refsOf(s1Turn)
 	s4Refs := refsOf(s4Turn)
+	listTenant("after-seed")
 
 	// ---- The storage retention horizon passes for the seed versions ----
 	if wait := 75*time.Second - time.Since(seedStarted); wait > 0 {
@@ -277,6 +298,7 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	} else if marked == 0 {
 		t.Fatal("S1: no disposal-eligible turn")
 	}
+	listTenant("after-sweep")
 	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s1Turn, func(context.Context, string) (bool, error) {
 		return true, nil
 	}); err != nil || outcome != "purging" {
@@ -286,13 +308,17 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	must(svc.Store.FinishPurgePlanTx(ctx, &officer2, tenant, s1Turn, func(ctx context.Context) ([]evidence.VersionRef, error) {
 		return svcBackend.TurnDisposalRefs(ctx, tenant, s1Turn)
 	}, &outcome))
+	listTenant("after-plan")
 	// The disposal is interrupted after the admission marker was physically
 	// deleted while other required versions remain; the transaction never
 	// commits dispositions, and the enumeration root is gone.
 	must(recordsClient.DeleteVersion(ctx, s1Refs[0].Key, s1Refs[0].Version))
+	listTenant("after-admission-delete")
 	// A matching hold is placed before any disposal recovery completes.
+	listTenant("after-place-precheck")
 	s1Hold, err := svc.Place(ctx, officer1, records.Scope{MatterID: mS1}, "S1 hold over a partially disposed record", "c07r2-s1")
 	must(err)
+	listTenant("after-place")
 	if s1Hold.State != records.HoldEffective {
 		t.Fatalf("S1 FINDING 1: hold not effective over partially disposed coverage: %+v", s1Hold)
 	}
