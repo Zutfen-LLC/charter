@@ -124,4 +124,3 @@ END $$ LANGUAGE plpgsql`); err != nil {
 		t.Fatalf("the retried recovery did not record the audit row (n=%d err=%v)", n, err)
 	}
 }
-
