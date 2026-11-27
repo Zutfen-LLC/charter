@@ -341,3 +341,27 @@ func (b PG) InventoryTurns(ctx context.Context, tenantID string) ([]TurnIdentity
 	}
 	return out, rows.Err()
 }
+
+// TurnTerminal reports whether the turn's capture reached a terminal event
+// (C07 review finding 6A: disposal eligibility requires a verified terminal
+// capture state; an actively executing turn is never swept).
+func (b PG) TurnTerminal(ctx context.Context, tenantID, turnID string) (bool, error) {
+	if !idRe.MatchString(tenantID) || !idRe.MatchString(turnID) {
+		return false, ErrNotFound
+	}
+	queryRow := b.DB.QueryRow
+	if b.fence != nil {
+		conn, release, err := b.fence.lease(ctx)
+		if err != nil {
+			return false, err
+		}
+		defer release()
+		queryRow = conn.QueryRow
+	}
+	var terminal bool
+	err := queryRow(ctx, `SELECT EXISTS (SELECT 1 FROM evidence_events WHERE tenant_id=$1::uuid AND turn_id=$2::uuid AND type IN ('turn_completed','turn_interrupted'))`, tenantID, turnID).Scan(&terminal)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	return terminal, err
+}

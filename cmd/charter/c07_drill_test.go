@@ -477,9 +477,7 @@ func TestC07HoldRetentionLifecycleDrill(t *testing.T) {
 	// Step 14: the unheld control expires under policy and is actually
 	// disposed: logical deletion, eligible expiry and observed physical
 	// disposal are distinct results.
-	turnsB, err := disposalBackend.InventoryTurns(ctx, tenant)
-	must(err)
-	marked, err := disposalService.Store.Sweep(ctx, officer1, turnsB, records.SweepPolicy{RetentionSeconds: 1, GraceSeconds: 0})
+	marked, err := disposalService.Sweep(ctx, officer1)
 	must(err)
 	if marked == 0 {
 		t.Fatal("no disposal-eligible control marked")
@@ -507,9 +505,7 @@ func TestC07HoldRetentionLifecycleDrill(t *testing.T) {
 		t.Fatalf("H3 not effective: %v", h3)
 	}
 	// While held, the control is not eligible.
-	turnsB, err = disposalBackend.InventoryTurns(ctx, tenant)
-	must(err)
-	if _, err := disposalService.Store.Sweep(ctx, officer1, turnsB, records.SweepPolicy{RetentionSeconds: 1, GraceSeconds: 0}); err != nil {
+	if _, err := disposalService.Sweep(ctx, officer1); err != nil {
 		t.Fatal(err)
 	}
 	if outcome, err := disposalService.Store.BeginPurge(ctx, officer2, release3, func(context.Context, string) (bool, error) {
@@ -522,9 +518,7 @@ func TestC07HoldRetentionLifecycleDrill(t *testing.T) {
 	if released3.State != records.HoldReleased {
 		t.Fatalf("release H3: %v", released3)
 	}
-	turnsB, err = disposalBackend.InventoryTurns(ctx, tenant)
-	must(err)
-	if _, err := disposalService.Store.Sweep(ctx, officer1, turnsB, records.SweepPolicy{RetentionSeconds: 1, GraceSeconds: 0}); err != nil {
+	if _, err := disposalService.Sweep(ctx, officer1); err != nil {
 		t.Fatal(err)
 	}
 	if outcome, err := disposalService.Store.BeginPurge(ctx, officer2, release3, func(context.Context, string) (bool, error) {
@@ -548,7 +542,7 @@ func TestC07HoldRetentionLifecycleDrill(t *testing.T) {
 	// Step 15 (races on real PG+storage): a hold placement racing a purge
 	// finish cannot create a preservation gap - whichever commits first
 	// wins and the loser observes it deterministically.
-	if _, err := restarted.Store.Sweep(ctx, officer1, turnsB, records.SweepPolicy{RetentionSeconds: 1, GraceSeconds: 0}); err != nil {
+	if _, err := restarted.Sweep(ctx, officer1); err != nil {
 		t.Fatal(err)
 	}
 	if outcome, err := restarted.Store.BeginPurge(ctx, officer2, raceTurn, func(context.Context, string) (bool, error) {

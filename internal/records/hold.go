@@ -61,6 +61,10 @@ type Hold struct {
 // Report is the hold's durable coverage report (ADR: the miss must be visible
 // rather than silent).
 type Report struct {
+	// The scope revision (the hold's epoch value) this report was verified
+	// under; the effective transition binds to it, so a committed report
+	// always corresponds to the exact scope revision it verified.
+	ScopeEpoch int64 `json:"scope_epoch,omitempty"`
 	// Turns enumerated in scope at establishment, with per-item outcomes.
 	Items []ReportedItem `json:"items"`
 	// Turn IDs already disposed when the hold was placed.

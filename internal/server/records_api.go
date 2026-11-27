@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -187,17 +188,10 @@ func (a *Auth) setPolicy(w http.ResponseWriter, r *http.Request, p store.Princip
 }
 
 func (a *Auth) sweep(w http.ResponseWriter, r *http.Request, p store.Principal) {
-	turns, err := a.Records.Inventory(r.Context(), p)
-	if err != nil {
-		a.fail(w, err)
-		return
-	}
-	policy, err := a.Records.Store.Policy(r.Context(), p.TenantID)
-	if err != nil {
-		a.fail(w, err)
-		return
-	}
-	marked, err := a.Records.Store.Sweep(r.Context(), p, turns, policy)
+	// The service-level sweep requires a verified terminal capture state for
+	// disposal eligibility: an admitted, actively executing turn is never
+	// swept (C07 review finding 6A).
+	marked, err := a.Records.Sweep(r.Context(), p)
 	if err != nil {
 		a.fail(w, err)
 		return
@@ -219,8 +213,18 @@ func (a *Auth) purgeBegin(w http.ResponseWriter, r *http.Request, p store.Princi
 		deny(w, http.StatusConflict, "disposal not supported by this evidence backend")
 		return
 	}
+	// Presence is classified, never guessed: a storage failure surfaces as
+	// an error (never as proof of disposal) and only plan-verified absence
+	// may complete a disposal (C07 review finding 4).
 	outcome, err := a.Records.Store.BeginPurge(r.Context(), p, r.PathValue("turn"), func(ctx context.Context, turnID string) (bool, error) {
-		return a.Records.VersionPresent(ctx, p.TenantID, turnID), nil
+		switch a.Records.PresenceClassified(ctx, p.TenantID, turnID) {
+		case records.PresencePresent, records.PresencePartial:
+			return true, nil
+		case records.PresenceAbsent:
+			return false, nil
+		default:
+			return false, fmt.Errorf("records: presence unresolved for %s", turnID)
+		}
 	})
 	if err != nil {
 		a.fail(w, err)

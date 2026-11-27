@@ -55,3 +55,19 @@ func DisposalVersionsOf(b Backend) (DisposalVersions, bool) {
 	v, ok := b.(DisposalVersions)
 	return v, ok
 }
+
+// TurnTerminal is implemented by backends that can report whether a turn's
+// capture has reached a terminal event (turn_completed / turn_failed /
+// turn_aborted). Disposal eligibility requires a verified terminal state: an
+// admitted, actively executing turn must never be destroyed by ordinary
+// expiry (C07 review finding 6A). Terminality is monotonic once observed.
+type TurnTerminal interface {
+	TurnTerminal(ctx context.Context, tenantID, turnID string) (bool, error)
+}
+
+// TerminalOf returns the terminality prober when implemented. Backends that
+// cannot report terminality are treated as non-terminal (fail closed).
+func TerminalOf(b Backend) (TurnTerminal, bool) {
+	v, ok := b.(TurnTerminal)
+	return v, ok
+}

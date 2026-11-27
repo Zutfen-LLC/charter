@@ -147,7 +147,18 @@ func (e *AbortedError) Unwrap() error { return e.Cause }
 // so far before the turn may proceed. Any error fails the turn closed.
 type TurnLifecycleGuard interface {
 	HoldApplies(ctx context.Context, tenant, matter, custodian string, recordedAt time.Time) (bool, error)
-	EnsureProtected(ctx context.Context, tenant, turn string) error
+	EnsureProtected(ctx context.Context, tenant, matter, custodian, turn string, recordedAt time.Time) error
+}
+
+// ReferenceFencer, when implemented by the lifecycle guard, serializes
+// capture-side reference acquisition (turn admission, event append and
+// object staging) against concurrent disposal deletion of the same exact
+// content-addressed versions: a new reference can never be acquired between
+// a disposal's shared-reference snapshot and its irreversible deletion (C07
+// review finding 6B). The release commits the fence transaction; a fence
+// error fails the write closed.
+type ReferenceFencer interface {
+	AcquireReferenceFence(ctx context.Context, tenant string) (func(context.Context) error, error)
 }
 
 // Recorder is the durable write path. Its ordering enforces ADR 0001 R1-R4
@@ -271,6 +282,9 @@ func (t *turn) svc() map[string]any {
 }
 
 // emit stores one event and, only on success, extends the in-memory chain.
+// The append is a reference acquisition (its commit references
+// content-addressed object versions), so it is fenced against concurrent
+// disposal deletion of the same exact versions (finding 6B).
 func (t *turn) emit(ctx context.Context, typ string, p map[string]any) (Event, Receipt, error) {
 	e, err := t.build(typ, t.svc(), p)
 	if err != nil {
@@ -278,7 +292,28 @@ func (t *turn) emit(ctx context.Context, typ string, p map[string]any) (Event, R
 	}
 	wc, cancel := t.rc.wctx(ctx)
 	defer cancel()
+	var releaseFence func(context.Context) error
+	if f, ok := t.rc.Lifecycle.(ReferenceFencer); ok {
+		var ferr error
+		releaseFence, ferr = f.AcquireReferenceFence(wc, t.tenant)
+		if ferr != nil {
+			return nil, Receipt{}, fmt.Errorf("%w: append reference fence: %v", ErrFailClosed, ferr)
+		}
+	}
+	defer func() {
+		if releaseFence != nil {
+			if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+				t.rc.Logf("evidence: append fence release: %v", rerr)
+			}
+		}
+	}()
 	r, err := t.rc.Backend.Append(wc, e)
+	if releaseFence != nil {
+		if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+			t.rc.Logf("evidence: append fence release: %v", rerr)
+		}
+		releaseFence = nil
+	}
 	if err != nil {
 		return nil, Receipt{}, err
 	}
@@ -319,7 +354,30 @@ func (t *turn) emitAcked(ctx context.Context, typ string, p map[string]any) erro
 func (rc *Recorder) put(ctx context.Context, tenant string, data []byte) error {
 	wc, cancel := rc.wctx(ctx)
 	defer cancel()
+	// Object staging is a reference acquisition to a content-addressed
+	// version: fenced against concurrent disposal deletion (finding 6B).
+	var releaseFence func(context.Context) error
+	if f, ok := rc.Lifecycle.(ReferenceFencer); ok {
+		var ferr error
+		releaseFence, ferr = f.AcquireReferenceFence(wc, tenant)
+		if ferr != nil {
+			return fmt.Errorf("%w: object reference fence: %v", ErrFailClosed, ferr)
+		}
+	}
+	defer func() {
+		if releaseFence != nil {
+			if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+				rc.Logf("evidence: object fence release: %v", rerr)
+			}
+		}
+	}()
 	_, err := rc.Backend.PutObject(wc, tenant, data)
+	if releaseFence != nil {
+		if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+			rc.Logf("evidence: object fence release: %v", rerr)
+		}
+		releaseFence = nil
+	}
 	return err
 }
 
@@ -403,9 +461,34 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 	}
 	wc, cancel := rc.wctx(ctx)
 	defer cancel()
+	// Reference acquisition is fenced against concurrent disposal deletion
+	// of the same exact content-addressed versions (finding 6B). The fence
+	// is released before the lifecycle guard's own protection pass, which
+	// takes the same tenant lock internally.
+	var releaseFence func(context.Context) error
+	if f, ok := rc.Lifecycle.(ReferenceFencer); ok {
+		var ferr error
+		releaseFence, ferr = f.AcquireReferenceFence(wc, req.TenantID)
+		if ferr != nil {
+			return nil, nil, fmt.Errorf("%w: admission reference fence: %v", ErrFailClosed, ferr)
+		}
+	}
+	defer func() {
+		if releaseFence != nil {
+			if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+				rc.Logf("evidence: admission fence release: %v", rerr)
+			}
+		}
+	}()
 	res, err := rc.Backend.Admit(wc, Admission{TenantID: req.TenantID, ProjectID: req.ProjectID,
 		MatterID: req.MatterID, CustodianID: req.CustodianID, IdempotencyKey: req.IdempotencyKey,
 		TurnID: id, Fingerprint: fp}, first, [][]byte{req.Input})
+	if releaseFence != nil {
+		if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+			rc.Logf("evidence: admission fence release: %v", rerr)
+		}
+		releaseFence = nil
+	}
 	if err != nil {
 		if errors.Is(err, ErrIdempotencyMismatch) {
 			return nil, nil, err
@@ -434,7 +517,7 @@ func (rc *Recorder) ensureProtected(ctx context.Context, req Request, turnID str
 	if err != nil || !applies {
 		return err
 	}
-	return rc.Lifecycle.EnsureProtected(ctx, req.TenantID, turnID)
+	return rc.Lifecycle.EnsureProtected(ctx, req.TenantID, req.MatterID, req.CustodianID, turnID, recorded)
 }
 
 // EnsureTurnProtected re-checks hold protection immediately before release

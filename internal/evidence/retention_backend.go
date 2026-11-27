@@ -630,3 +630,57 @@ func (b *RetentionBackend) TurnVersionRefs(ctx context.Context, tenantID, turnID
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
 }
+
+// TurnTerminal reports whether the turn's capture reached a terminal event
+// (turn_completed / turn_interrupted) by reading the highest-sequence event
+// slot and its data event. Disposal eligibility requires this: an admitted,
+// actively executing turn must never be destroyed by ordinary expiry (C07
+// review finding 6A). Retention state is deliberately not required.
+func (b *RetentionBackend) TurnTerminal(ctx context.Context, tenantID, turnID string) (bool, error) {
+	if !idRe.MatchString(tenantID) || !idRe.MatchString(turnID) {
+		return false, ErrNotFound
+	}
+	root := b.prefix + tenantID + "/events/" + turnID + "/"
+	refs, err := b.store.Versions(ctx, root)
+	if err != nil {
+		return false, err
+	}
+	highest := uint64(0)
+	highestVersion := ""
+	for _, r := range refs {
+		s := strings.TrimPrefix(r.Key, root)
+		seq, err := strconv.ParseUint(s, 10, 53)
+		if err != nil || strconv.FormatUint(seq, 10) != s || seq == 0 {
+			return false, ErrConflict
+		}
+		if seq > highest {
+			highest = seq
+			highestVersion = r.VersionID
+		}
+	}
+	if highest == 0 {
+		// No event slots: the turn was never admitted (or is fully gone).
+		return false, ErrNotFound
+	}
+	key := b.eventSlot(tenantID, turnID, highest)
+	v, err := b.store.Read(ctx, key, highestVersion)
+	if err != nil {
+		return false, err
+	}
+	c, err := decodeSignedCandidate(v.Data, b.trustedKey)
+	if err != nil || c.Slot != key || c.Turn != turnID || c.Tenant != tenantID || c.Seq != highest {
+		return false, ErrConflict
+	}
+	ev, err := b.store.Read(ctx, c.Event.Key, c.Event.Version)
+	if err != nil {
+		return false, err
+	}
+	e, err := ParseEvent(ev.Data)
+	if err != nil {
+		return false, ErrConflict
+	}
+	if str(e, "turn_id") != turnID || str(e, "tenant_id") != tenantID {
+		return false, ErrConflict
+	}
+	return isTerminal(str(e, "type")), nil
+}
