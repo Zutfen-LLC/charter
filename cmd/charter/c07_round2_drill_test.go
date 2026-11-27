@@ -23,6 +23,7 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/oidc/syntheticidp"
 	"github.com/Zutfen-LLC/charter/internal/records"
 	"github.com/Zutfen-LLC/charter/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -277,7 +278,7 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	} else if marked == 0 {
 		t.Fatal("S1: no disposal-eligible turn")
 	}
-	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s1Turn, func(context.Context, string) (bool, error) {
+	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s1Turn, func(context.Context, pgx.Tx, string) (bool, error) {
 		return true, nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("S1 begin: %s %v", outcome, err)
@@ -342,7 +343,7 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	svcTransport.failReadKey = s3BSlot
 	svcTransport.armed = true
 	svcTransport.mu.Unlock()
-	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s3A, func(context.Context, string) (bool, error) {
+	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s3A, func(context.Context, pgx.Tx, string) (bool, error) {
 		return true, nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("S3 begin: %s %v", outcome, err)
@@ -377,7 +378,7 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	dump("c07r2-s3-unknown-sibling.json", map[string]any{"disposal_turn": s3A, "sibling": s3B, "blocked_marker": s3BSlot})
 
 	// ---- S4: verified plan restoration after partial deletion ----
-	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s4Turn, func(context.Context, string) (bool, error) {
+	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s4Turn, func(context.Context, pgx.Tx, string) (bool, error) {
 		return true, nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("S4 begin: %s %v", outcome, err)
@@ -443,7 +444,7 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	if _, err := svc.Sweep(ctx, officer1); err != nil {
 		t.Fatal(err)
 	}
-	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s4Turn, func(context.Context, string) (bool, error) {
+	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s4Turn, func(context.Context, pgx.Tx, string) (bool, error) {
 		return true, nil
 	}); err != nil || outcome != "purging" {
 		t.Fatalf("S4 second begin: %s %v", outcome, err)
