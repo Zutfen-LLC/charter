@@ -32,20 +32,23 @@ func TestC07MigrationIsAdditiveOverLegacySchema(t *testing.T) {
 	if _, err := st.CreateArtifact(ctx, tenant, project, "legacy chat", "legacy body"); err != nil {
 		t.Fatal(err)
 	}
-	// Rewind to the pre-C07 shape: the 0008 tables are gone and the
-	// migration ledger no longer records them.
+	// Rewind to the pre-C07 shape: the 0008 and 0009 tables are gone and
+	// the migration ledger no longer records them.
+	if _, err := pool.Exec(ctx, `DROP TABLE hold_version_claims, disposal_plans, tenant_protection CASCADE`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `DROP TABLE hold_custodians, holds, matter_hold_epochs, retention_items, retention_policies CASCADE`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `DELETE FROM schema_migrations WHERE version='0008_hold_lifecycle.sql'`); err != nil {
+	if _, err := pool.Exec(ctx, `DELETE FROM schema_migrations WHERE version IN ('0008_hold_lifecycle.sql','0009_protection_ownership.sql')`); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := migrate.Pending(ctx, pool)
-	if err != nil || len(pending) != 1 || pending[0] != "0008_hold_lifecycle.sql" {
+	if err != nil || len(pending) != 2 || pending[0] != "0008_hold_lifecycle.sql" || pending[1] != "0009_protection_ownership.sql" {
 		t.Fatalf("pending after rewind: %v (err %v)", pending, err)
 	}
 	applied, err := migrate.Up(ctx, pool)
-	if err != nil || len(applied) != 1 || applied[0] != "0008_hold_lifecycle.sql" {
+	if err != nil || len(applied) != 2 || applied[0] != "0008_hold_lifecycle.sql" || applied[1] != "0009_protection_ownership.sql" {
 		t.Fatalf("forward migration: %v (err %v)", applied, err)
 	}
 	// Legacy data survived untouched.
@@ -72,6 +75,16 @@ func TestC07MigrationIsAdditiveOverLegacySchema(t *testing.T) {
 	var hasPrivilege bool
 	if err := pool.QueryRow(ctx, `SELECT has_table_privilege('charter_workspace_app','retention_items','UPDATE')`).Scan(&hasPrivilege); err != nil || !hasPrivilege {
 		t.Fatalf("runtime role lacks lifecycle grant: %v (err %v)", hasPrivilege, err)
+	}
+	// The 0009 protection-ownership tables are functional and granted.
+	for _, table := range []string{"tenant_protection", "hold_version_claims", "disposal_plans"} {
+		var ok bool
+		if err := pool.QueryRow(ctx, `SELECT has_table_privilege('charter_workspace_app',$1,'UPDATE')`, table).Scan(&ok); err != nil || !ok {
+			t.Fatalf("runtime role lacks %s grant: %v (err %v)", table, ok, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO tenant_protection(tenant_id) VALUES ($1) ON CONFLICT DO NOTHING`, tenant); err != nil {
+		t.Fatal(err)
 	}
 	_ = p
 }
