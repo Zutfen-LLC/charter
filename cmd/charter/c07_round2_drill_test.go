@@ -457,8 +457,23 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	if it := itemState(s4Turn); it != records.ItemActive {
 		t.Fatalf("S4: restored item state %s, want active", it)
 	}
-	// Remaining bytes protected under the hold.
-	allProtected(s4Turn, "S4")
+	// Remaining bytes protected under the hold. The turn's live
+	// enumeration root (admission) is gone by construction, so the
+	// protection probe runs through the DURABLE PLAN's surviving rows -
+	// the same authoritative exact-version inventory the eventual
+	// disposal completes from.
+	s4PlanRows, err := svc.Store.PlanOf(ctx, tenant, s4Turn)
+	must(err)
+	for _, row := range s4PlanRows {
+		if row.Disposition == records.OutcomeDeleted || row.Disposition == records.OutcomeAbsent {
+			continue
+		}
+		state, lerr := recordsClient.LegalHold(ctx, row.Key, row.Version)
+		must(lerr)
+		if state != "ON" {
+			t.Fatalf("S4 FINDING 4: surviving planned version %s is %q, want native legal hold ON", row.Key, state)
+		}
+	}
 	// Release the hold: the eventual disposal of the remaining bytes
 	// completes from the plan.
 	if _, err := svc.Release(ctx, officer1, s4Hold.ID, "S4 release"); err != nil {
