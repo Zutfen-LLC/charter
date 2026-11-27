@@ -165,6 +165,59 @@ and scope change is also fixed).
   (e.g. the admission marker gone while sibling versions survive) is
   reported and retained, never claimed as disposal.
 
+## Round-2 review corrections (the remaining preservation-critical findings)
+
+- **Coverage is the authoritative union** of the live evidence inventory,
+  the durable lifecycle catalog and the durable disposal plans: a matching
+  record whose live enumeration root is gone is covered from its plan
+  (reported `partially_disposed` with the storage-verified losses counted
+  and the remaining versions protected); a root-gone record WITHOUT a plan
+  is `uncovered` and blocks the effective transition; a catalog-loading
+  error fails the establishment instead of becoming an empty catalog. No
+  record is silently omitted because its normal enumeration root is
+  missing.
+- **Every terminal capture path protects matching evidence**: the recorder
+  establishes hold protection after the terminal event of denied,
+  C06-refused, provider-failed, release-vetoed, interrupted and recovered
+  turns (not only on the successful release/delivery path), and lifecycle
+  recovery (`Recover`) re-establishes the full coverage of EFFECTIVE holds,
+  repairing missing native protection without any client replay. A
+  protection failure on a terminal path is logged durably and retried by
+  recovery; the turn's evidence is never discarded.
+- **Namespace fallback reference resolution is classified**: verified
+  complete references, authoritatively established absence, known partial
+  references backed by durable plans, and UNKNOWN references (transient or
+  permanent marker read/verification failure). An unknown sibling
+  reference set refuses the irreversible deletion (shared-reference scan)
+  and the protection removal (required-version scan): an unreadable
+  reference is never an absent one. A missing slot in the namespace
+  sequence, an unreadable or unverifiable listed marker, and a slot key
+  holding only delete markers all count as unknown references.
+- **Plan restoration requires verified completeness**: a restore to active
+  over a plan with outstanding entries verifies EVERY planned version by
+  actual storage readback. Partial physical deletion restores with the
+  loss recorded in the plan (`restored_active_partial`; the
+  exact-version inventory is never destroyed) and protects the remaining
+  bytes; every planned version gone completes the disposal honestly
+  (`disposed_ambiguous`); the plan is cleared only for verified-complete
+  restorations and completed disposals. Physical absence claims require an
+  actual storage readback after each delete - a successful DeleteVersion
+  response alone is never proof of disposal.
+- **Placement idempotency is bound to the authorized intent**: a reused
+  idempotency key is acknowledged only when the retry carries the exact
+  matter, custodian selection, time window, reason and placing officer of
+  the admitted hold; a changed intent fails explicitly (409) instead of
+  acknowledging an unrelated existing hold. Identical retries return the
+  original durable operation with no duplicate hold, epoch bump or audit
+  row, and actor attribution is preserved.
+- **The claims ledger owns every native mutation**: protection completion
+  (MarkClaimProtected) requires an updated claim row; a hold that becomes
+  applicable between the capture guard's claim phase and its native phase
+  receives its durable claims in the same protection-fence transaction,
+  before the storage mutation; the sweep covers active catalog records
+  whose live root is gone, so a partially disposed record restored to
+  active stays disposable through its durable identity.
+
 ## Concurrency and recovery
 
 - Placement, release and scope change serialize on the per-matter epoch row;
