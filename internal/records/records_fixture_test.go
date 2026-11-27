@@ -56,7 +56,7 @@ type fakeBackend struct {
 	// chainAmbiguous: two admissions claim the same turn - the reference
 	// identity is ambiguous (unknown, never complete or absent).
 	chainAmbiguous map[string]bool
-	storage          *fakeStorage // deletion cross-check for the walk
+	storage        *fakeStorage // deletion cross-check for the walk
 }
 
 // fakeCommit is one signed commit of the fake turn: its slot marker, its data
