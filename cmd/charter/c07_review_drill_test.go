@@ -293,8 +293,13 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 		}
 	}
 	for _, r := range refs6 {
-		state, err := recordsClient.LegalHold(ctx, r.Key, r.Version)
-		must(err)
+		state, lerr := recordsClient.LegalHold(ctx, r.Key, r.Version)
+		// A version whose legal hold was never set is reported by the
+		// storage as an object-lock 404; the versions' presence was just
+		// verified by the Load readback above.
+		if lerr != nil && !errors.Is(lerr, s3transport.ErrObjectAbsent) {
+			must(lerr)
+		}
 		if state == "ON" {
 			t.Fatalf("R6: no hold was placed; legal hold must not be set: %s", r.Key)
 		}
