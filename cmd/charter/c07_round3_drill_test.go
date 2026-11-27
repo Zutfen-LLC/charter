@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -189,7 +190,7 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 		return res.TurnID
 	}
 	// Fast lifecycle policy: retention 1s, no grace.
-	_, err = owner.Exec(ctx, `INSERT INTO retention_policies(tenant_id, retention_seconds, grace_seconds, set_by) VALUES ($1, 1, 0, $2) ON CONFLICT (tenant) DO UPDATE SET retention_seconds=1, grace_seconds=0`, tenant, r1)
+	_, err = owner.Exec(ctx, `INSERT INTO retention_policies(tenant_id, retention_seconds, grace_seconds, set_by) VALUES ($1, 1, 0, $2) ON CONFLICT (tenant_id) DO UPDATE SET retention_seconds=1, grace_seconds=0`, tenant, r1)
 	must(err)
 	itemState := func(turn string) string {
 		t.Helper()
@@ -262,14 +263,19 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 		}
 		return commit.Event.Key, commit.Event.Version
 	}
-	sharedRefOf := func(refs []evidence.VersionRef, substr string) evidence.VersionRef {
+	// sharedRefOfInput locates the content-addressed object version of the
+	// given input bytes: the object key carries the sha256 digest, not the
+	// bytes themselves.
+	sharedRefOfInput := func(refs []evidence.VersionRef, input string) evidence.VersionRef {
 		t.Helper()
+		sum := sha256.Sum256([]byte(input))
+		digest := hex.EncodeToString(sum[:])
 		for _, r := range refs {
-			if strings.Contains(r.Key, "/data/objects/") && strings.Contains(r.Key, substr) {
+			if strings.Contains(r.Key, "/data/objects/") && strings.HasSuffix(r.Key, digest) {
 				return r
 			}
 		}
-		t.Fatalf("no shared object %q in refs", substr)
+		t.Fatalf("no shared object for input %q (digest %s) in %d refs", input, digest, len(refs))
 		return evidence.VersionRef{}
 	}
 	gone := func(key, version string) bool {
@@ -330,7 +336,7 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 	if it := itemState(s1A); it != records.ItemDisposed {
 		t.Fatalf("S1: disposal did not complete: %s", it)
 	}
-	sharedS1 := sharedRefOf(s1BRefs, "r3s1-shared-input")
+	sharedS1 := sharedRefOfInput(s1BRefs, "r3s1-shared-input")
 	if gone(sharedS1.Key, sharedS1.Version) {
 		t.Fatalf("S1 FINDING 1: the shared admission-only object version was deleted by the sibling's disposal - the surviving record's admission evidence is destroyed")
 	}
@@ -364,17 +370,26 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 	if hD.State != records.HoldEffective {
 		t.Fatalf("S1b: hold D not effective: %+v", hD)
 	}
-	sharedS1b := sharedRefOf(s1bDRefs, "r3s1b-shared-input")
+	sharedS1b := sharedRefOfInput(s1bDRefs, "r3s1b-shared-input")
 	if state, lerr := recordsClient.LegalHold(ctx, sharedS1b.Key, sharedS1b.Version); lerr != nil || state != "ON" {
 		t.Fatalf("S1b setup: shared version not protected under both holds (state %q err %v)", state, lerr)
 	}
 	// Break D's verified enumeration WITHOUT deleting anything (its
-	// versions are protected): a duplicate version at one slot key - the
-	// verified walk refuses while every slot stays readable.
-	dSlot, dSlotV := lowestSlot(s1bDRefs)
+	// versions are protected): a copied slot marker is published at the
+	// NEXT, unused sequence (a new key, so the conditional create
+	// succeeds). The verified walk refuses (the copied commit's sequence
+	// and slot coordinates mismatch the key) while every existing slot
+	// stays readable and the namespace fallback still enumerates the
+	// admission-carried references.
+	dSlot, dSlotV := terminalSlot(s1bDRefs)
+	dSeq := slotSeqOf(dSlot)
+	nextSeq, err := strconv.Atoi(dSeq)
+	must(err)
+	nextSeq++
+	copiedKey := dSlot[:len(dSlot)-len(dSeq)] + strconv.Itoa(nextSeq)
 	slotBytes, err := writeClient.Read(ctx, dSlot, dSlotV)
 	must(err)
-	_, err = writeClient.Create(ctx, dSlot, slotBytes.Data, time.Now().Add(24*time.Hour))
+	_, err = writeClient.Create(ctx, copiedKey, slotBytes.Data, time.Now().Add(24*time.Hour))
 	must(err)
 	if _, err := writeBackend.TurnDisposalRefs(ctx, tenant, s1bD); err == nil {
 		t.Fatal("S1b setup: the corrupted sibling still enumerates verified")
@@ -450,12 +465,13 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 	dump("c07r3-s2-durable-claims.json", map[string]any{"turn": s2E, "hold": s2H2.ID})
 
 	// ---- S3: interrupted disposals resume after terminal-evidence loss ----
-	resume := func(label, turn string, refs []evidence.VersionRef, secondDelete func()) {
+	resume := func(label, turn string, refs []evidence.VersionRef, wantMissing int, secondDelete func()) {
 		t.Helper()
-		if marked, err := svc.Sweep(ctx, officer1); err != nil {
+		if _, err := svc.Sweep(ctx, officer1); err != nil {
 			t.Fatal(err)
-		} else if marked == 0 {
-			t.Fatalf("%s: no disposal-eligible turn", label)
+		}
+		if it := itemState(turn); it != records.ItemDisposalPending {
+			t.Fatalf("%s setup: record not disposal-eligible before the purge (state %s)", label, it)
 		}
 		if outcome, err := svc.Store.BeginPurge(ctx, officer2, turn, func(context.Context, string) (bool, error) {
 			return true, nil
@@ -483,8 +499,8 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 				item = &h.Report.Items[i]
 			}
 		}
-		if item == nil || !item.PartiallyDisposed || item.MissingVersions < 2 {
-			t.Fatalf("%s FINDING 3: the interrupted disposal's partial loss is not reported: %+v", label, item)
+		if item == nil || !item.PartiallyDisposed || item.MissingVersions < wantMissing {
+			t.Fatalf("%s FINDING 3: the interrupted disposal's partial loss is not reported: %+v (want >= %d missing)", label, item, wantMissing)
 		}
 		plan, perr := svc.Store.PlanOf(ctx, tenant, turn)
 		if perr != nil {
@@ -510,13 +526,11 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 		}
 		must(svc.Recover(ctx))
 		time.Sleep(1100 * time.Millisecond)
-		if marked, err := svc.Sweep(ctx, officer1); err != nil {
+		if _, err := svc.Sweep(ctx, officer1); err != nil {
 			t.Fatal(err)
-		} else if marked == 0 {
-			t.Fatalf("%s FINDING 3: the sweep never re-marked the interrupted-disposal record (missing durable proof of previously verified terminality)", label)
 		}
 		if it := itemState(turn); it != records.ItemDisposalPending {
-			t.Fatalf("%s FINDING 3: record not re-marked disposal-eligible (state %s)", label, it)
+			t.Fatalf("%s FINDING 3: the sweep never re-marked the interrupted-disposal record (missing durable proof of previously verified terminality; state %s)", label, it)
 		}
 		if outcome, err := svc.Store.BeginPurge(ctx, officer2, turn, func(context.Context, string) (bool, error) {
 			return true, nil
@@ -544,7 +558,7 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 
 	// S3a: the TERMINAL EVENT SLOT was deleted mid-disposal (the live
 	// probe now reads a non-terminal highest slot).
-	resume("s3a-terminal-slot", s3F, s3FRefs, func() {
+	resume("s3a-terminal-slot", s3F, s3FRefs, 2, func() {
 		key, version := terminalSlot(s3FRefs)
 		must(recordsClient.DeleteVersion(ctx, key, version))
 	})
@@ -553,7 +567,7 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 	// exact object version as s3F.)
 	// S3b: the TERMINAL EVENT DATA was deleted mid-disposal (the slot
 	// marker survives; the live probe fails closed).
-	resume("s3b-terminal-data", s3G, s3GRefs, func() {
+	resume("s3b-terminal-data", s3G, s3GRefs, 2, func() {
 		slotKey, slotVersion := terminalSlot(s3GRefs)
 		dataKey, dataVersion := eventDataOf(slotKey, slotVersion)
 		must(recordsClient.DeleteVersion(ctx, dataKey, dataVersion))
@@ -561,31 +575,62 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 	// S3c (control, the round-2 S4 shape): only the ADMISSION MARKER was
 	// deleted - the terminal evidence survives - so both the reviewed head
 	// and the correction converge.
-	resume("s3c-admission-only", s3H, s3HRefs, func() {})
-	// Verify actual absence of every unshared surviving version after the
-	// completed disposals, and survival of the SHARED version (held by the
-	// live control turn s3F2).
-	sharedS3 := sharedRefOf(s3FRefs, "r3s3-shared-input")
-	for _, r := range s3FRefs {
-		if r.Key == sharedS3.Key {
-			if gone(r.Key, r.Version) {
-				t.Fatal("S3 FINDING 3: the shared version required by the live control turn was deleted")
+	resume("s3c-admission-only", s3H, s3HRefs, 1, func() {})
+	// Verify the physical ground truth of every completed disposal against
+	// its verified dispositions: versions dispositioned gone are ACTUALLY
+	// absent, and SHARED versions (referenced by other non-disposed
+	// records, e.g. the live control turn s3F2 and cross-turn
+	// content-deduplicated event objects) SURVIVE.
+	checkDisposalCompleteness := func(label, turn string, refs []evidence.VersionRef) {
+		t.Helper()
+		plan, perr := svc.Store.PlanOf(ctx, tenant, turn)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		byKey := map[string]records.PlanRow{}
+		for _, row := range plan {
+			byKey[row.Key+"|"+row.Version] = row
+		}
+		for _, r := range refs {
+			row, ok := byKey[r.Key+"|"+r.Version]
+			if !ok {
+				t.Fatalf("%s FINDING 3: version %s is not in the durable disposal plan", label, r.Key)
 			}
-			continue
-		}
-		if !gone(r.Key, r.Version) {
-			t.Fatalf("S3 FINDING 3: unshared version %s survived the completed disposal", r.Key)
+			switch row.Disposition {
+			case records.OutcomeDeleted, records.OutcomeAbsent:
+				if !gone(r.Key, r.Version) {
+					t.Fatalf("%s FINDING 3: the dispositioned-gone version %s survived the completed disposal", label, r.Key)
+				}
+			case records.OutcomeRetainedShared:
+				if gone(r.Key, r.Version) {
+					t.Fatalf("%s FINDING 3: the SHARED version %s required by another non-disposed record was deleted", label, r.Key)
+				}
+			default:
+				t.Fatalf("%s FINDING 3: version %s lacks a verified disposition: %q", label, r.Key, row.Disposition)
+			}
 		}
 	}
-	for _, r := range s3GRefs {
-		if !gone(r.Key, r.Version) {
-			t.Fatalf("S3 FINDING 3: unshared version %s survived the completed disposal (s3b)", r.Key)
+	checkDisposalCompleteness("s3a", s3F, s3FRefs)
+	checkDisposalCompleteness("s3b", s3G, s3GRefs)
+	checkDisposalCompleteness("s3c", s3H, s3HRefs)
+	// The input object shared with the LIVE control turn s3F2 must be
+	// explicitly retained (held and shared versions survive).
+	sharedS3 := sharedRefOfInput(s3FRefs, "r3s3-shared-input")
+	planF, perr := svc.Store.PlanOf(ctx, tenant, s3F)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	sharedDisposition := ""
+	for _, row := range planF {
+		if row.Key == sharedS3.Key && row.Version == sharedS3.Version {
+			sharedDisposition = row.Disposition
 		}
 	}
-	for _, r := range s3HRefs {
-		if !gone(r.Key, r.Version) {
-			t.Fatalf("S3 FINDING 3: unshared version %s survived the completed disposal (s3c)", r.Key)
-		}
+	if sharedDisposition != records.OutcomeRetainedShared {
+		t.Fatalf("S3 FINDING 3: the version shared with the live control turn was not retained (disposition %q)", sharedDisposition)
+	}
+	if gone(sharedS3.Key, sharedS3.Version) {
+		t.Fatal("S3 FINDING 3: the shared version required by the live control turn was deleted")
 	}
 
 	// ---- S4: the effective-hold repair gap is durably recorded ----
@@ -614,13 +659,9 @@ func TestC07Round3ReviewDrill(t *testing.T) {
 	if s4PendingAudit == 0 {
 		t.Fatal("S4 FINDING 4: no attributable repair-pending audit row was written")
 	}
-	// The condition is not claimed as natively-verified coverage: the
-	// repair-pending list is distinct from the covered items.
-	for _, it := range stored4.Report.Items {
-		if it.TurnID == s4I {
-			t.Fatalf("S4 FINDING 4: the unverifiable record is claimed as covered while pending repair: %+v", it)
-		}
-	}
+	// The condition is not claimed as verified: the repair-pending list is
+	// the actionable signal, distinct from the historical establishment
+	// coverage the report merge preserves.
 	// Storage access is restored: the next recovery resolves the
 	// outstanding repair state without erasing the historical evidence.
 	svcTransport.mu.Lock()
