@@ -96,7 +96,7 @@ func decodeSignedCandidate(raw []byte, key ed25519.PublicKey) (retainedCommit, e
 }
 func (b *RetentionBackend) slot(ctx context.Context, key string, refs []s3transport.Ref) (retainedEntry, error) {
 	var selected *retainedEntry
-	present := false
+	present, readable := false, false
 	for _, r := range refs {
 		if r.Key != key {
 			continue
@@ -106,9 +106,15 @@ func (b *RetentionBackend) slot(ctx context.Context, key string, refs []s3transp
 			continue
 		}
 		v, err := b.store.Read(ctx, key, r.VersionID)
+		if errors.Is(err, s3transport.ErrObjectAbsent) {
+			// The version vanished between listing and read: a mid-deletion
+			// key, not a namespace integrity violation.
+			continue
+		}
 		if err != nil {
 			return retainedEntry{}, err
 		}
+		readable = true
 		c, err := decodeSignedCandidate(v.Data, b.trustedKey)
 		if err != nil {
 			continue
@@ -122,6 +128,11 @@ func (b *RetentionBackend) slot(ctx context.Context, key string, refs []s3transp
 		selected = &retainedEntry{commit: c, marker: retainedMarkerReceipt{Bucket: b.bucket, Key: key, Version: v.ID, SHA256: SHA256(v.Data), Length: uint64(len(v.Data)), Mode: v.Mode, RetainUntil: v.Until.UTC().Format(time.RFC3339)}}
 	}
 	if selected == nil {
+		if readable {
+			// A live, readable version that did not yield a valid candidate
+			// is a namespace integrity violation: fail closed.
+			return retainedEntry{}, ErrConflict
+		}
 		if present {
 			return retainedEntry{}, ErrConflict
 		}
@@ -224,6 +235,11 @@ func (b *RetentionBackend) admissionsRelaxed(ctx context.Context, refs []s3trans
 	var out []retainedEntry
 	for key := range keys {
 		e, err := b.slotRelaxed(ctx, key, refs)
+		if errors.Is(err, ErrNotFound) {
+			// Mid-deletion admission: the marker is already deleted; the
+			// durable disposal plan governs the turn's remaining versions.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -420,7 +436,7 @@ func (b *RetentionBackend) OpenTurns(ctx context.Context, before time.Time) ([]T
 
 func (b *RetentionBackend) slotRelaxed(ctx context.Context, key string, refs []s3transport.Ref) (retainedEntry, error) {
 	var selected *retainedEntry
-	present := false
+	present, readable := false, false
 	for _, r := range refs {
 		if r.Key != key {
 			continue
@@ -430,9 +446,15 @@ func (b *RetentionBackend) slotRelaxed(ctx context.Context, key string, refs []s
 			continue
 		}
 		v, err := b.store.Read(ctx, key, r.VersionID)
+		if errors.Is(err, s3transport.ErrObjectAbsent) {
+			// Mid-deletion key: the version is gone; only its listing (or a
+			// delete marker) remains. Not an integrity violation.
+			continue
+		}
 		if err != nil {
 			return retainedEntry{}, err
 		}
+		readable = true
 		c, err := decodeSignedCandidate(v.Data, b.trustedKey)
 		if err != nil {
 			continue
@@ -443,8 +465,15 @@ func (b *RetentionBackend) slotRelaxed(ctx context.Context, key string, refs []s
 		selected = &retainedEntry{commit: c, marker: retainedMarkerReceipt{Bucket: b.bucket, Key: key, Version: v.ID, SHA256: SHA256(v.Data), Length: uint64(len(v.Data)), Mode: v.Mode, RetainUntil: v.Until.UTC().Format(time.RFC3339)}}
 	}
 	if selected == nil {
-		if present {
+		if readable {
+			// A live, readable version without a valid candidate fails
+			// closed.
 			return retainedEntry{}, ErrConflict
+		}
+		if present {
+			// Only deleted/absent versions remain listed: the key is gone
+			// (mid-deletion), so it is NOT present for enumeration.
+			return retainedEntry{}, ErrNotFound
 		}
 		return retainedEntry{}, ErrNotFound
 	}
@@ -505,6 +534,11 @@ func (b *RetentionBackend) InventoryTurns(ctx context.Context, tenantID string) 
 	out := make([]TurnIdentity, 0, len(keys))
 	for key := range keys {
 		ent, err := b.slotRelaxed(ctx, key, refs)
+		if errors.Is(err, ErrNotFound) {
+			// The admission marker is deleted (mid-deletion turn): the turn
+			// is no longer enumerable from live inventory.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -544,6 +578,11 @@ func (b *RetentionBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnI
 	var admission *retainedEntry
 	for key := range keys {
 		ent, err := b.slotRelaxed(ctx, key, refs)
+		if errors.Is(err, ErrNotFound) {
+			// Another turn's admission is mid-deletion; it cannot acquire
+			// new references and its own disposal plan governs it.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

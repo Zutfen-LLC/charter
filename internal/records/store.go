@@ -28,11 +28,16 @@ func canonP(p store.Principal) (store.Principal, bool) {
 }
 
 var (
-	ErrForbidden      = store.ErrForbidden
-	ErrNotFound       = store.ErrNotFound
-	ErrConflict       = errors.New("records: conflicting lifecycle state")
-	ErrRetry          = errors.New("records: retry the lifecycle operation")
-	ErrBlockedStorage = errors.New("records: disposal blocked by storage protection")
+	ErrForbidden = store.ErrForbidden
+	ErrNotFound  = store.ErrNotFound
+	ErrConflict  = errors.New("records: conflicting lifecycle state")
+	ErrRetry     = errors.New("records: retry the lifecycle operation")
+	// ErrStaleEstablishment marks a two-phase protection establishment
+	// whose hold transitioned between the durable claim commit and the
+	// native mutation: the claims are reconciled by that transition and
+	// the native set must not proceed. Retryable.
+	ErrStaleEstablishment = fmt.Errorf("%w: stale hold establishment", ErrRetry)
+	ErrBlockedStorage     = errors.New("records: disposal blocked by storage protection")
 )
 
 // StoreHooks are deterministic synchronization barriers for the concurrency
@@ -369,6 +374,58 @@ func newHoldID(ctx context.Context, tx pgx.Tx) (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+// holdOfTx loads one hold by id inside a transaction (state re-validation
+// for two-phase protection establishment).
+func holdOfTx(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, tenantID, id string) (*Hold, error) {
+	h, err := loadHold(ctx, q, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if h.TenantID != tenantID {
+		return nil, ErrConflict
+	}
+	return h, nil
+}
+
+// holdsOfTx loads every hold of the tenant (any state) inside a
+// transaction.
+func holdsOfTx(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, tenantID string) ([]*Hold, error) {
+	rows, err := q.Query(ctx, `SELECT id::text FROM holds WHERE tenant_id=$1 ORDER BY epoch`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []*Hold
+	for _, id := range ids {
+		h, err := loadHold(ctx, q, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, nil
 }
 
 func loadHold(ctx context.Context, q interface {
@@ -1126,6 +1183,16 @@ func (s *Store) lockActor(ctx context.Context, tx pgx.Tx, actor store.Principal)
 func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenantID, turnID string,
 	deleter func(context.Context, Item) (map[string]string, error), verifyBytes func(context.Context, string) (bool, error), outcome *string) error {
 	run := func(tx pgx.Tx) error {
+		// The protection fence serializes the deletes with every protection
+		// mutation and every capture-side reference acquisition of this
+		// tenant, and is taken BEFORE the item row lock so the global order
+		// (tenants -> tenant_protection -> retention_items ->
+		// matter_hold_epochs) holds on every path (a capture's reference
+		// fence takes tenants -> tenant_protection; taking the item row
+		// first here would invert the order).
+		if err := lockProtection(ctx, tx, tenantID); err != nil {
+			return err
+		}
 		it := Item{}
 		err := tx.QueryRow(ctx, `SELECT tenant_id::text, turn_id::text, matter_id::text, project_id::text, custodian_id::text,
 			recorded_at, retention_expires_at, state, observed_epoch FROM retention_items WHERE tenant_id=$1 AND turn_id=$2 FOR UPDATE`,
@@ -1146,12 +1213,6 @@ func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenan
 				return err
 			}
 			return nil
-		}
-		// The protection fence serializes the deletes with every protection
-		// mutation and every capture-side reference acquisition of this
-		// tenant (lock order: tenants -> protection -> items -> epoch).
-		if err := lockProtection(ctx, tx, it.TenantID); err != nil {
-			return err
 		}
 		epoch, err := lockEpoch(ctx, tx, it.TenantID, it.MatterID, false)
 		if err != nil {

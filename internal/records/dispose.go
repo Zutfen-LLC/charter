@@ -178,6 +178,12 @@ func (s *Service) sharedReferences(ctx context.Context, it Item) (map[VersionRef
 			continue
 		}
 		enumRefs, err := s.disposalRefs(ctx, it.TenantID, t.TurnID)
+		if errors.Is(err, evidence.ErrNotFound) {
+			// The other turn's admission is mid-deletion: it is not a live
+			// reference source anymore and its own disposal plan governs its
+			// remaining versions.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

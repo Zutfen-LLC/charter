@@ -530,7 +530,8 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	// enumeration root, and every exact version receives a disposition.
 	must(svc.Recover(ctx))
 	if s := itemState(r4Turn); s != records.ItemDisposed {
-		t.Fatalf("R4 FINDING 5: interrupted disposal did not converge from the plan: state %q", s)
+		o, _, ferr := svc.FinishPurge(ctx, &officer2, r4Turn)
+		t.Fatalf("R4 FINDING 5: interrupted disposal did not converge from the plan: state %q; direct finish: %s err=%v", s, o, ferr)
 	}
 	plan, err := svc.Store.PlanOf(ctx, tenant, r4Turn)
 	must(err)

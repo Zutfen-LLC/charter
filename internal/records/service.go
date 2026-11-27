@@ -253,7 +253,10 @@ func (s *Service) EnsureProtected(ctx context.Context, tenant, matter, custodian
 	if err != nil {
 		return err
 	}
-	return s.withProtection(ctx, tenant, func(tx pgx.Tx) error {
+	// Phase 1: commit the protection claims durably BEFORE any native
+	// mutation, so a crash between the two phases leaves recoverable pending
+	// claims instead of untracked native protection (adversarial review).
+	if err := s.withProtection(ctx, tenant, func(tx pgx.Tx) error {
 		for _, h := range holds {
 			if h.State == HoldReleased {
 				continue
@@ -266,6 +269,28 @@ func (s *Service) EnsureProtected(ctx context.Context, tenant, matter, custodian
 					return err
 				}
 			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Phase 2: native mutation + readback + claim completion under the
+	// fence, with the holds' committed state re-loaded first: claims of a
+	// hold that was released in between are never re-set natively.
+	return s.withProtection(ctx, tenant, func(tx pgx.Tx) error {
+		current, err := holdsOfTx(ctx, tx, tenant)
+		if err != nil {
+			return err
+		}
+		applicable := map[string]bool{}
+		for _, h := range current {
+			if h.State == HoldReleased || !Matches(h, matter, custodian, recordedAt) {
+				continue
+			}
+			applicable[h.ID] = true
+		}
+		if len(applicable) == 0 {
+			return nil
 		}
 		for _, r := range refs {
 			v := VersionRef(r)
@@ -286,11 +311,8 @@ func (s *Service) EnsureProtected(ctx context.Context, tenant, matter, custodian
 			if err != nil || state != "ON" {
 				return fmt.Errorf("records: protection readback failed for %s: %v", v.Key, err)
 			}
-			for _, h := range holds {
-				if h.State == HoldReleased || !Matches(h, matter, custodian, recordedAt) {
-					continue
-				}
-				if err := MarkClaimProtected(ctx, tx, h.ID, v); err != nil {
+			for id := range applicable {
+				if err := MarkClaimProtected(ctx, tx, id, v); err != nil {
 					return err
 				}
 			}
@@ -401,17 +423,40 @@ func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 				report.Uncovered = append(report.Uncovered, t.TurnID)
 				continue
 			}
-			// Protection intent is claimed durably BEFORE the storage
-			// mutation, and the mutation plus its readback run under the
-			// tenant protection fence: a concurrent cleanup cannot clear
-			// what this establishment is setting, and a concurrent
-			// placement is either visible to that cleanup's decision or
-			// serialized after the clear (C07 review finding 1).
+			// Protection intent is committed durably BEFORE the native
+			// mutation: if the process dies after SetLegalHold but before
+			// the claim ledger commits, the native protection would be ON
+			// with no ledger entry able to find and eventually clear it (an
+			// unbounded retention leak). With pending claims committed
+			// first, a crash converges: recovery re-establishes (the claims
+			// are re-protected idempotently) or a release reconcile clears
+			// them. The native mutation and its readback run under the
+			// tenant protection fence, and the fence transaction re-loads
+			// the hold's state first: a hold released between the two phases
+			// never has its claims re-set natively (adversarial review).
 			if err := s.withProtection(ctx, h.TenantID, func(tx pgx.Tx) error {
 				for _, r := range refs {
 					if err := UpsertClaim(ctx, tx, h.TenantID, h.ID, VersionRef(r)); err != nil {
 						return err
 					}
+				}
+				return nil
+			}); err != nil {
+				return report, err
+			}
+			if err := s.withProtection(ctx, h.TenantID, func(tx pgx.Tx) error {
+				current, err := holdOfTx(ctx, tx, h.TenantID, h.ID)
+				if err != nil {
+					return err
+				}
+				// The hold's state may have PROGRESSED legitimately between
+				// the two phases (pending -> effective by a concurrent
+				// idempotent placement of the same hold): the protection
+				// owner is unchanged. Stale means released (claims are being
+				// reconciled by the release) or scope-changed (a newer epoch
+				// owns the scope; that epoch's establishment covers it).
+				if current == nil || current.State == HoldReleased || current.Epoch != h.Epoch {
+					return ErrStaleEstablishment
 				}
 				for _, r := range refs {
 					if s.Hooks.StorageFault != nil {

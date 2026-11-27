@@ -788,3 +788,111 @@ func containsFold(s, sub string) bool {
 	}
 	return false
 }
+
+// ---------------- Adversarial review findings ----------------
+
+// A crash between the durable claim commit and the native protection must
+// leave a RECOVERABLE ledger (pending claims), never untracked native
+// protection: the release reconcile must find and clear every native hold
+// the crashed establishment set, through the claims (adversarial review:
+// nonconvergent claim state).
+func TestCrashBetweenClaimCommitAndNativeProtectionConverges(t *testing.T) {
+	f := newRfx(t)
+	f.seedTurn("T-C1", f.p1, f.m1, f.u["alice"])
+	refs := refsOf(f, f.turnID("T-C1"))
+
+	var readbacks int32
+	f.svc.Hooks.StorageFault = func(stage string) error {
+		if stage == "readback" && atomic.AddInt32(&readbacks, 1) == 1 {
+			// The native set for the first version already happened; the
+			// verification fails exactly like a process death in the window
+			// between SetLegalHold and the claim transaction's commit.
+			return errors.New("crash window: readback failed after the native set")
+		}
+		return nil
+	}
+	if _, err := f.svc.Place(f.ctx(), f.principal("carol"), records.Scope{MatterID: f.m1}, "crash window", "idem-crash-window"); err == nil {
+		t.Fatal("placement must surface the crash-window failure")
+	}
+	f.svc.Hooks.StorageFault = nil
+	holdID := mustHoldID(f, "idem-crash-window")
+
+	claims, err := f.svc.Store.ClaimsOfHold(f.ctx(), holdID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) == 0 {
+		t.Fatalf("ADVERSARIAL FINDING: protection claims were not durable before the native mutation (%d claims); a crash after SetLegalHold would leak native protection forever", len(claims))
+	}
+	if claims[0].State != "pending" {
+		t.Fatalf("crashed establishment's claims must be pending, got %q", claims[0].State)
+	}
+	// The crash window set the FIRST version's native hold before dying:
+	// the leaked state exists and only the ledger can find it.
+	if state := f.fs.holdState(refs[0].Key, refs[0].Version); state != "ON" {
+		t.Fatalf("test choreography: first version must be ON in the crash window, got %q", state)
+	}
+
+	if _, err := f.svc.Release(f.ctx(), f.principal("carol"), holdID, "resolved after crash"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.Recover(f.ctx()); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range refs {
+		if state := f.fs.holdState(r.Key, r.Version); state == "ON" {
+			t.Fatalf("ADVERSARIAL FINDING: native protection leaked after the crashed establishment was released: %s is ON", r.Key)
+		}
+	}
+	if remaining, err := f.svc.Store.ClaimsOfHold(f.ctx(), holdID); err != nil || len(remaining) != 0 {
+		t.Fatalf("ADVERSARIAL FINDING: claims did not converge after release: %d remaining (%v)", len(remaining), err)
+	}
+}
+
+// The purge finish serializes on the tenant protection fence exactly like a
+// capture's reference acquisition, and the lock ORDER (tenants ->
+// tenant_protection -> retention_items -> matter_hold_epochs) never inverts
+// with the capture path (adversarial review: lock order).
+func TestFinishPurgeSerializesWithCaptureReferenceFence(t *testing.T) {
+	f := newRfx(t)
+	f.seedTurn("T-L1", f.p1, f.m1, f.u["alice"])
+	turn := f.turnID("T-L1")
+	if got := f.sweepAs("carol"); got == 0 {
+		t.Fatal("expired control must be sweep-eligible")
+	}
+	terminal := func(context.Context, string) (bool, error) { return true, nil }
+	if _, err := f.rs.BeginPurge(f.ctx(), f.principal("erin"), turn, terminal); err != nil {
+		t.Fatalf("begin purge failed: %v", err)
+	}
+
+	fence, err := f.svc.AcquireReferenceFence(f.ctx(), f.tenant)
+	if err != nil {
+		t.Fatalf("reference fence: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		p := f.principal("erin")
+		_, _, err := f.svc.FinishPurge(f.ctx(), &p, turn)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("purge finished while the capture reference fence was held: %v", err)
+	case <-time.After(200 * time.Millisecond):
+		// blocked on the protection fence: the delete cannot race a capture.
+	}
+	if err := fence(f.ctx()); err != nil {
+		t.Fatalf("fence release: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("purge finish failed after fence release: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ADVERSARIAL FINDING: purge finish deadlocked against the capture reference fence (lock order inversion)")
+	}
+	if it := f.item("T-L1"); it.State != records.ItemDisposed {
+		t.Fatalf("purge did not complete: state %s", it.State)
+	}
+}
