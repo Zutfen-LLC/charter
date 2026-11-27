@@ -47,6 +47,12 @@ type fakeBackend struct {
 	// namespaceCorrupt: the turn's namespace enumeration hits a listed slot
 	// whose signed candidate cannot be verified (invalid metadata).
 	namespaceCorrupt map[string]bool
+	// chainConflict: the turn's VERIFIED enumeration fails while every slot
+	// stays individually readable and decodable (the duplicate-version /
+	// incompatible-predecessor shape: two versions at one slot key). The
+	// namespace fallback still enumerates completely - the round-3
+	// finding-1 shape where the fallback alone decides the reference set.
+	chainConflict map[string]bool
 	storage          *fakeStorage // deletion cross-check for the walk
 }
 
@@ -59,7 +65,7 @@ type fakeCommit struct {
 }
 
 func newFakeBackend() *fakeBackend {
-	return &fakeBackend{turns: map[string][]evidence.TurnIdentity{}, refs: map[string][]evidence.VersionRef{}, commits: map[string][]fakeCommit{}, missing: map[string]bool{}, noRefs: map[string]bool{}, failEnum: map[string]error{}, expired: map[string]bool{}, nonterminal: map[string]bool{}, namespaceFail: map[string]bool{}, namespaceCorrupt: map[string]bool{}}
+	return &fakeBackend{turns: map[string][]evidence.TurnIdentity{}, refs: map[string][]evidence.VersionRef{}, commits: map[string][]fakeCommit{}, missing: map[string]bool{}, noRefs: map[string]bool{}, failEnum: map[string]error{}, expired: map[string]bool{}, nonterminal: map[string]bool{}, namespaceFail: map[string]bool{}, namespaceCorrupt: map[string]bool{}, chainConflict: map[string]bool{}}
 }
 
 // addCommitTurn registers a turn with an explicit commit chain so the
@@ -134,6 +140,12 @@ func (b *fakeBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnID str
 	if b.missing[turnID] || b.noRefs[turnID] {
 		return nil, evidence.ErrNotFound
 	}
+	if b.chainConflict[turnID] {
+		// Two versions at one slot key / an incompatible predecessor: the
+		// verified walk refuses (ErrConflict) while every slot stays
+		// readable and decodable for the namespace fallback.
+		return nil, evidence.ErrConflict
+	}
 	commits, ok := b.commits[turnID]
 	if !ok {
 		if b.expired[turnID] {
@@ -184,12 +196,50 @@ func (b *fakeBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnID str
 	return out, nil
 }
 
-// TurnTerminal reports whether the turn's capture has reached a terminal
-// event (the fake models an in-flight turn with the nonterminal map).
+// TurnTerminal mirrors the retained backend's probe: it reads the highest
+// SURVIVING event slot and its data event. Terminality is reported only
+// when the highest surviving slot is the chain's TERMINAL commit and its
+// event data is readable; a deleted terminal slot makes the probe see a
+// non-terminal highest slot (false - missing evidence, not counterevidence);
+// a deleted terminal data event makes the probe fail (error - fail closed);
+// no surviving slots is not-found. (C07 round-3 finding 3: the faithful
+// probe shape that leaves an interrupted disposal non-resumable without
+// durable proof of previously verified terminality.)
 func (b *fakeBackend) TurnTerminal(ctx context.Context, tenantID, turnID string) (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return !b.nonterminal[turnID], nil
+	if b.nonterminal[turnID] {
+		// In-flight capture (the state-machine control).
+		return false, nil
+	}
+	commits, ok := b.commits[turnID]
+	if !ok || b.missing[turnID] || b.noRefs[turnID] {
+		if !ok {
+			return false, nil
+		}
+		return false, evidence.ErrNotFound
+	}
+	gone := func(r evidence.VersionRef) bool {
+		return b.storage != nil && b.storage.isDeleted(r.Key, r.Version)
+	}
+	highest := -1
+	for i, c := range commits[1:] {
+		if !gone(c.slot) {
+			highest = i
+		}
+	}
+	if highest < 0 {
+		// No event slots survive: the turn was never admitted here or is
+		// fully gone.
+		return false, evidence.ErrNotFound
+	}
+	c := commits[1+highest]
+	if c.event != nil && gone(*c.event) {
+		// The highest surviving slot's data event is deleted: the probe
+		// cannot verify terminality (fail closed).
+		return false, errors.New("fake: terminal event data unreadable")
+	}
+	return highest == len(commits)-2, nil
 }
 
 // fakeStorage implements RecordsStorage with the pinned storage's verified
