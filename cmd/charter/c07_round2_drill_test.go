@@ -209,26 +209,6 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 		must(err)
 		return refs
 	}
-	// listTenant reports the version count under the tenant's storage
-	// prefix (diagnostics for the S1 vanishing-versions investigation).
-	tenantPrefix := "charter/v1/" + sc.Deployment + "-c07r2/" + tenant + "/"
-	listTenant := func(tag string) {
-		t.Helper()
-		refs, lerr := writeClient.Versions(ctx, tenantPrefix)
-		if lerr != nil {
-			t.Logf("LIST %s: error %v", tag, lerr)
-			return
-		}
-		var sample []string
-		for i, r := range refs {
-			if i >= 3 {
-				break
-			}
-			sample = append(sample, r.Key+"@"+r.VersionID)
-		}
-		t.Logf("LIST %s: %d versions under %s (sample %v)", tag, len(refs), tenantPrefix, sample)
-	}
-	listTenant("after-backends")
 	allProtected := func(turn, tag string) {
 		t.Helper()
 		refs := refsOf(turn)
@@ -285,7 +265,6 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	dump("c07r2-seed-turns.json", map[string]string{"s1": s1Turn, "s3a": s3A, "s3b": s3B, "s4": s4Turn, "s6": s6Turn})
 	s1Refs := refsOf(s1Turn)
 	s4Refs := refsOf(s4Turn)
-	listTenant("after-seed")
 
 	// ---- The storage retention horizon passes for the seed versions ----
 	if wait := 75*time.Second - time.Since(seedStarted); wait > 0 {
@@ -298,7 +277,6 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	} else if marked == 0 {
 		t.Fatal("S1: no disposal-eligible turn")
 	}
-	listTenant("after-sweep")
 	if outcome, err := svc.Store.BeginPurge(ctx, officer2, s1Turn, func(context.Context, string) (bool, error) {
 		return true, nil
 	}); err != nil || outcome != "purging" {
@@ -308,17 +286,13 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	must(svc.Store.FinishPurgePlanTx(ctx, &officer2, tenant, s1Turn, func(ctx context.Context) ([]evidence.VersionRef, error) {
 		return svcBackend.TurnDisposalRefs(ctx, tenant, s1Turn)
 	}, &outcome))
-	listTenant("after-plan")
 	// The disposal is interrupted after the admission marker was physically
 	// deleted while other required versions remain; the transaction never
 	// commits dispositions, and the enumeration root is gone.
 	must(recordsClient.DeleteVersion(ctx, s1Refs[0].Key, s1Refs[0].Version))
-	listTenant("after-admission-delete")
 	// A matching hold is placed before any disposal recovery completes.
-	listTenant("after-place-precheck")
 	s1Hold, err := svc.Place(ctx, officer1, records.Scope{MatterID: mS1}, "S1 hold over a partially disposed record", "c07r2-s1")
 	must(err)
-	listTenant("after-place")
 	if s1Hold.State != records.HoldEffective {
 		t.Fatalf("S1 FINDING 1: hold not effective over partially disposed coverage: %+v", s1Hold)
 	}
@@ -340,21 +314,6 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	for _, r := range s1Refs[1:] {
 		state, lerr := recordsClient.LegalHold(ctx, r.Key, r.Version)
 		if lerr != nil {
-			// Dump the turn's current enumerable version set for diagnosis.
-			if cur, cerr := writeBackend.TurnDisposalRefs(ctx, tenant, s1Turn); cerr == nil {
-				var curRefs []string
-				for _, c := range cur {
-					curRefs = append(curRefs, c.Key+"@"+c.Version)
-				}
-				t.Logf("S1 diagnostic: current refs of %s: %v", s1Turn, curRefs)
-			}
-			var planRefs []string
-			if rows, perr := svc.Store.PlanOf(ctx, tenant, s1Turn); perr == nil {
-				for _, row := range rows {
-					planRefs = append(planRefs, row.Key+"@"+row.Version+" disp="+row.Disposition)
-				}
-				t.Logf("S1 diagnostic: plan rows: %v", planRefs)
-			}
 			t.Fatalf("S1 FINDING 1: legal-hold probe failed for %s@%s: %v", r.Key, r.Version, lerr)
 		}
 		if state != "ON" {
