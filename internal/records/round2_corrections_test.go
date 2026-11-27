@@ -22,7 +22,9 @@ import (
 // commits, WITHOUT chain verification, with completeness classification: a
 // listed slot marker whose read fails (namespaceFail) or whose candidate
 // cannot be verified (namespaceCorrupt) makes the enumeration INCOMPLETE -
-// its references are unknown, never silently absent.
+// its references are unknown, never silently absent. A GONE slot (its
+// version deleted) is a deleted slot: the remaining references enumerate
+// completely.
 func (b *fakeBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turnID string) (evidence.NamespaceEnumeration, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -40,9 +42,8 @@ func (b *fakeBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turnID st
 			continue // the namespace walk has no admission root
 		}
 		if gone(c.slot) {
-			// A hole in the listed slot sequence: the missing slot's
-			// references are unknown.
-			complete = false
+			// A deleted slot: its references are unknowable through any
+			// verifiable path of this turn; the remaining ones enumerate.
 			continue
 		}
 		out = append(out, c.slot)

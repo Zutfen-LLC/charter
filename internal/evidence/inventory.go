@@ -60,12 +60,18 @@ func DisposalVersionsOf(b Backend) (DisposalVersions, bool) {
 // namespaces with its completeness classification (C07 round-2 finding 3).
 type NamespaceEnumeration struct {
 	Refs []VersionRef
-	// Complete reports whether every listed event-slot version was read
-	// AND its signed candidate verified, and the listed slot sequence has
-	// no holes. When false, at least one listed slot could not be read or
-	// verified: its object references are UNKNOWN - the true reference
-	// set is a strict superset of Refs, and an unreadable reference must
-	// never be treated as an absent one.
+	// Complete reports whether every listed, non-delete-marker, readable
+	// event-slot version had its signed candidate VERIFIED. When false, at
+	// least one listed slot could be read but not verified: its object
+	// references are UNKNOWN - the true reference set is a strict superset
+	// of Refs, and an unreadable or unverifiable reference must never be
+	// treated as an absent one. Slot versions that are GONE (not listed,
+	// absent between listing and read, or only delete markers remain under
+	// the key) are deleted slots, not unreadable ones: the enumeration of
+	// the remaining references stays complete for them, and ErrNotFound
+	// remains reserved for authoritatively nothing at all under the
+	// namespaces (an incomplete enumeration always includes the listed
+	// slot version itself, so incompleteness is never masked as absence).
 	Complete bool
 }
 
@@ -76,10 +82,10 @@ type NamespaceEnumeration struct {
 // the fallback for a sibling turn whose verified enumeration is
 // unavailable (mid-deletion or a broken chain): the sibling must be
 // neither silently treated as reference-free nor allowed to wedge every
-// disposal in the tenant forever. ErrNotFound means authoritatively
-// NOTHING is left under the turn's namespaces; an incomplete enumeration
-// is reported through Complete=false and must cause the caller to refuse
-// the irreversible action it was fencing.
+// disposal in the tenant forever - a turn whose durable disposal plan
+// exists resolves through the plan instead, and deleted slots (gone
+// versions, delete markers, sequence holes) no longer fence because their
+// references are unknowable through any verifiable path of that turn.
 type NamespaceVersions interface {
 	TurnNamespaceRefs(ctx context.Context, tenantID, turnID string) (NamespaceEnumeration, error)
 }

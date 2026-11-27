@@ -690,12 +690,18 @@ func (b *RetentionBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnI
 // comment in inventory.go: this is the shared-reference scan's fallback for
 // a sibling whose verified enumeration is unavailable.
 //
-// The result is classified for completeness (C07 round-2 finding 3): a
-// listed slot whose read fails (other than mid-deletion absence), whose
-// signed candidate cannot be verified, whose key holds only delete
-// markers, or a hole in the listed slot sequence, all mean the turn's true
-// reference set is a strict superset of the returned one (unknown object
-// references). An unreadable reference is never treated as an absent one.
+// The result is classified for completeness (C07 round-2 finding 3). A
+// listed slot that is READABLE but whose signed candidate cannot be
+// verified makes the enumeration INCOMPLETE: its object references are
+// unknown and the caller must refuse the irreversible action it was
+// fencing - an unreadable reference is never an absent one. A slot whose
+// versions are GONE (not listed, mid-deletion absent, or only delete
+// markers remain) is a deleted slot, not an unreadable one: its object
+// references are unknowable through ANY verifiable path of this turn (no
+// live slot, no verified chain, no plan), so the enumeration of the
+// REMAINING references is the best available truth and stays complete for
+// them; the turn's own disposal plan (when one exists) remains the
+// authoritative durable identity and is consulted before this fallback.
 func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turnID string) (NamespaceEnumeration, error) {
 	if !idRe.MatchString(tenantID) || !idRe.MatchString(turnID) {
 		return NamespaceEnumeration{}, ErrNotFound
@@ -714,8 +720,6 @@ func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turn
 	complete := true
 	slotRoot := b.prefix + tenantID + "/events/" + turnID + "/"
 	dataRoot := b.prefix + tenantID + "/data/events/" + turnID + "/"
-	seqs := map[uint64]bool{}
-	decoded := map[uint64]bool{}
 	for _, r := range refs {
 		switch {
 		case strings.HasPrefix(r.Key, slotRoot):
@@ -724,21 +728,17 @@ func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turn
 			if serr != nil || strconv.FormatUint(seq, 10) != s {
 				return NamespaceEnumeration{}, ErrConflict
 			}
-			seqs[seq] = true
 			if r.DeleteMarker {
 				// Only delete markers remain listed under this slot key:
-				// the slot's data version is gone, so its object
-				// references are unknown - never silently absent.
-				complete = false
+				// the slot's data versions are gone (a deleted slot, not an
+				// unreadable marker).
 				continue
 			}
 			add(r.Key, r.VersionID)
 			v, err := b.store.Read(ctx, r.Key, r.VersionID)
 			if err != nil {
 				if errors.Is(err, s3transport.ErrObjectAbsent) {
-					// Listed but gone (mid-deletion): this slot's object
-					// references are unknowable.
-					complete = false
+					// Listed but gone (mid-deletion): a deleted slot.
 					continue
 				}
 				return NamespaceEnumeration{}, err
@@ -751,7 +751,6 @@ func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turn
 				complete = false
 				continue
 			}
-			decoded[seq] = true
 			add(c.Event.Key, c.Event.Version)
 			for _, o := range c.Objects {
 				add(o.Key, o.Version)
@@ -762,22 +761,11 @@ func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turn
 			}
 		}
 	}
-	if len(seqs) > 0 {
-		// A hole in the listed slot sequence: the missing slots' object
-		// references are unknown.
-		maxSeq := uint64(0)
-		for seq := range seqs {
-			if seq > maxSeq {
-				maxSeq = seq
-			}
-		}
-		for i := uint64(1); i <= maxSeq; i++ {
-			if !seqs[i] || !decoded[i] {
-				complete = false
-			}
-		}
-	}
 	if len(out) == 0 {
+		// Authoritatively nothing left under the turn's namespaces. (An
+		// incomplete enumeration always has at least the listed slot
+		// version itself, so incompleteness can never be masked by this
+		// branch.)
 		return NamespaceEnumeration{}, ErrNotFound
 	}
 	res := make([]VersionRef, 0, len(out))
