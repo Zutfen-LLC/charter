@@ -313,7 +313,24 @@ func TestC07Round2ReviewDrill(t *testing.T) {
 	// after base retention expiry is refused by the legal hold alone.
 	for _, r := range s1Refs[1:] {
 		state, lerr := recordsClient.LegalHold(ctx, r.Key, r.Version)
-		must(lerr)
+		if lerr != nil {
+			// Dump the turn's current enumerable version set for diagnosis.
+			if cur, cerr := writeBackend.TurnDisposalRefs(ctx, tenant, s1Turn); cerr == nil {
+				var curRefs []string
+				for _, c := range cur {
+					curRefs = append(curRefs, c.Key+"@"+c.Version)
+				}
+				t.Logf("S1 diagnostic: current refs of %s: %v", s1Turn, curRefs)
+			}
+			var planRefs []string
+			if rows, perr := svc.Store.PlanOf(ctx, tenant, s1Turn); perr == nil {
+				for _, row := range rows {
+					planRefs = append(planRefs, row.Key+"@"+row.Version+" disp="+row.Disposition)
+				}
+				t.Logf("S1 diagnostic: plan rows: %v", planRefs)
+			}
+			t.Fatalf("S1 FINDING 1: legal-hold probe failed for %s@%s: %v", r.Key, r.Version, lerr)
+		}
 		if state != "ON" {
 			t.Fatalf("S1 FINDING 1: surviving version %s is %q, want ON", r.Key, state)
 		}
