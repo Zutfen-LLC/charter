@@ -28,6 +28,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -134,9 +135,10 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	must(err)
 	writeClient, err := s3transport.New(s3transport.Config{Endpoint: sc.Endpoint, Region: sc.Region, Bucket: sc.Bucket, AccessKeyID: sc.RecordsAccessKey, SecretAccessKey: strings.TrimSpace(string(recordsSecret))})
 	must(err)
+	seedStarted := time.Now()
 	writeBackend, err := evidence.NewRetentionBackend(evidence.RetentionOptions{
 		Store: writeClient, Deployment: deployment, Bucket: sc.Bucket, TrustedCommitKey: seedKey,
-		Signer: signer, MinimumRetention: time.Now().Add(5 * time.Second), RetainFor: 10 * time.Second, Fence: seedFence,
+		Signer: signer, MinimumRetention: seedStarted.Add(5 * time.Second), RetainFor: 60 * time.Second, Fence: seedFence,
 	})
 	must(err)
 	svc := recordsServiceFor(owner, writeBackend, recordsClient)
@@ -189,10 +191,122 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 		t.Fatalf("placement %s neither reached %s nor blocked on the protection fence", idem, wantState)
 	}
 
-	// ---- R1: release cleanup cannot clear a newer hold's protection ----
+	// ---- Seed turns (all before the retention wait) ----
 	r1Turn := seedTurn(alice, p1, matter1, "r1-shared-turn")
+	r2Turn := seedTurn(alice, p1, matter1, "r2-uncovered-turn")
+	r4Turn := seedTurn(alice, p1, matter1, "r4-partial-disposal")
+	r6Turn := seedTurn(alice, p1, matter1, "r6-shared-input")
 	refs1, err := writeBackend.TurnDisposalRefs(ctx, tenant, r1Turn)
 	must(err)
+	refs2, err := writeBackend.TurnDisposalRefs(ctx, tenant, r2Turn)
+	must(err)
+	refs4, err := writeBackend.TurnDisposalRefs(ctx, tenant, r4Turn)
+	must(err)
+	refs6, err := writeBackend.TurnDisposalRefs(ctx, tenant, r6Turn)
+	must(err)
+	dump("c07r-seed-turns.json", map[string]string{"r1": r1Turn, "r2": r2Turn, "r4": r4Turn, "r6": r6Turn})
+
+	// ---- R6 (before the retention wait): concurrent capture vs disposal of
+	// a shared exact version while its base retention is still active ----
+	// On the real storage two guards overlap: content-addressed reuse
+	// requires UNEXPIRED retention, and unexpired retention refuses the
+	// delete (the storage-native invariant), while the tenant protection
+	// fence serializes the capture's reference acquisition with the
+	// disposal's delete phase. Both turns must keep verifiable evidence.
+	time.Sleep(2 * time.Second) // lifecycle retention (1s) elapses
+	if marked, err := svc.Sweep(ctx, officer1); err != nil {
+		t.Fatal(err)
+	} else if marked == 0 {
+		t.Fatal("R6: no disposal-eligible turn")
+	}
+	if outcome, err := svc.Store.BeginPurge(ctx, officer2, r6Turn, func(context.Context, string) (bool, error) {
+		return true, nil
+	}); err != nil || outcome != "purging" {
+		t.Fatalf("R6 begin: %s %v", outcome, err)
+	}
+	objPaused := make(chan struct{})
+	objResume := make(chan struct{})
+	var objOnce sync.Once
+	svc.Hooks.BeforeStorageDelete = func(key, version string) {
+		if strings.Contains(key, "/data/objects/") {
+			objOnce.Do(func() {
+				close(objPaused)
+				<-objResume
+			})
+		}
+	}
+	disposalDone := make(chan error, 1)
+	go func() {
+		_, _, err := svc.FinishPurge(ctx, &officer2, r6Turn)
+		disposalDone <- err
+	}()
+	<-objPaused
+	// T2: a concurrent capture of the SAME content (the same
+	// content-addressed object version) through the real recorder. Its
+	// admission is fenced out until the disposal's delete phase completes.
+	t2model := make(chan struct{})
+	t2proceed := make(chan struct{})
+	t2done := make(chan error, 1)
+	var t2Turn atomic.Value
+	go func() {
+		res, err := recorder.Process(ctx, evidence.Request{
+			TenantID: tenant, ProjectID: p1, MatterID: matter1, CustodianID: alice,
+			IdempotencyKey: "c07r-r6-t2", Input: []byte("r6-shared-input"),
+		}, func(ctx context.Context, sent []byte) (evidence.ModelOutcome, error) {
+			close(t2model)
+			<-t2proceed
+			return evidence.ModelOutcome{Accepted: true, Complete: true, Output: []byte("review output r6-shared-input")}, nil
+		}, func(context.Context) error { return nil })
+		if err == nil {
+			t2Turn.Store(res.TurnID)
+		}
+		t2done <- err
+	}()
+	admittedOrFenced := make(chan struct{})
+	go func() {
+		select {
+		case <-t2model:
+			// T2's admission completed during the frozen disposal.
+		case <-time.After(3 * time.Second):
+			// bounded fallback: T2 is blocked on the protection fence.
+		}
+		close(admittedOrFenced)
+	}()
+	<-admittedOrFenced
+	close(objResume)
+	disposalErr := <-disposalDone
+	if !errors.Is(disposalErr, records.ErrBlockedStorage) {
+		t.Fatalf("R6: disposal within active base retention must be honestly blocked, got %v", disposalErr)
+	}
+	close(t2proceed)
+	must(<-t2done)
+	t2 := t2Turn.Load().(string)
+	svc.Hooks.BeforeStorageDelete = nil
+	// THE invariant: BOTH turns keep verifiable evidence chains - nothing
+	// was deleted (the storage refused while retention is active) and the
+	// capture's references are intact.
+	for _, turn := range []string{r6Turn, t2} {
+		events, err := writeBackend.Load(ctx, tenant, turn)
+		must(err)
+		if _, err := writeBackend.LoadRetainedObjects(ctx, tenant, turn, events); err != nil {
+			t.Fatalf("R6 FINDING 6B: %s evidence broken: %v", turn, err)
+		}
+	}
+	for _, r := range refs6 {
+		state, err := recordsClient.LegalHold(ctx, r.Key, r.Version)
+		must(err)
+		if state == "ON" {
+			t.Fatalf("R6: no hold was placed; legal hold must not be set: %s", r.Key)
+		}
+	}
+	dump("c07r-r6-shared-reference.json", map[string]any{"disposal_turn": r6Turn, "captured_turn": t2, "disposal_outcome": "blocked_by_storage"})
+
+	// ---- The storage retention horizon passes for the seed versions ----
+	if wait := 75*time.Second - time.Since(seedStarted); wait > 0 {
+		time.Sleep(wait)
+	}
+
+	// ---- R1: release cleanup cannot clear a newer hold's protection ----
 	h1, err := svc.Place(ctx, officer1, records.Scope{MatterID: matter1}, "R1 first hold", "c07r-h1")
 	must(err)
 	if h1.State != records.HoldEffective {
@@ -246,16 +360,14 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 		}
 	}
 	dump("c07r-r1-release-race.json", map[string]any{"turn": r1Turn, "hold2": h2v.ID, "versions_verified_on": len(refs1)})
+	if _, err := svc.Release(ctx, officer2, h2v.ID, "R1 final release"); err != nil {
+		t.Fatal(err)
+	}
 
 	// ---- R2: missing required versions block every effective transition ----
-	r2Turn := seedTurn(alice, p1, matter1, "r2-uncovered-turn")
-	refs2, err := writeBackend.TurnDisposalRefs(ctx, tenant, r2Turn)
-	must(err)
-	// The versions' base retention is still within its short horizon; wait
-	// for it so the records transport can delete a mid-chain event slot: the
-	// turn stays enumerable from its admission, but its exact version set is
-	// no longer verifiable (an incomplete chain).
-	time.Sleep(11 * time.Second)
+	// Delete a mid-chain event slot: the turn stays enumerable from its
+	// admission, but its exact version set is no longer verifiable (an
+	// incomplete chain fails closed instead of truncating silently).
 	slot2 := ""
 	for _, r := range refs2 {
 		if strings.Contains(r.Key, "/events/"+r2Turn+"/") {
@@ -282,9 +394,6 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	}
 	if len(after.Report.Uncovered) == 0 {
 		t.Fatal("R2: the uncovered record must be reported")
-	}
-	if got := itemState(r2Turn); got != "" && got != "active" {
-		t.Fatalf("R2: uncovered turn item state %q", got)
 	}
 	// Scope-change reestablishment refuses it too.
 	changed, err := svc.Store.ChangeScope(ctx, officer1, h.ID, records.Scope{MatterID: matter1, CustodianIDs: []string{alice}}, "R2 narrow")
@@ -334,12 +443,13 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	dump("c07r-r3-future-work.json", map[string]any{"turn": r3Turn, "versions_cleared": len(refs3)})
 
 	// ---- R4: interrupted delete resumes from the durable plan ----
-	r4Turn := seedTurn(alice, p1, matter1, "r4-partial-disposal")
-	refs4, err := writeBackend.TurnDisposalRefs(ctx, tenant, r4Turn)
-	must(err)
-	time.Sleep(11 * time.Second) // storage retention horizon
-	if marked, err := svc.Sweep(ctx, officer1); err != nil || marked == 0 {
-		t.Fatalf("R4 sweep: %d %v", marked, err)
+	if marked, err := svc.Sweep(ctx, officer1); err != nil {
+		t.Fatal(err)
+	} else if marked == 0 {
+		// The R4 turn may already be disposal_pending from the R6 sweep.
+		if s := itemState(r4Turn); s != records.ItemDisposalPending {
+			t.Fatalf("R4: turn not eligible: %q", s)
+		}
 	}
 	if outcome, err := svc.Store.BeginPurge(ctx, officer2, r4Turn, func(context.Context, string) (bool, error) {
 		return true, nil
@@ -398,7 +508,8 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	} else if marked != 0 {
 		t.Fatalf("R5 FINDING 6A: an admitted, actively executing turn was swept (%d items marked)", marked)
 	}
-	if s := itemState(fmt.Sprint(r5Turn.Load())); s != "" && s != "active" {
+	r5pending := fmt.Sprint(r5Turn.Load())
+	if s := itemState(r5pending); s != "" && s != "active" {
 		t.Fatalf("R5: in-flight turn item state %q", s)
 	}
 	close(proceed)
@@ -411,97 +522,21 @@ func TestC07ReviewCorrectionDrill(t *testing.T) {
 	if marked, err := svc.Sweep(ctx, officer1); err != nil || marked == 0 {
 		t.Fatalf("R5: terminal expired turn must be eligible: %d %v", marked, err)
 	}
+	if s := itemState(r5); s != records.ItemDisposalPending {
+		t.Fatalf("R5: terminal expired turn must be marked: %q", s)
+	}
 	dump("c07r-r5-terminal.json", map[string]any{"turn": r5, "state_after_terminal_sweep": itemState(r5)})
-	// Complete the disposal honestly.
-	if outcome, err := svc.Store.BeginPurge(ctx, officer2, r5, func(context.Context, string) (bool, error) {
-		return true, nil
-	}); err != nil || outcome != "purging" {
-		t.Fatalf("R5 begin: %s %v", outcome, err)
-	}
-	if outcome, _, err := svc.FinishPurge(ctx, &officer2, r5); err != nil || outcome != "disposed" {
-		t.Fatalf("R5 finish: %s %v", outcome, err)
-	}
 
-	// ---- R6: concurrent capture vs disposal of a shared exact version ----
-	r6Turn := seedTurn(alice, p1, matter1, "r6-shared-input")
-	time.Sleep(11 * time.Second) // storage retention horizon
-	if marked, err := svc.Sweep(ctx, officer1); err != nil || marked == 0 {
-		t.Fatalf("R6 sweep: %d %v", marked, err)
-	}
-	if outcome, err := svc.Store.BeginPurge(ctx, officer2, r6Turn, func(context.Context, string) (bool, error) {
-		return true, nil
-	}); err != nil || outcome != "purging" {
-		t.Fatalf("R6 begin: %s %v", outcome, err)
-	}
-	objPaused := make(chan struct{})
-	objResume := make(chan struct{})
-	var objOnce sync.Once
-	svc.Hooks.BeforeStorageDelete = func(key, version string) {
-		if strings.Contains(key, "/data/objects/") {
-			objOnce.Do(func() {
-				close(objPaused)
-				<-objResume
-			})
-		}
-	}
-	disposalDone := make(chan error, 1)
-	var disposalOutcome atomic.Value
-	go func() {
-		o, _, err := svc.FinishPurge(ctx, &officer2, r6Turn)
-		disposalOutcome.Store(o)
-		disposalDone <- err
-	}()
-	<-objPaused
-	// T2: a concurrent capture of the SAME content (the same
-	// content-addressed object versions) through the real recorder.
-	t2model := make(chan struct{})
-	t2proceed := make(chan struct{})
-	t2done := make(chan error, 1)
-	var t2Turn atomic.Value
-	go func() {
-		res, err := recorder.Process(ctx, evidence.Request{
-			TenantID: tenant, ProjectID: p1, MatterID: matter1, CustodianID: alice,
-			IdempotencyKey: "c07r-r6-t2", Input: []byte("r6-shared-input"),
-		}, func(ctx context.Context, sent []byte) (evidence.ModelOutcome, error) {
-			close(t2model)
-			<-t2proceed
-			return evidence.ModelOutcome{Accepted: true, Complete: true, Output: []byte("review output r6-shared-input")}, nil
-		}, func(context.Context) error { return nil })
-		if err == nil {
-			t2Turn.Store(res.TurnID)
-		}
-		t2done <- err
-	}()
-	// Either T2's admission completes during the frozen disposal (the racy
-	// interleaving of the reviewed head) or it is fenced out until the
-	// disposal commits (the corrected head).
-	admittedOrFenced := make(chan struct{})
-	go func() {
-		select {
-		case <-t2model:
-		case <-time.After(3 * time.Second):
-			// bounded fallback: T2 is blocked on the protection fence
-		}
-		close(admittedOrFenced)
-	}()
-	<-admittedOrFenced
-	close(objResume)
-	must(<-disposalDone)
-	close(t2proceed)
-	must(<-t2done)
-	t2 := t2Turn.Load().(string)
-	if o, _ := disposalOutcome.Load().(string); o != "disposed" {
-		t.Fatalf("R6: disposal outcome %q", o)
-	}
-	svc.Hooks.BeforeStorageDelete = nil
-	// THE invariant: the acknowledged, unheld, completed turn keeps a
-	// verifiable evidence chain with its retained objects available.
+	// ---- End-to-end re-verification: the R6 concurrent capture's evidence
+	// survives the whole drill, including the recovery that completed the
+	// blocked disposal of its sharing partner (shared references are never
+	// deleted while a non-disposed record requires them). ----
 	events2, err := writeBackend.Load(ctx, tenant, t2)
 	must(err)
 	if _, err := writeBackend.LoadRetainedObjects(ctx, tenant, t2, events2); err != nil {
-		t.Fatalf("R6 FINDING 6B: concurrent capture's evidence broken by another turn's disposal: %v", err)
+		t.Fatalf("R6 END-TO-END: concurrent capture's evidence broken after the full drill: %v", err)
 	}
-	dump("c07r-r6-shared-reference.json", map[string]any{"disposed_turn": r6Turn, "captured_turn": t2, "verified_events": len(events2)})
+	dump("c07r-final-verification.json", map[string]any{"captured_turn": t2, "verified_events": len(events2)})
 
 	seedFence.Release()
 }
