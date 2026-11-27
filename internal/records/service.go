@@ -679,7 +679,12 @@ func (s *Service) coverPlanTurn(ctx context.Context, h *Hold, it Item, report *R
 	for _, row := range plan {
 		switch row.Disposition {
 		case OutcomeDeleted, OutcomeAbsent:
-			continue // already dispositioned gone
+			// Already dispositioned gone: still a LOSS for coverage
+			// reporting (a durable record of loss is a loss, not
+			// intactness - C07 round-3 finding 3), counted like a
+			// storage-verified missing version.
+			missing++
+			continue
 		}
 		if herr := s.Storage.Head(ctx, row.Key, row.Version); herr != nil {
 			if errors.Is(herr, s3transport.ErrObjectAbsent) {
@@ -1038,13 +1043,48 @@ func (s *Service) Sweep(ctx context.Context, p store.Principal) (int, error) {
 }
 
 // terminalCheck adapts the backend's terminality probe to the store's
-// sweep-time check.
+// sweep-time check, with DURABLE plan-backed proof of previously verified
+// terminality (C07 round-3 finding 3). A disposal plan is committed only
+// by the authorized disposal lifecycle for an item whose sweep-time
+// terminality was already VERIFIED (active -> disposal_pending requires a
+// terminal probe; begin_purge and the plan phase require disposal_pending
+// and purging under the matter epoch), the plan is bound to the exact
+// (tenant, turn) identity, and terminality is monotonic once observed -
+// so a non-empty durable plan is POSITIVE durable evidence of previously
+// verified terminality, never an inference from missing evidence: the live
+// probe's "non-terminal" or failure after the terminal event data or
+// marker was deleted mid-disposal is missing evidence, not
+// counterevidence. A turn WITHOUT a plan (an in-flight capture, or any
+// never-disposed turn) is decided by the live probe alone and fails
+// closed on verification errors - nothing may infer terminality from a
+// missing probe answer.
 func (s *Service) terminalCheck(ctx context.Context, t evidence.TurnIdentity) (bool, error) {
-	probe, ok := evidence.TerminalOf(s.Backend)
-	if !ok {
-		return false, errors.New("records: backend cannot verify terminal capture state")
+	var (
+		terminal bool
+		perr     error
+		probed   bool
+	)
+	if probe, ok := evidence.TerminalOf(s.Backend); ok {
+		probed = true
+		terminal, perr = probe.TurnTerminal(ctx, t.TenantID, t.TurnID)
+	} else {
+		perr = errors.New("records: backend cannot verify terminal capture state")
 	}
-	return probe.TurnTerminal(ctx, t.TenantID, t.TurnID)
+	if perr == nil && terminal {
+		return true, nil
+	}
+	if s.Retained {
+		if plan, err := s.Store.PlanOf(ctx, t.TenantID, t.TurnID); err == nil && len(plan) > 0 {
+			// Durable proof of previously verified terminality, bound to
+			// this exact turn's authorized disposal lifecycle.
+			return true, nil
+		}
+	}
+	if !probed || perr != nil {
+		// No verified terminal state: fail closed, never mark.
+		return false, perr
+	}
+	return terminal, nil
 }
 
 // VersionPresent reports whether the turn's versions are present or their
