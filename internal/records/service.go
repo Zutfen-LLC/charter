@@ -44,13 +44,35 @@ type Hooks struct {
 	// StorageFault, when set, injects a failure into a storage operation.
 	// stage is "protect", "readback", "delete" or "cleanup".
 	StorageFault func(stage string) error
-	// BeforeApplicableReload runs at the start of the second (native
-	// mutation) phase of EnsureProtected, before the applicable hold set
-	// is re-loaded inside the protection fence: the deterministic
-	// interleave point for a hold that becomes applicable between the two
-	// phases (C07 round-2 finding 6).
+	// BeforeApplicableReload runs at the start of the second phase of
+	// EnsureProtected (the claims-commit transaction), before the
+	// applicable hold set is re-loaded inside the protection fence: the
+	// deterministic interleave point for a hold that becomes applicable
+	// between the two phases (C07 round-2 finding 6).
 	BeforeApplicableReload func()
+	// BeforeNativeProtect runs BETWEEN the claims-commit transaction and
+	// the native-mutation transaction of EnsureProtected's second phase,
+	// before the protection fence is re-taken: the deterministic interleave
+	// point for holds that change (placed, released, scope-revised)
+	// between committed ownership preparation and the native phase (C07
+	// round-3 finding 2), and the point from which committed ledger
+	// visibility is provable from an independent database connection
+	// before the first native mutation.
+	BeforeNativeProtect func()
 }
+
+// maxEnsureProtectedAttempts bounds the claims-commit/native-mutation retry
+// loop of EnsureProtected: repeated changes in the applicable hold set
+// retry a bounded number of times and then fail closed WITHOUT any native
+// mutation (an unbounded retry loop would never converge under a churn
+// storm; the turn fails closed and the next pass converges).
+const maxEnsureProtectedAttempts = 5
+
+// errClaimsChanged is the internal retry sentinel of EnsureProtected: an
+// applicable hold lacks a committed ownership claim for a version about to
+// be natively protected, so the claims-commit phase must run again before
+// any native mutation.
+var errClaimsChanged = errors.New("records: applicable holds changed before the native mutation")
 
 // Service is the C07 lifecycle composition: the PG lifecycle store, the
 // authoritative evidence backend, and (when the deployment qualifies it) the
@@ -316,6 +338,18 @@ func (s *Service) HoldApplies(ctx context.Context, tenant, matter, custodian str
 // storage mutation, so release cleanup and recovery have a complete
 // crash-safe derivation of the protection this admission caused (C07 review
 // finding 3).
+//
+// Phase 2 is TWO transactions (C07 round-3 finding 2): the claims-commit
+// transaction durably commits the ownership claims of every newly
+// applicable hold FIRST; the native-mutation transaction then re-loads the
+// applicable holds, revalidates that every one of them has a COMMITTED
+// claim row for every version (a successful UPDATE inside an open
+// transaction is not proof of durable ownership), and only then performs
+// SetLegalHold, readback and claim completion. A crash or rollback after
+// the native mutation therefore always leaves a committed (pending or
+// protected) claim that release cleanup and recovery can converge. Holds
+// that change between the two transactions re-run the claims-commit phase
+// a bounded number of times and then fail closed with no native mutation.
 func (s *Service) EnsureProtected(ctx context.Context, tenant, matter, custodian, turn string, recordedAt time.Time) error {
 	if !s.Retained {
 		// The PostgreSQL profile has no storage-native protection to apply;
@@ -358,66 +392,107 @@ func (s *Service) EnsureProtected(ctx context.Context, tenant, matter, custodian
 	}); err != nil {
 		return err
 	}
-	// Phase 2: native mutation + readback + claim completion under the
-	// fence, with the holds' committed state re-loaded first: claims of a
-	// hold that was released in between are never re-set natively.
-	return s.withProtection(ctx, tenant, func(tx pgx.Tx) error {
-		if s.Hooks.BeforeApplicableReload != nil {
-			s.Hooks.BeforeApplicableReload()
+	// Phase 2a: commit the ownership claims of every newly applicable hold
+	// (a hold released in between never receives claims here); phase 2b:
+	// revalidate and mutate natively. Repeated applicability changes retry
+	// the pair a bounded number of times (errClaimsChanged), then fail
+	// closed without any native mutation.
+	for attempt := 0; ; attempt++ {
+		if attempt >= maxEnsureProtectedAttempts {
+			return fmt.Errorf("records: applicable holds kept changing across %d attempts; no native mutation was performed (retry closed)", maxEnsureProtectedAttempts)
 		}
-		current, err := holdsOfTx(ctx, tx, tenant)
-		if err != nil {
+		if err := s.withProtection(ctx, tenant, func(tx pgx.Tx) error {
+			if attempt == 0 && s.Hooks.BeforeApplicableReload != nil {
+				s.Hooks.BeforeApplicableReload()
+			}
+			current, err := holdsOfTx(ctx, tx, tenant)
+			if err != nil {
+				return err
+			}
+			for _, h := range current {
+				if h.State == HoldReleased || !Matches(h, matter, custodian, recordedAt) {
+					continue
+				}
+				for _, r := range refs {
+					if err := UpsertClaim(ctx, tx, tenant, h.ID, VersionRef(r)); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
-		applicable := map[string]bool{}
-		for _, h := range current {
-			if h.State == HoldReleased || !Matches(h, matter, custodian, recordedAt) {
-				continue
-			}
-			applicable[h.ID] = true
+		// The deterministic interleave point between committed ownership
+		// preparation and the native mutation (no fence is held here).
+		if s.Hooks.BeforeNativeProtect != nil {
+			s.Hooks.BeforeNativeProtect()
 		}
-		if len(applicable) == 0 {
-			return nil
-		}
-		// Claims for EVERY applicable hold are established inside this
-		// fence transaction BEFORE the native mutation: a hold that became
-		// applicable after the initial out-of-fence snapshot can no longer
-		// receive native protection without a durable claim (protection
-		// completion requires an updated claim row - C07 round-2 finding 6).
-		for id := range applicable {
-			for _, r := range refs {
-				if err := UpsertClaim(ctx, tx, tenant, id, VersionRef(r)); err != nil {
-					return err
+		err := s.withProtection(ctx, tenant, func(tx pgx.Tx) error {
+			current, err := holdsOfTx(ctx, tx, tenant)
+			if err != nil {
+				return err
+			}
+			applicable := map[string]bool{}
+			for _, h := range current {
+				if h.State == HoldReleased || !Matches(h, matter, custodian, recordedAt) {
+					continue
 				}
+				applicable[h.ID] = true
 			}
-		}
-		for _, r := range refs {
-			v := VersionRef(r)
-			if s.Hooks.StorageFault != nil {
-				if err := s.Hooks.StorageFault("protect"); err != nil {
-					return err
-				}
+			if len(applicable) == 0 {
+				return nil
 			}
-			if err := s.Storage.SetLegalHold(ctx, v.Key, v.Version, true); err != nil {
-				return fmt.Errorf("records: protect %s: %w", v.Key, err)
-			}
-			if s.Hooks.StorageFault != nil {
-				if err := s.Hooks.StorageFault("readback"); err != nil {
-					return err
-				}
-			}
-			state, err := s.Storage.LegalHold(ctx, v.Key, v.Version)
-			if err != nil || state != "ON" {
-				return fmt.Errorf("records: protection readback failed for %s: %v", v.Key, err)
-			}
+			// Durable ownership revalidation: every applicable hold must
+			// already have a COMMITTED claim row for every version about to
+			// be natively protected (claims committed by phase 1/2a are
+			// visible to this new transaction; a hold that became
+			// applicable after the claims commit is not). A missing claim
+			// restarts the claims-commit phase - the native mutation never
+			// runs ahead of durable ownership.
 			for id := range applicable {
-				if err := MarkClaimProtected(ctx, tx, id, v); err != nil {
-					return err
+				for _, r := range refs {
+					var claimed bool
+					if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hold_version_claims WHERE hold_id=$1 AND key=$2 AND version=$3)`, id, r.Key, r.Version).Scan(&claimed); err != nil {
+						return err
+					}
+					if !claimed {
+						return errClaimsChanged
+					}
 				}
 			}
+			for _, r := range refs {
+				v := VersionRef(r)
+				if s.Hooks.StorageFault != nil {
+					if err := s.Hooks.StorageFault("protect"); err != nil {
+						return err
+					}
+				}
+				if err := s.Storage.SetLegalHold(ctx, v.Key, v.Version, true); err != nil {
+					return fmt.Errorf("records: protect %s: %w", v.Key, err)
+				}
+				if s.Hooks.StorageFault != nil {
+					if err := s.Hooks.StorageFault("readback"); err != nil {
+						return err
+					}
+				}
+				state, err := s.Storage.LegalHold(ctx, v.Key, v.Version)
+				if err != nil || state != "ON" {
+					return fmt.Errorf("records: protection readback failed for %s: %v", v.Key, err)
+				}
+				for id := range applicable {
+					if err := MarkClaimProtected(ctx, tx, id, v); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		})
+		if errors.Is(err, errClaimsChanged) {
+			continue
 		}
-		return nil
-	})
+		return err
+	}
 }
 
 // Place runs the full placement: the durable epoch+record transaction, then
