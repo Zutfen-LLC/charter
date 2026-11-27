@@ -27,7 +27,7 @@ func (g *guardSpy) HoldApplies(ctx context.Context, tenant, matter, custodian st
 	return g.applies, nil
 }
 
-func (g *guardSpy) EnsureProtected(ctx context.Context, tenant, turn string) error {
+func (g *guardSpy) EnsureProtected(ctx context.Context, tenant, matter, custodian, turn string, recordedAt time.Time) error {
 	g.calls = append(g.calls, "ensure")
 	if g.failErr != nil && len(g.calls) == g.failAt {
 		return g.failErr

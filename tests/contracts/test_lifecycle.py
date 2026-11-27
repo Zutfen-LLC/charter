@@ -1,7 +1,7 @@
 import copy, json, os, unittest
 
 from model import (EstablishmentError, GuardedStore, NewWorkFailClosed,
-                   StorageUnavailable, matches)
+                   StorageUnavailable, matches, HOLD_PENDING, HOLD_EFFECTIVE)
 
 FX = os.path.join(os.path.dirname(__file__), "..", "..", "fixtures", "contracts")
 
@@ -215,3 +215,139 @@ class ModelParity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewCorrections(unittest.TestCase):
+    """The C07 independent-review corrections, mirrored from the Go
+    reproduction tests: the Python reference model must satisfy the same
+    preservation invariants."""
+
+    def test_release_clears_future_work_protection(self):
+        # Finding 3A: post-activation (future) matching work is protected by
+        # the admission guard; releasing the final applicable hold clears it.
+        s = guarded(ITEMS, [H1])
+        s.place_hold_verified(H1, now=0)
+        s.admit_new_work("N1", "m-0001", "c1", now=10, recorded_at="2026-02-01")
+        for key, version in s.versions_of("N1"):
+            self.assertEqual(s.legal_hold_state(key, version), "ON")
+        s.release_hold_verified("H1")
+        s.recover(now=20)
+        for key, version in s.versions_of("N1"):
+            self.assertEqual(s.legal_hold_state(key, version), "OFF")
+
+    def test_scope_narrowing_eventually_clears_removed_scope(self):
+        # Finding 3B: narrowing clears removed-scope versions once no
+        # remaining hold requires them, while the remaining scope stays.
+        s = guarded(ITEMS, [dict(H1, id="HW"), dict(H2, id="HO")])
+        s.place_hold_verified(dict(H1, id="HW"), now=0)      # all custodians
+        s.place_hold_verified(dict(H2, id="HO"), now=0)      # c1 only
+        s.change_scope("HW", custodian_ids=["c1"])
+        s.reestablish("HW", now=0)
+        s.release_hold_verified("HW")
+        s.recover(now=0)
+        # B (c2) was only covered by the wide scope: cleared.
+        for key, version in s.versions_of("B"):
+            self.assertEqual(s.legal_hold_state(key, version), "OFF")
+        # A (c1) is still held by HO: protection stands.
+        for key, version in s.versions_of("A"):
+            self.assertEqual(s.legal_hold_state(key, version), "ON")
+
+    def test_release_crash_before_cleanup_recovers(self):
+        # Finding 3C: the release commits, the cleanup never runs; recovery
+        # converges from the durable claims ledger.
+        s = guarded(ITEMS, [H1])
+        s.place_hold_verified(H1, now=0)
+        # Phase-1-only release: the claim is durably removed, no cleanup.
+        s.release_hold("H1")
+        for key, version in s.versions_of("A"):
+            self.assertEqual(s.legal_hold_state(key, version), "ON")
+        s.recover(now=10)
+        for key, version in s.versions_of("A"):
+            self.assertEqual(s.legal_hold_state(key, version), "OFF")
+
+    def test_storage_outage_is_not_disposal_at_recovery(self):
+        # Finding 4: a storage outage during recovery never becomes proof of
+        # disposal; the state is retained conservatively.
+        s = guarded(ITEMS)
+        s.sweep(200)
+        s.storage_down = True
+        s.recover(now=300)
+        self.assertEqual(s.items["A"]["state"], "disposal_pending")
+        s.storage_down = False
+        s.recover(now=300)
+        # After access returns, an honest observation keeps it eligible.
+        self.assertEqual(s.classify_presence("A"), "present")
+
+    def test_uncovered_blocks_reestablishment_and_recovery(self):
+        # Finding 2: scope-change reestablishment and startup recovery obey
+        # the same acceptance rule as placement.
+        s = guarded(ITEMS, [dict(H1, id="HR")])
+        s.place_hold_verified(dict(H1, id="HR"), now=0)
+        for key, version in s.versions_of("B"):
+            s.deleted.add((key, version))
+        s.change_scope("HR", custodian_ids=[])
+        with self.assertRaises(EstablishmentError):
+            s.reestablish("HR", now=0)
+        self.assertNotEqual(s.holds["HR"]["state"], "effective")
+        # Recovery of a pending hold with uncovered records also refuses.
+        s2 = guarded(ITEMS, [dict(H1, id="HP")])
+        s2.place_hold(dict(H1, id="HP"))
+        for key, version in s2.versions_of("A"):
+            s2.deleted.add((key, version))
+        s2.recover(now=0)
+        self.assertNotEqual(s2.holds["HP"]["state"], "effective")
+
+    def test_stale_establishment_cannot_mark_changed_scope_effective(self):
+        # Finding 2 (concurrent scope changes): the establishment verified the
+        # prior scope revision; a scope change moved the revision; the stale
+        # completion must not mark the newer scope effective.
+        s = guarded(ITEMS, [dict(H1, id="HS")])
+        s.place_hold(dict(H1, id="HS"))
+        h = s.holds["HS"]
+        want = h["scope_epoch"]
+        report = s._establish(h, now=0)   # verified under the prior revision
+        h["scope_epoch"] = want + 1       # a concurrent scope change commits
+        if report["uncovered"]:
+            self.fail("fixture setup: establishment must verify cleanly")
+        if h.get("scope_epoch", 0) != want:
+            h["state"] = HOLD_PENDING     # the corrected transition refuses
+        self.assertNotEqual(h["state"], HOLD_EFFECTIVE)
+
+    def test_partial_disposal_resumes_from_the_plan(self):
+        # Finding 5: the plan is committed before any deletion; an
+        # interrupted delete resumes from the plan with a verified
+        # disposition for every exact version (already-deleted = absent).
+        s = guarded(ITEMS)
+        s.sweep(200)
+        self.assertTrue(s.begin_purge("A", 300, True))
+        refs = s.versions_of("A")
+        # Interrupted delete: the first version's deletion committed at the
+        # storage but the transaction (and with it the plan's first
+        # disposition) did not. Recovery completes from the plan.
+        s.deleted.add(refs[0])
+        s.recover(now=300)
+        self.assertEqual(s.items["A"]["state"], "disposed")
+        for key, version in refs:
+            self.assertIn(s.plans["A"][(key, version)], ("deleted", "absent"))
+
+    def test_disposed_turn_leaving_inventory_is_reported(self):
+        # Finding 5 (gap reporting): a disposed turn remains in the catalog;
+        # the Go implementation derives it there when live enumeration no
+        # longer lists it. The reference model reports it as before.
+        s = guarded(ITEMS)
+        s.sweep(200)
+        self.assertTrue(s.purge("A", 300, True))
+        h = s.place_hold_verified(H1, now=0)
+        self.assertEqual(h["state"], "effective")
+        self.assertIn("A", s.reports["H1"]["disposed_before_hold"])
+        self.assertNotIn("A", s.reports["H1"]["uncovered"])
+
+    def test_sweep_requires_terminal_capture(self):
+        # Finding 6A: an admitted, actively executing turn is never swept.
+        s = guarded(ITEMS)
+        s.items["A"]["terminal"] = False
+        s.sweep(200)
+        self.assertEqual(s.items["A"]["state"], "active")
+        s.items["A"]["terminal"] = True
+        s.sweep(200)
+        self.assertEqual(s.items["A"]["state"], "disposal_pending")

@@ -807,6 +807,10 @@ class Store:
 
     def sweep(self, now):
         for it in self.items.values():
+            if not it.get("terminal", True):
+                # In-flight capture: disposal eligibility requires a verified
+                # terminal capture state (finding 6A); never swept.
+                continue
             if it["state"] == "active" and now >= it["retention_expires_at"] and not self.held(it):
                 it["state"], it["observed_epoch"], it["pending_since"] = "disposal_pending", self.epoch, now
 
@@ -875,6 +879,14 @@ class GuardedStore(Store):
         self.reports = {}
         self.shared_object = {}   # item id -> shared object key (default own)
         self.clock = 0            # abstract tick for base-retention simulation
+        # C07 review corrections: durable protection ownership ledger and
+        # durable disposal plans.
+        self.claims = {}          # hold id -> set((key, version))
+        self.plans = {}           # item id -> {(key, version): disposition}
+        for it in self.items.values():
+            # Terminality: capture state of each turn; disposal eligibility
+            # requires a verified terminal capture state (finding 6A).
+            it.setdefault("terminal", True)
 
     # -- storage simulation (the records transport) --
     def set_legal_hold(self, key, version, on):
@@ -925,6 +937,7 @@ class GuardedStore(Store):
         super().place_hold(hold)
         placed = self.holds[hold["id"]]
         placed["state"] = HOLD_PENDING
+        placed["scope_epoch"] = self.epoch  # the scope revision
         return placed
 
     def place_hold_verified(self, hold, now=0):
@@ -932,6 +945,7 @@ class GuardedStore(Store):
         and verifies protection. Returns the durable hold dict or raises
         EstablishmentError; the hold is only effective when verified."""
         placed = self.place_hold(hold)
+        placed["scope_epoch"] = self.epoch  # scope revision binding
         try:
             report = self._establish(placed, now)
         except StorageUnavailable as e:
@@ -946,6 +960,50 @@ class GuardedStore(Store):
         placed["report"] = report
         self.reports[hold["id"]] = report
         return placed
+
+    def change_scope(self, hold_id, custodian_ids=None, window_start=None, window_end=None):
+        """A scope change rewrites the scope under a NEW scope revision: the
+        hold needs establishment again before it may report effective for
+        the new scope, and an establishment verified under the prior scope
+        revision can no longer complete the transition (finding 2)."""
+        h = self.holds[hold_id]
+        if custodian_ids is not None:
+            h["custodian_ids"] = custodian_ids
+        if window_start is not None:
+            h["window_start"] = window_start
+        if window_end is not None:
+            h["window_end"] = window_end
+        h["scope_epoch"] = self.epoch + 1
+        self.epoch += 1
+        h["state"] = HOLD_PENDING
+        return h
+
+    def reestablish(self, hold_id, now=0):
+        """Re-establishment (scope change or recovery): the same
+        authoritative acceptance rule as placement - uncovered records keep
+        the hold from becoming effective, and the completion is bound to the
+        scope revision it verified."""
+        h = self.holds[hold_id]
+        want_epoch = h.get("scope_epoch", 0)
+        try:
+            report = self._establish(h, now)
+        except StorageUnavailable as e:
+            h["state"] = HOLD_FAILED
+            self.reports[hold_id] = {"error": str(e)}
+            raise EstablishmentError(str(e))
+        if report["uncovered"]:
+            h["state"] = HOLD_FAILED
+            self.reports[hold_id] = report
+            raise EstablishmentError("uncovered records")
+        if h.get("scope_epoch", 0) != want_epoch:
+            # A stale establishment completing after a scope change: the
+            # newer scope must not be marked effective against it.
+            h["state"] = HOLD_PENDING
+            raise EstablishmentError("scope revision moved")
+        h["state"] = HOLD_EFFECTIVE
+        h["report"] = report
+        self.reports[hold_id] = report
+        return h
 
     def _establish(self, hold, now):
         report = {"items": [], "disposed_before_hold": [], "uncovered": [],
@@ -967,6 +1025,7 @@ class GuardedStore(Store):
                     break
             else:
                 report["protected_versions"].extend(refs)
+                self.claims.setdefault(hold["id"], set()).update(refs)
                 entry = dict(id=it["id"], custodian_id=it["custodian_id"],
                              recorded_at=it["recorded_at"], versions=len(refs))
                 if now >= it["retention_expires_at"]:
@@ -993,8 +1052,9 @@ class GuardedStore(Store):
                                        custodian_id=custodian_id, recorded_at=now,
                                        retention_expires_at=now + 100, state="active")
             return "admitted"
+        refs = self.versions_of(item_id)
         try:
-            for key, version in self.versions_of(item_id):
+            for key, version in refs:
                 self.set_legal_hold(key, version, True)
                 if self.legal_hold_state(key, version) != "ON":
                     raise StorageUnavailable("readback")
@@ -1002,31 +1062,52 @@ class GuardedStore(Store):
             # Nothing is released: the admission fails closed and the turn is
             # recorded as interrupted evidence of the failed protection.
             raise NewWorkFailClosed(str(e))
+        # Protection intent is durably claimed for EVERY matching active
+        # hold before the response escapes (finding 3A: release cleanup
+        # derives its outstanding set from the claims ledger, never only
+        # from the placement-time coverage report).
+        for h in self.holds.values():
+            if h["state"] == HOLD_RELEASED:
+                continue
+            if _scope_only(h, {"matter_id": matter_id, "custodian_id": custodian_id,
+                               "recorded_at": recorded}):
+                self.claims.setdefault(h["id"], set()).update(refs)
         self.items[item_id] = dict(id=item_id, matter_id=matter_id,
                                    custodian_id=custodian_id, recorded_at=recorded,
-                                   retention_expires_at=now + 100, state="active")
+                                   retention_expires_at=now + 100, state="active",
+                                   terminal=True)
         return "admitted-protected"
 
-    # -- release with conservative cleanup --
+    # -- release with conservative cleanup (claims-ledger derived) --
     def release_hold_verified(self, hold_id):
+        super().release_hold(hold_id)
+        return self.reconcile_claims(hold_id)
+
+    def reconcile_claims(self, hold_id):
+        """Clear the legal hold of every claimed version that no remaining
+        protection requires (any active hold of the store, any non-disposed
+        referencing record). Derived from the durable claims ledger - never
+        only the historical coverage report - so future matching work,
+        narrowed scopes and interrupted releases all converge (finding 3)."""
         hold = self.holds[hold_id]
         report = self.reports.get(hold_id, {})
-        protected = report.get("protected_versions", [])
-        super().release_hold(hold_id)
         pending = []
-        for key, version in protected:
-            if self._still_required(key, version, exclude=hold_id):
+        for key, version in sorted(self.claims.get(hold_id, set())):
+            if self._still_required(key, version, exclude=None):
                 continue
             try:
                 self.set_legal_hold(key, version, False)
                 if self.legal_hold_state(key, version) == "ON":
                     pending.append([key, version])
+                    continue
             except StorageUnavailable:
                 pending.append([key, version])
+                continue
+            self.claims[hold_id].discard((key, version))
         report["release_cleanup_pending"] = pending
         return pending
 
-    def _still_required(self, key, version, exclude):
+    def _still_required(self, key, version, exclude=None):
         for other_id, other in self.holds.items():
             if other_id == exclude or other["state"] == HOLD_RELEASED:
                 continue
@@ -1037,34 +1118,93 @@ class GuardedStore(Store):
                     return True
         return False
 
-    # -- disposal (shared-object aware) --
+    # -- disposal (plan-based, shared-object aware) --
+    def classify_presence(self, item_id):
+        """Presence classification (finding 4): a storage failure is never
+        proof of disposal. Only the plan-verified disposition of every exact
+        version may claim absence; unknown observations are unknown."""
+        it = self.items.get(item_id)
+        if it is None:
+            return "unknown"
+        if self.storage_down:
+            return "unknown"
+        plan = self.plans.get(item_id)
+        if plan is not None:
+            if all(d in ("deleted", "absent") for d in plan.values()) and plan:
+                return "absent"
+            return "present"
+        refs = self.versions_of(item_id)
+        if all((key, version) in self.deleted for key, version in refs):
+            return "partial"
+        return "present"
+
     def finish_purge_shared(self, item_id, now):
-        """The conditional delete: refuses on epoch change like Store, and
-        never deletes a version another non-disposed record references."""
+        """The conditional delete, in the two durable phases of the corrected
+        implementation: the exact-version plan is committed BEFORE any
+        irreversible deletion (finding 5), and the deletes then run under the
+        conditional-delete fence with per-version dispositions. It refuses on
+        epoch change like Store, and never deletes a version another
+        non-disposed record references."""
         it = self.items[item_id]
         if it["state"] != "purging":
             return "not_purging"
         if self.epoch != it["observed_epoch"]:
             if self.held(it):
                 it["state"] = "active"
+                self.plans.pop(item_id, None)
                 return "restored_active"
             it["state"] = "disposal_pending"
+            self.plans.pop(item_id, None)
             return "stale_retry"
-        outcomes = {}
+        # Plan phase: the exact-version plan, committed before any deletion.
+        plan = self.plans.setdefault(item_id, {})
         for key, version in self.versions_of(item_id):
+            plan.setdefault((key, version), "planned")
+        # Delete phase: per-version dispositions from the plan.
+        for key, version in self.versions_of(item_id):
+            if plan[(key, version)] in ("deleted", "absent"):
+                continue
             shared = any(other["id"] != item_id and other["state"] != "disposed"
                          and (key, version) in self.versions_of(other["id"])
                          for other in self.items.values())
             if shared:
-                outcomes[key] = "retained_shared"
+                plan[(key, version)] = "retained_shared"
                 continue
-            outcomes[key] = self.delete_version(key, version)
-        if any(v == "protected" for v in outcomes.values()):
+            plan[(key, version)] = self.delete_version(key, version)
+        if any(d == "protected" for d in plan.values()):
             return "blocked_by_storage"
-        if all(v in ("deleted", "absent", "retained_shared") for v in outcomes.values()):
+        if all(d in ("deleted", "absent", "retained_shared") for d in plan.values()):
             it["state"] = "disposed"
             return "disposed"
         return "incomplete"
+
+    def recover(self, now=0):
+        """Startup recovery of the corrected implementation: re-establish
+        pending/failed holds under the authoritative acceptance rule,
+        reconcile every hold's outstanding protection claims, complete
+        purging items from their durable plans, and classify presence so a
+        storage failure never becomes proof of disposal (finding 4)."""
+        # 1. Holds awaiting verified protection.
+        for hold_id in list(self.holds):
+            h = self.holds[hold_id]
+            if h["state"] in (HOLD_PENDING, HOLD_FAILED):
+                try:
+                    self.reestablish(hold_id, now)
+                except EstablishmentError:
+                    pass  # recorded failed/pending; the fence stands
+        # 2. Outstanding protection claims of every hold converge.
+        for hold_id in list(self.holds):
+            if self.claims.get(hold_id):
+                self.reconcile_claims(hold_id)
+        # 3. Purging items complete from their plans.
+        for item_id, it in list(self.items.items()):
+            if it["state"] == "purging":
+                self.finish_purge_shared(item_id, now)
+        # 4. Presence classification: only plan-verified absence completes.
+        for item_id, it in list(self.items.items()):
+            if it["state"] in ("disposal_pending", "purging"):
+                if self.classify_presence(item_id) == "absent":
+                    it["state"] = "disposed"
 
 
 class StorageUnavailable(Exception):

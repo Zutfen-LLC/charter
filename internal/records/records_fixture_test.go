@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -24,17 +25,35 @@ const issuer = "https://idp.test"
 // fakeBackend supplies the authoritative inventory and version enumeration
 // the lifecycle needs. Evidence write methods are never called by the
 // lifecycle; the embedded nil keeps the interface satisfied.
+//
+// Disposal enumeration is FAITHFUL to the retained backend: the admission
+// marker is the enumeration root (its deletion ends enumeration), and the
+// event-slot walk breaks at the first deleted slot, so later commits' data
+// events and objects stop being enumerable (C07 review finding 5).
 type fakeBackend struct {
 	evidence.Backend
-	mu      sync.Mutex
-	turns   map[string][]evidence.TurnIdentity // tenant -> turns
-	refs    map[string][]evidence.VersionRef   // turn -> versions
-	missing map[string]bool                    // turn -> versions gone
-	noRefs  map[string]bool                    // turn listed but versions fail
+	mu          sync.Mutex
+	turns       map[string][]evidence.TurnIdentity // tenant -> turns
+	refs        map[string][]evidence.VersionRef   // turn -> versions
+	commits     map[string][]fakeCommit            // turn -> commit chain
+	missing     map[string]bool                    // turn -> versions gone
+	noRefs      map[string]bool                    // turn listed but versions fail
+	failEnum    map[string]error                   // turn -> enumeration transport error
+	expired     map[string]bool                    // turn -> strict enumeration refuses (retention expired)
+	nonterminal map[string]bool                    // turn -> capture still in flight
+	storage     *fakeStorage                       // deletion cross-check for the walk
+}
+
+// fakeCommit is one signed commit of the fake turn: its slot marker, its data
+// event and the content-addressed objects it references.
+type fakeCommit struct {
+	slot    evidence.VersionRef
+	event   *evidence.VersionRef
+	objects []evidence.VersionRef
 }
 
 func newFakeBackend() *fakeBackend {
-	return &fakeBackend{turns: map[string][]evidence.TurnIdentity{}, refs: map[string][]evidence.VersionRef{}, missing: map[string]bool{}, noRefs: map[string]bool{}}
+	return &fakeBackend{turns: map[string][]evidence.TurnIdentity{}, refs: map[string][]evidence.VersionRef{}, commits: map[string][]fakeCommit{}, missing: map[string]bool{}, noRefs: map[string]bool{}, failEnum: map[string]error{}, expired: map[string]bool{}, nonterminal: map[string]bool{}}
 }
 
 func (b *fakeBackend) addTurn(t evidence.TurnIdentity, refs []evidence.VersionRef) {
@@ -42,6 +61,38 @@ func (b *fakeBackend) addTurn(t evidence.TurnIdentity, refs []evidence.VersionRe
 	defer b.mu.Unlock()
 	b.turns[t.TenantID] = append(b.turns[t.TenantID], t)
 	b.refs[t.TurnID] = refs
+}
+
+// addCommitTurn registers a turn with an explicit commit chain so the
+// disposal walk can model slot deletion semantics.
+func (b *fakeBackend) addCommitTurn(t evidence.TurnIdentity, commits []fakeCommit) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.turns[t.TenantID] = append(b.turns[t.TenantID], t)
+	b.commits[t.TurnID] = commits
+	var refs []evidence.VersionRef
+	for _, c := range commits {
+		refs = append(refs, c.slot)
+		if c.event != nil {
+			refs = append(refs, *c.event)
+		}
+		refs = append(refs, c.objects...)
+	}
+	b.refs[t.TurnID] = refs
+}
+
+// dropTurn removes the turn from the live inventory (a fully disposed turn is
+// no longer enumerable from authoritative storage).
+func (b *fakeBackend) dropTurn(tenantID, turnID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var keep []evidence.TurnIdentity
+	for _, t := range b.turns[tenantID] {
+		if t.TurnID != turnID {
+			keep = append(keep, t)
+		}
+	}
+	b.turns[tenantID] = keep
 }
 
 func (b *fakeBackend) InventoryTurns(ctx context.Context, tenantID string) ([]evidence.TurnIdentity, error) {
@@ -53,6 +104,15 @@ func (b *fakeBackend) InventoryTurns(ctx context.Context, tenantID string) ([]ev
 func (b *fakeBackend) TurnVersionRefs(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.failEnum[turnID] != nil {
+		return nil, b.failEnum[turnID]
+	}
+	if b.expired[turnID] {
+		// The strict serving enumeration refuses expired retention
+		// (ErrNotDurable in the retained backend); only disposal-tolerant
+		// enumeration may see expired evidence.
+		return nil, evidence.ErrNotDurable
+	}
 	if b.missing[turnID] || b.noRefs[turnID] {
 		return nil, evidence.ErrNotFound
 	}
@@ -61,6 +121,58 @@ func (b *fakeBackend) TurnVersionRefs(ctx context.Context, tenantID, turnID stri
 		return nil, evidence.ErrNotFound
 	}
 	return append([]evidence.VersionRef(nil), refs...), nil
+}
+
+// TurnDisposalRefs enumerates exactly like the retained backend: the
+// admission marker is the root; the slot walk breaks at the first deleted
+// slot; data events and objects of unwalked commits are unreachable.
+func (b *fakeBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.failEnum[turnID]; err != nil {
+		return nil, err
+	}
+	if b.missing[turnID] || b.noRefs[turnID] {
+		return nil, evidence.ErrNotFound
+	}
+	commits, ok := b.commits[turnID]
+	if !ok {
+		if b.expired[turnID] {
+			return nil, evidence.ErrNotDurable
+		}
+		refs, ok := b.refs[turnID]
+		if !ok {
+			return nil, evidence.ErrNotFound
+		}
+		return append([]evidence.VersionRef(nil), refs...), nil
+	}
+	gone := func(r evidence.VersionRef) bool {
+		return b.storage != nil && b.storage.isDeleted(r.Key, r.Version)
+	}
+	if gone(commits[0].slot) {
+		return nil, evidence.ErrNotFound
+	}
+	out := []evidence.VersionRef{commits[0].slot}
+	for _, c := range commits[1:] {
+		if gone(c.slot) {
+			break
+		}
+		out = append(out, c.slot)
+		if c.event != nil {
+			out = append(out, *c.event)
+		}
+		out = append(out, c.objects...)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+// TurnTerminal reports whether the turn's capture has reached a terminal
+// event (the fake models an in-flight turn with the nonterminal map).
+func (b *fakeBackend) TurnTerminal(ctx context.Context, tenantID, turnID string) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !b.nonterminal[turnID], nil
 }
 
 // fakeStorage implements RecordsStorage with the pinned storage's verified
@@ -237,6 +349,7 @@ func newRfx(t *testing.T) *rfx {
 		t.Fatal(err)
 	}
 	f.rs = &records.Store{DB: pool}
+	f.fb.storage = f.fs
 	f.svc = &records.Service{Store: f.rs, Backend: f.fb, Storage: f.fs, Retained: true, Logf: func(string, ...any) {}}
 	// Fast synthetic policy: retention 1s, no grace.
 	if err := f.rs.SetPolicy(ctx, f.principal("carol"), 1, 0); err != nil {
@@ -271,30 +384,28 @@ func (f *rfx) seedTurn(label, project, matter, custodian string, shared ...strin
 		TenantID: f.tenant, ProjectID: project, MatterID: matter,
 		CustodianID: custodian, TurnID: id, RecordedAt: now.Add(-2 * time.Hour),
 	}
-	var refs []evidence.VersionRef
-	refs = append(refs, evidence.VersionRef{Key: "ns/" + id + "/admissions/x", Version: "v-" + id + "-0"})
-	refs = append(refs, evidence.VersionRef{Key: "ns/" + id + "/events/0", Version: "v-" + id + "-1"})
-	refs = append(refs, evidence.VersionRef{Key: "ns/" + id + "/data/events/h", Version: "v-" + id + "-2"})
-	refs = append(refs, evidence.VersionRef{Key: "ns/" + id + "/objects/own", Version: "v-" + id + "-3"})
+	admission := evidence.VersionRef{Key: "ns/" + id + "/admissions/x", Version: "v-" + id + "-0"}
+	slot := evidence.VersionRef{Key: "ns/" + id + "/events/0", Version: "v-" + id + "-1"}
+	dataEvent := evidence.VersionRef{Key: "ns/" + id + "/data/events/h", Version: "v-" + id + "-2"}
+	ownObject := evidence.VersionRef{Key: "ns/" + id + "/objects/own", Version: "v-" + id + "-3"}
+	objects := []evidence.VersionRef{ownObject}
 	for i, s := range shared {
-		refs = append(refs, evidence.VersionRef{Key: "ns/objects/" + s, Version: "v-shared-" + fmt.Sprint(i) + "-" + s})
+		objects = append(objects, evidence.VersionRef{Key: "ns/objects/" + s, Version: "v-shared-" + fmt.Sprint(i) + "-" + s})
 	}
-	f.fb.addTurn(t, refs)
+	commits := []fakeCommit{
+		{slot: admission},
+		{slot: slot, event: &dataEvent, objects: objects},
+	}
+	f.fb.addCommitTurn(t, commits)
 	f.turns = append(f.turns, id)
 	return id
 }
 
 func (f *rfx) sweepAs(name string) int {
 	f.t.Helper()
-	turns, err := f.svc.Inventory(context.Background(), f.principal(name))
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	policy, err := f.rs.Policy(context.Background(), f.tenant)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	marked, err := f.rs.Sweep(context.Background(), f.principal(name), turns, policy)
+	// The service-level sweep requires a verified terminal capture state for
+	// disposal eligibility (C07 review finding 6A).
+	marked, err := f.svc.Sweep(context.Background(), f.principal(name))
 	if err != nil {
 		f.t.Fatal(err)
 	}

@@ -361,12 +361,12 @@ func TestGuardContract(t *testing.T) {
 	f2 := newRfx(t)
 	f2.seedTurn("T-GC2", f2.p1, f2.m1, f2.u["alice"])
 	_ = f2
-	if err := f.svc.EnsureProtected(f.ctx(), f.tenant, f.turnID("T-GC")); err != nil {
+	if err := f.svc.EnsureProtected(f.ctx(), f.tenant, f.m1, f.u["alice"], f.turnID("T-GC"), time.Now()); err != nil {
 		t.Fatalf("EnsureProtected must be idempotent: %v", err)
 	}
 	// Protection readback failure fails closed.
 	f.fs.legalHoldAfter = "OFF"
-	if err := f.svc.EnsureProtected(f.ctx(), f.tenant, f.turnID("T-GC")); err == nil {
+	if err := f.svc.EnsureProtected(f.ctx(), f.tenant, f.m1, f.u["alice"], f.turnID("T-GC"), time.Now()); err == nil {
 		t.Fatal("readback mismatch must fail closed")
 	}
 	f.fs.legalHoldAfter = ""
@@ -383,7 +383,7 @@ func TestGuardFailsClosedWhenStoreUnavailable(t *testing.T) {
 	if _, err := f2.svc.HoldApplies(f.ctx(), f2.tenant, f2.m1, f2.u["alice"], time.Now()); err == nil {
 		t.Fatal("guard must fail closed on store outage")
 	}
-	if err := f2.svc.EnsureProtected(f.ctx(), f2.tenant, "00000000-0000-0000-0000-000000000000"); err == nil {
+	if err := f2.svc.EnsureProtected(f.ctx(), f2.tenant, f2.m1, f2.u["alice"], "00000000-0000-0000-0000-000000000000", time.Now()); err == nil {
 		t.Fatal("protection must fail closed on store outage")
 	}
 }
