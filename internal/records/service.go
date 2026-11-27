@@ -278,6 +278,14 @@ func (s *Service) versionPresent(ctx context.Context, tenantID, turnID string) b
 	return p != PresenceAbsent
 }
 
+// VersionPresentIn is versionPresent reusing the given transaction's
+// connection: in-transaction verify callbacks (purge begin) must not
+// acquire a second pooled connection while the transaction is held.
+func (s *Service) VersionPresentIn(ctx context.Context, tx pgx.Tx, tenantID, turnID string) bool {
+	p, _ := s.classifyPresence(ctx, tx, tenantID, turnID)
+	return p != PresenceAbsent
+}
+
 // withProtection runs fn inside a transaction holding the tenant protection
 // fence: every native legal-hold mutation (set and clear) executes under
 // it, so removal and establishment can never use incompatible snapshots.
