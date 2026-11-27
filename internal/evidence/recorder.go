@@ -741,6 +741,12 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 			rc.abort(ctx, t, "policy_error")
 			return Result{}, fmt.Errorf("%w: policy_error terminal: %v", ErrFailClosed, writeErr)
 		}
+		// The denied turn's terminal evidence is protected like any other
+		// matching evidence (C07 round-2 finding 2); failures are left to
+		// lifecycle recovery.
+		if perr := rc.EnsureTurnProtected(ctx, t); perr != nil {
+			rc.Logf("evidence: denied turn %s hold protection pending recovery: %v", t.id, perr)
+		}
 		return Result{}, fmt.Errorf("%w: policy evaluation failed: %v", ErrDenied, err)
 	}
 	if !d.Allow {
@@ -750,6 +756,10 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		}
 		if _, _, err := t.emit(ctx, TypeTurnCompleted, map[string]any{"outcome": "denied"}); err != nil {
 			return fail("evidence_write_failed", err)
+		}
+		// Same terminal-path protection obligation as above.
+		if perr := rc.EnsureTurnProtected(ctx, t); perr != nil {
+			rc.Logf("evidence: denied turn %s hold protection pending recovery: %v", t.id, perr)
 		}
 		return Result{}, ErrDenied
 	}
@@ -1028,12 +1038,23 @@ func (rc *Recorder) abort(ctx context.Context, t *turn, reason string) {
 // resolve closes a turn. Shared by the live abort path and crash recovery. If
 // it loses a race with another resolver (a live request vs. recovery, or two
 // recoveries) the turn is terminal by the time it looks again, which is success:
-// the database allows exactly one terminal event.
+// the database allows exactly one terminal event. Once the turn is terminal
+// its published version set is final: hold protection for matching holds is
+// established here - denied, interrupted, failed-finalization and recovered
+// turns carry the same protection obligations as successful ones (C07
+// round-2 finding 2). A protection failure is logged for lifecycle recovery
+// (records.Service.Recover repairs effective holds); the turn's evidence is
+// already durable and is never discarded.
 func (rc *Recorder) resolve(ctx context.Context, t *turn, reason string) error {
 	err := rc.resolveOnce(ctx, t, reason)
 	if err != nil && (errors.Is(err, ErrConflict) || errors.Is(err, ErrTerminal)) {
 		if t.reload(ctx) == nil && isTerminal(str(t.events[len(t.events)-1], "type")) {
-			return nil
+			err = nil
+		}
+	}
+	if err == nil {
+		if perr := rc.EnsureTurnProtected(ctx, t); perr != nil {
+			rc.Logf("evidence: turn %s hold protection pending recovery: %v", t.id, perr)
 		}
 	}
 	return err
