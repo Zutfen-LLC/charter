@@ -807,12 +807,31 @@ class Store:
 
     def sweep(self, now):
         for it in self.items.values():
-            if not it.get("terminal", True):
-                # In-flight capture: disposal eligibility requires a verified
-                # terminal capture state (finding 6A); never swept.
+            # Disposal eligibility requires a VERIFIED terminal capture
+            # state (finding 6A). The live probe's answer is it["terminal"]:
+            # False after the terminal evidence was deleted mid-disposal
+            # (missing evidence, not counterevidence) AND also False for an
+            # in-flight capture. A non-empty DURABLE DISPOSAL PLAN is
+            # positive durable proof of PREVIOUSLY verified terminality for
+            # this exact turn (plans are only committed by the authorized
+            # disposal lifecycle, whose sweep already verified terminality;
+            # terminality is monotonic) - so an interrupted-disposal record
+            # stays eligible after release, while an in-flight capture
+            # (no plan) is never swept (C07 round-3 finding 3).
+            if not self._verified_terminal(it):
                 continue
             if it["state"] == "active" and now >= it["retention_expires_at"] and not self.held(it):
                 it["state"], it["observed_epoch"], it["pending_since"] = "disposal_pending", self.epoch, now
+
+    def _verified_terminal(self, item):
+        if item.get("terminal", True):
+            return True
+        plans = getattr(self, "plans", None)
+        if item.get("root_gone") and plans and plans.get(item["id"]):
+            # Plan-backed durable proof of previously verified terminality
+            # for a legitimate interrupted-disposal record.
+            return True
+        return False
 
     # Purge is two steps. begin_purge tombstones the item (unreadable, bytes kept)
     # and records the hold epoch it observed. finish_purge is the ONLY step that
@@ -883,6 +902,9 @@ class GuardedStore(Store):
         # durable disposal plans.
         self.claims = {}          # hold id -> set((key, version))
         self.plans = {}           # item id -> {(key, version): disposition}
+        # reverify_audit: the append-only recovery repair trail (pending /
+        # failed / verified), mirroring the audit_log actions.
+        self.reverify_audit = []
         for it in self.items.values():
             # Terminality: capture state of each turn; disposal eligibility
             # requires a verified terminal capture state (finding 6A).
@@ -1153,6 +1175,29 @@ class GuardedStore(Store):
         report["release_cleanup_pending"] = pending
         return pending
 
+    def resolve_reference_set(self, item):
+        """The turn's exact-version reference set for shared-reference
+        fencing and required-version decisions (the Go turnReferenceSet
+        mirror, C07 round-3 finding 1). The verified enumeration is
+        authoritative; for a CHAIN-BROKEN sibling (its verified
+        enumeration is unavailable), a durable disposal plan supplies the
+        exact identity, and the namespace fallback otherwise - and the
+        fallback includes the ADMISSION-carried references: the admission
+        marker's sequence-0 content-addressed receipts are part of the
+        reference set whenever the admission is present and verifiable,
+        so a chain-broken sibling still fences its admission-only shared
+        object."""
+        if not item.get("chain_broken", False):
+            return set(self.versions_of(item["id"]))
+        plan = self.plans.get(item["id"])
+        if plan:
+            # Plan-backed partial identity: rows already dispositioned
+            # gone are not live references.
+            return {kv for kv, d in plan.items() if d not in ("deleted", "absent")}
+        # Namespace fallback (complete, admission-carried references
+        # included): the model's versions_of is exactly the full set.
+        return set(self.versions_of(item["id"]))
+
     def _still_required(self, key, version, exclude=None):
         for other_id, other in self.holds.items():
             if other_id == exclude or other["state"] == HOLD_RELEASED:
@@ -1160,7 +1205,7 @@ class GuardedStore(Store):
             for it in self.items.values():
                 if it["state"] == "disposed":
                     continue
-                if _scope_only(other, it) and (key, version) in self.versions_of(it["id"]):
+                if _scope_only(other, it) and (key, version) in self.resolve_reference_set(it):
                     return True
         return False
 
@@ -1211,7 +1256,7 @@ class GuardedStore(Store):
             if plan[(key, version)] in ("deleted", "absent"):
                 continue
             shared = any(other["id"] != item_id and other["state"] != "disposed"
-                         and (key, version) in self.versions_of(other["id"])
+                         and (key, version) in self.resolve_reference_set(other)
                          for other in self.items.values())
             if shared:
                 plan[(key, version)] = "retained_shared"
@@ -1273,14 +1318,43 @@ class GuardedStore(Store):
                     pass  # recorded failed/pending; the fence stands
         # 1b. Effective holds: repair any protection their acknowledged
         # guarantees require but the storage lacks (no state transition:
-        # an effective hold is never downgraded).
+        # an effective hold is never downgraded). INCOMPLETE COVERAGE IS
+        # ALWAYS DURABLY VISIBLE (C07 round-3 finding 4): a coverage pass
+        # that returns UNCOVERED records with a nil error records PENDING
+        # repair state on the hold's durable report, a pass that errors
+        # records FAILED repair, and a subsequent successful pass resolves
+        # the outstanding state as VERIFIED (the audit history is retained
+        # by reverify_audit). Repair-state writes bind to the hold's
+        # current scope revision: a stale pass cannot overwrite a newer
+        # scope's coverage information.
         for hold_id in list(self.holds):
             h = self.holds[hold_id]
             if h["state"] == HOLD_EFFECTIVE:
+                if not isinstance(h.get("report"), dict):
+                    h["report"] = {}
+                want_epoch = h.get("scope_epoch", 0)
                 try:
-                    self._establish(h, now)
-                except StorageUnavailable:
-                    pass  # retried by the next recovery; claims record progress
+                    report = self._establish(h, now)
+                except StorageUnavailable as e:
+                    if h.get("scope_epoch", 0) == want_epoch:
+                        h["report"]["repair_error"] = str(e) or "storage unavailable"
+                        self.reverify_audit.append(
+                            {"hold_id": hold_id, "action": "hold.protection_repair_failed"})
+                    continue  # retried by the next recovery; claims record progress
+                if report["uncovered"]:
+                    if h.get("scope_epoch", 0) == want_epoch:
+                        h["report"]["repair_pending"] = list(report["uncovered"])
+                        h["report"].pop("repair_error", None)
+                        self.reverify_audit.append(
+                            {"hold_id": hold_id, "action": "hold.protection_repair_pending",
+                             "uncovered": list(report["uncovered"])})
+                    continue
+                if h["report"].get("repair_pending") or h["report"].get("repair_error"):
+                    if h.get("scope_epoch", 0) == want_epoch:
+                        h["report"]["repair_pending"] = []
+                        h["report"]["repair_error"] = ""
+                        self.reverify_audit.append(
+                            {"hold_id": hold_id, "action": "hold.protection_repair_complete"})
         # 2. Outstanding protection claims of every hold converge.
         for hold_id in list(self.holds):
             if self.claims.get(hold_id):

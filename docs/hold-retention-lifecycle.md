@@ -218,6 +218,53 @@ and scope change is also fixed).
   whose live root is gone, so a partially disposed record restored to
   active stays disposable through its durable identity.
 
+## Round-3 review corrections
+
+- **The namespace fallback enumerates the admission marker** (finding 1):
+  the admission commit is the only place a turn's input objects are
+  referenced (sequence-0 content-addressed receipts), so the fallback
+  reference set of a chain-broken sibling includes the admission slot,
+  its event data and its input objects whenever the admission is present
+  and verifiable - a sibling's admission-only shared object is never
+  silently absent, cross-matter alike. An admission that is present but
+  unreadable, unverifiable or ambiguous (two admissions claiming one
+  turn) is an UNKNOWN reference set: the irreversible deletion and the
+  protection removal are refused. A gone admission stays a deleted root:
+  the durable disposal plan governs the turn (the round-2 R4 convergence
+  is preserved) and genuinely verified complete reference sets are never
+  wedged.
+- **Newly applicable ownership claims commit BEFORE the native mutation**
+  (finding 2): EnsureProtected's second phase is two transactions under
+  the tenant protection fence - a claims-commit transaction followed by
+  a native-mutation transaction that revalidates every applicable hold
+  has a COMMITTED claim row for every version before any SetLegalHold (a
+  successful UPDATE inside an open transaction is not proof of durable
+  ownership). A crash or rollback after the native mutation always
+  leaves a committed claim that release cleanup and recovery converge;
+  repeated applicability changes retry a bounded number of times and
+  then fail closed with no native mutation.
+- **Plan-backed terminality** (finding 3): sweep eligibility accepts a
+  non-empty durable disposal plan for the exact turn as positive durable
+  proof of previously verified terminality (plans are only committed by
+  the authorized disposal lifecycle after a verified terminal capture
+  state, and terminality is monotonic). An interrupted disposal whose
+  terminal event data or marker was deleted therefore still resumes
+  after release; in-flight captures (no plan) are decided by the live
+  probe alone and fail closed. Coverage reports count previously
+  dispositioned plan rows as missing versions (a durable record of loss
+  is a loss, not intactness).
+- **Effective-hold repair state is always visible** (finding 4): recovery
+  of an effective hold distinguishes PENDING repair (uncovered records
+  with a nil error: `repair_pending` in the durable report plus an
+  attributable `hold.protection_repair_pending` audit row), FAILED
+  repair (a coverage error: `repair_error` plus
+  `hold.protection_repair_failed`) and VERIFIED repair (a subsequent
+  successful pass resolves the outstanding state with
+  `hold.protection_repair_complete`; the append-only audit trail keeps
+  the historical evidence). Repair-state writes are bound to the hold's
+  current scope revision, so a stale recovery result can never overwrite
+  a newer scope's coverage information.
+
 ## Concurrency and recovery
 
 - Placement, release and scope change serialize on the per-matter epoch row;
