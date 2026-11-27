@@ -192,3 +192,99 @@ class Round3Corrections(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Round3FollowUp(unittest.TestCase):
+    """Independent adversarial-review follow-ups (lanes 3/4):
+
+    plan-backed terminality must not depend on which evidence root was
+    lost (Go parity with the S3b/S3c shapes), dispositioned plan rows
+    count as missing versions, and repeated recovery is audit-idempotent.
+    """
+
+    def test_terminal_evidence_loss_without_root_loss_resumes(self):
+        # The terminal event data was deleted mid-disposal while the
+        # admission root SURVIVES: the plan still proves the previously
+        # verified terminality (the round-3 Go correction; the model used
+        # to require root_gone here).
+        s = guarded(ITEMS)
+        s.sweep(200)
+        self.assertTrue(s.begin_purge("A", 300, True))
+        refs = s.versions_of("A")
+        plan = s.plans.setdefault("A", {})
+        for kv in refs:
+            plan.setdefault(kv, "planned")
+        s.deleted.add(refs[1])  # the terminal slot marker
+        s.deleted.add(refs[2])  # the terminal event data
+        s.items["A"]["terminal"] = False
+        s.items["A"]["state"] = "active"
+        # root_gone is deliberately NOT set: the admission root survives.
+        h = s.place_hold_verified(H1, now=300)
+        self.assertEqual(h["state"], HOLD_EFFECTIVE)
+        s.release_hold("H1")
+        s.reconcile_claims("H1")
+        s.sweep(400)
+        self.assertEqual(
+            s.items["A"]["state"], "disposal_pending",
+            "REVIEW FINDING: the plan-backed terminality required the "
+            "admission root to be gone (terminal-data loss with a "
+            "surviving root never re-enters the disposal lifecycle)")
+        self.assertTrue(s.begin_purge("A", 500, True))
+        outcome = s.finish_purge_shared("A", 500)
+        self.assertEqual(s.items["A"]["state"], "disposed")
+        self.assertIn(outcome, ("disposed", None))
+
+    def test_dispositioned_plan_rows_count_as_missing_versions(self):
+        # A hold placed over a partially disposed record reports the
+        # previously dispositioned (deleted/absent) versions as missing:
+        # a durable record of loss is a loss, never intactness.
+        s = guarded(ITEMS)
+        s.sweep(200)
+        self.assertTrue(s.begin_purge("A", 300, True))
+        refs = s.versions_of("A")
+        plan = s.plans.setdefault("A", {})
+        for kv in refs:
+            plan.setdefault(kv, "planned")
+        s.deleted.add(refs[0])
+        plan[refs[0]] = "deleted"
+        s.deleted.add(refs[1])
+        plan[refs[1]] = "absent"
+        s.items["A"]["root_gone"] = True
+        s.items["A"]["state"] = "active"
+        h = s.place_hold_verified(H1, now=300)
+        self.assertEqual(h["state"], HOLD_EFFECTIVE)
+        entry = [e for e in h["report"]["items"] if e["id"] == "A"][0]
+        self.assertGreaterEqual(
+            entry.get("missing_versions", 0), 2,
+            "REVIEW FINDING: already-dispositioned plan rows were not "
+            "counted as missing versions (%r)" % (entry,))
+
+    def test_repeated_recover_does_not_duplicate_repair_state_transitions(self):
+        # Repeated recovery of an UNCHANGED repair condition is
+        # idempotent: the pending state and its audit evidence are
+        # recorded once per transition, and every genuine transition is
+        # still recorded exactly once (audit-idempotent behavior).
+        s = guarded(ITEMS, [H1])
+        h = s.place_hold_verified(H1, now=0)
+        self.assertEqual(h["state"], HOLD_EFFECTIVE)
+        s.admit_new_work("N", "m-0001", "c1", now=10, recorded_at="2026-02-01")
+        s.items["N"]["root_gone"] = True
+        s.recover(now=10)
+        def pending_count():
+            return len([a for a in s.reverify_audit
+                        if a["hold_id"] == "H1"
+                        and a["action"] == "hold.protection_repair_pending"])
+        n1 = pending_count()
+        self.assertEqual(n1, 1)
+        s.recover(now=11)
+        n2 = pending_count()
+        self.assertEqual(
+            n2, n1,
+            "REVIEW FINDING: repeated recovery of an unchanged repair "
+            "condition duplicated the audit evidence (n1=%d n2=%d)" % (n1, n2))
+        s.items["N"]["root_gone"] = False
+        s.recover(now=12)
+        complete = len([a for a in s.reverify_audit
+                        if a["hold_id"] == "H1"
+                        and a["action"] == "hold.protection_repair_complete"])
+        self.assertEqual(complete, 1)

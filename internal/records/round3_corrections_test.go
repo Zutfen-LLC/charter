@@ -760,7 +760,7 @@ func TestStaleScopeRevisionCannotOverwriteRepairState(t *testing.T) {
 		t.Fatal("setup: the scope change did not move the epoch")
 	}
 	// A repair-state write bound to the PREVIOUS scope revision is refused.
-	if err := f.rs.MarkRepairState(f.ctx(), h.ID, []string{"stale-turn"}, "", h.Epoch); err == nil {
+	if _, err := f.rs.SetRepairState(f.ctx(), h.TenantID, h.ID, []string{"stale-turn"}, "", h.Epoch); err == nil {
 		t.Fatal("FINDING 4: a stale repair-state write bound to a superseded scope revision was accepted")
 	}
 	if err := f.pool.QueryRow(f.ctx(), `SELECT report FROM holds WHERE id=$1`, h.ID).Scan(&reportRaw); err != nil {

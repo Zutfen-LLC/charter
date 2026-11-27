@@ -1751,78 +1751,91 @@ func (s *Store) AuditProtectionRepairFailed(ctx context.Context, tenantID, holdI
 	return tx.Commit(ctx)
 }
 
-// AuditProtectionRepairPending durably records that an effective hold's
-// recovery coverage pass left records UNCOVERED with a nil error: the
-// repair state is pending (attributable, retryable), never silently
-// discarded (C07 round-3 finding 4).
-func (s *Store) AuditProtectionRepairPending(ctx context.Context, tenantID, holdID string, uncovered []string) error {
+// SetRepairState durably records a protection-repair state transition of
+// an EFFECTIVE hold TOGETHER WITH its attributable audit row in ONE
+// transaction: pending (uncovered records whose protection could not be
+// verified), failed (establishment error detail) or verified (both
+// cleared - resolution). The state and its audit evidence commit
+// ATOMICALLY (an audit insert failure rolls the state change back, so
+// repair state can never exist without its audit event), and an UNCHANGED
+// state is an idempotent no-op that writes nothing (repeated recovery of
+// the same condition never duplicates audit evidence; every genuine
+// transition is still recorded exactly once, and the append-only audit
+// trail keeps the historical failure and pending evidence). The write
+// merges into the stored report (Items, gaps and other fields are
+// preserved) and is BOUND to the hold's current scope epoch: a stale
+// recovery result completing after a scope change can never overwrite the
+// newer scope's coverage information. It returns whether a transition was
+// written.
+func (s *Store) SetRepairState(ctx context.Context, tenantID, holdID string, pending []string, repairErr string, wantEpoch int64) (bool, error) {
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-	if err := audit(ctx, tx, tenantID, nil, "hold.protection_repair_pending", map[string]any{
-		"hold_id": holdID, "uncovered": uncovered,
-	}); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-// AuditProtectionRepairComplete durably records that a subsequent recovery
-// resolved an effective hold's outstanding repair state (verified repair).
-// The append-only audit trail keeps the historical failure and pending
-// evidence.
-func (s *Store) AuditProtectionRepairComplete(ctx context.Context, tenantID, holdID string) error {
-	tx, err := s.DB.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-	if err := audit(ctx, tx, tenantID, nil, "hold.protection_repair_complete", map[string]any{
-		"hold_id": holdID,
-	}); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-// MarkRepairState durably merges the protection-repair state of an
-// EFFECTIVE hold into its stored report: pending (uncovered records whose
-// protection could not be verified), failed (establishment error detail)
-// or verified (both cleared - resolution). The update is BOUND to the
-// hold's current scope epoch: a stale recovery result completing after a
-// scope change can never overwrite the newer scope's coverage information.
-// The update merges into the stored report (Items, gaps and other fields
-// are preserved); the append-only audit trail keeps the historical
-// failure evidence.
-func (s *Store) MarkRepairState(ctx context.Context, holdID string, pending []string, repairErr string, wantEpoch int64) error {
-	tx, err := s.DB.Begin(ctx)
-	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var id string
 	if err := tx.QueryRow(ctx, `SELECT id::text FROM holds WHERE id=$1 AND epoch=$2 FOR UPDATE`, holdID, wantEpoch).Scan(&id); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w: repair state for hold %s is bound to a superseded scope revision", ErrStaleEstablishment, holdID)
+			return false, fmt.Errorf("%w: repair state for hold %s is bound to a superseded scope revision", ErrStaleEstablishment, holdID)
 		}
-		return err
+		return false, err
 	}
 	h, err := loadHold(ctx, tx, holdID)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if repairErr == h.Report.RepairError && sameStringSet(pending, h.Report.RepairPending) {
+		// Unchanged repair state: an idempotent no-op.
+		return false, nil
 	}
 	h.Report.RepairPending = pending
 	h.Report.RepairError = repairErr
 	b, err := json.Marshal(h.Report)
 	if err != nil {
-		return err
+		return false, err
+	}
+	action, detail := "hold.protection_repair_complete", map[string]any{
+		"hold_id": holdID,
+	}
+	switch {
+	case repairErr != "":
+		action, detail = "hold.protection_repair_failed", map[string]any{
+			"hold_id": holdID, "detail": repairErr,
+		}
+	case len(pending) > 0:
+		action, detail = "hold.protection_repair_pending", map[string]any{
+			"hold_id": holdID, "uncovered": pending,
+		}
+	}
+	if err := audit(ctx, tx, tenantID, nil, action, detail); err != nil {
+		return false, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE holds SET report=$2 WHERE id=$1`, holdID, b); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit(ctx)
+	return true, tx.Commit(ctx)
+}
+
+// sameStringSet reports whether two lists hold the same distinct strings
+// (order-insensitive): the repair state's identity is its condition, not
+// the enumeration order of the coverage pass.
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		seen[s] = struct{}{}
+	}
+	if len(seen) != len(a) {
+		return false
+	}
+	for _, s := range b {
+		if _, ok := seen[s]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func scanPlanRows(rows pgx.Rows) ([]PlanRow, error) {

@@ -827,9 +827,16 @@ class Store:
         if item.get("terminal", True):
             return True
         plans = getattr(self, "plans", None)
-        if item.get("root_gone") and plans and plans.get(item["id"]):
-            # Plan-backed durable proof of previously verified terminality
-            # for a legitimate interrupted-disposal record.
+        if plans and plans.get(item["id"]):
+            # Plan-backed durable proof of previously verified
+            # terminality for a legitimate interrupted-disposal record.
+            # The plan is committed only by the authorized disposal
+            # lifecycle after a verified terminal capture state, and it
+            # is bound to this exact record identity, so the live
+            # probe's non-terminal answer after terminal-evidence loss
+            # (terminal slot, terminal data or admission root - missing
+            # evidence is not counterevidence) does not veto
+            # eligibility (C07 round-3 finding 3).
             return True
         return False
 
@@ -1052,6 +1059,11 @@ class GuardedStore(Store):
                 failed = False
                 for (key, version), d in sorted(plan.items()):
                     if d in ("deleted", "absent"):
+                        # A durable record of loss is a loss: previously
+                        # dispositioned plan rows count as missing
+                        # versions (independent-review follow-up, Go
+                        # parity), never as intactness.
+                        missing += 1
                         continue
                     if (key, version) in self.deleted:
                         # Storage-verified partial loss, recorded in the
@@ -1083,19 +1095,29 @@ class GuardedStore(Store):
                 report["items"].append(entry)
                 continue
             refs = self.versions_of(it["id"])
+            plan = self.plans.get(it["id"])
+            live_refs = []
             for key, version in refs:
                 if (key, version) in self.deleted:
+                    if plan:
+                        # A partially disposed record (a non-empty durable
+                        # plan): the live enumeration is the SURVIVING
+                        # versions (Go's verified walk enumerates the
+                        # existing chain; the plan records the loss as
+                        # missing versions), never an uncoverable hole.
+                        continue
                     report["uncovered"].append(it["id"])
                     break
+                live_refs.append((key, version))
                 self.set_legal_hold(key, version, True)
                 if self.legal_hold_state(key, version) != "ON":
                     report["uncovered"].append(it["id"])
                     break
             else:
-                report["protected_versions"].extend(refs)
-                self.claims.setdefault(hold["id"], set()).update(refs)
+                report["protected_versions"].extend(live_refs)
+                self.claims.setdefault(hold["id"], set()).update(live_refs)
                 entry = dict(id=it["id"], custodian_id=it["custodian_id"],
-                             recorded_at=it["recorded_at"], versions=len(refs))
+                             recorded_at=it["recorded_at"], versions=len(live_refs))
                 if now >= it["retention_expires_at"]:
                     entry["already_expired"] = True
                     report["already_expired"].append(it["id"])
@@ -1333,28 +1355,41 @@ class GuardedStore(Store):
                 if not isinstance(h.get("report"), dict):
                     h["report"] = {}
                 want_epoch = h.get("scope_epoch", 0)
+                def _transition(pending_list, err_text, action):
+                    # One atomic transition: the state and its audit row
+                    # change together, and an UNCHANGED condition is an
+                    # idempotent no-op (repeated recovery never
+                    # duplicates audit evidence).
+                    if h.get("scope_epoch", 0) != want_epoch:
+                        return
+                    unchanged = (
+                        sorted(pending_list) == sorted(h["report"].get("repair_pending") or [])
+                        and (err_text or "") == (h["report"].get("repair_error") or ""))
+                    if unchanged:
+                        return
+                    h["report"]["repair_pending"] = list(pending_list)
+                    h["report"]["repair_error"] = err_text
+                    self.reverify_audit.append(
+                        dict({"hold_id": hold_id, "action": action}, **_transition_detail))
                 try:
                     report = self._establish(h, now)
                 except StorageUnavailable as e:
-                    if h.get("scope_epoch", 0) == want_epoch:
-                        h["report"]["repair_error"] = str(e) or "storage unavailable"
-                        self.reverify_audit.append(
-                            {"hold_id": hold_id, "action": "hold.protection_repair_failed"})
+                    # FAILED repair: the error detail is the transition
+                    # signal; the pending list carries the pass's
+                    # partial coverage (preserved here - the model's
+                    # raise-style establish exposes no partial report).
+                    _transition_detail = {"detail": str(e) or "storage unavailable"}
+                    _transition(list(h["report"].get("repair_pending") or []),
+                                str(e) or "storage unavailable",
+                                "hold.protection_repair_failed")
                     continue  # retried by the next recovery; claims record progress
                 if report["uncovered"]:
-                    if h.get("scope_epoch", 0) == want_epoch:
-                        h["report"]["repair_pending"] = list(report["uncovered"])
-                        h["report"].pop("repair_error", None)
-                        self.reverify_audit.append(
-                            {"hold_id": hold_id, "action": "hold.protection_repair_pending",
-                             "uncovered": list(report["uncovered"])})
+                    _transition_detail = {"uncovered": list(report["uncovered"])}
+                    _transition(list(report["uncovered"]), "", "hold.protection_repair_pending")
                     continue
                 if h["report"].get("repair_pending") or h["report"].get("repair_error"):
-                    if h.get("scope_epoch", 0) == want_epoch:
-                        h["report"]["repair_pending"] = []
-                        h["report"]["repair_error"] = ""
-                        self.reverify_audit.append(
-                            {"hold_id": hold_id, "action": "hold.protection_repair_complete"})
+                    _transition_detail = {}
+                    _transition([], "", "hold.protection_repair_complete")
         # 2. Outstanding protection claims of every hold converge.
         for hold_id in list(self.holds):
             if self.claims.get(hold_id):
