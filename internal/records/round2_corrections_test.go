@@ -191,6 +191,53 @@ func TestCatalogLoadErrorFailsEstablishment(t *testing.T) {
 	}
 }
 
+// A sibling whose chain is BROKEN by a deleted middle slot (a deleted
+// slot, not an unreadable one) does not wedge unrelated disposals: its
+// remaining references enumerate completely through the namespace
+// fallback, and the unrelated disposal converges. An UNREADABLE marker
+// (transient read failure) still refuses - see
+// TestUnreadableSiblingMarkerBlocksSharedVersionDeletion.
+func TestChainBrokenSiblingDoesNotWedgeUnrelatedDisposal(t *testing.T) {
+	f := newRfx(t)
+	tA := f.seedTurn("T-CBS-A", f.p1, f.m1, f.u["alice"])
+	// B has three commits: admission, slot 1, slot 2.
+	id := tA
+	bID := evidence.NewUUID()
+	bTurn := evidence.TurnIdentity{
+		TenantID: f.tenant, ProjectID: f.p1, MatterID: f.m1,
+		CustodianID: f.u["alice"], TurnID: bID, RecordedAt: time.Now().Add(-2 * time.Hour),
+	}
+	slot1 := evidence.VersionRef{Key: "ns/" + bID + "/events/0", Version: "v-" + bID + "-1"}
+	slot2 := evidence.VersionRef{Key: "ns/" + bID + "/events/1", Version: "v-" + bID + "-2"}
+	dataEvent := evidence.VersionRef{Key: "ns/" + bID + "/data/events/h", Version: "v-" + bID + "-3"}
+	ownObject := evidence.VersionRef{Key: "ns/" + bID + "/objects/own", Version: "v-" + bID + "-4"}
+	f.fb.addCommitTurn(bTurn, []fakeCommit{
+		{slot: evidence.VersionRef{Key: "ns/" + bID + "/admissions/x", Version: "v-" + bID + "-0"}},
+		{slot: slot1, event: &dataEvent, objects: []evidence.VersionRef{ownObject}},
+		{slot: slot2},
+	})
+	// The middle slot is physically deleted: B's verified enumeration
+	// breaks (chain contiguity), but the namespace fallback enumerates the
+	// remaining references completely.
+	if err := f.fs.DeleteVersion(f.ctx(), slot1.Key, slot1.Version); err != nil {
+		t.Fatal(err)
+	}
+	f.sweepAs("carol")
+	if outcome, err := f.rs.BeginPurge(f.ctx(), f.principal("erin"), id, nil); err != nil || outcome != "purging" {
+		t.Fatalf("begin outcome %s err %v", outcome, err)
+	}
+	if _, _, err := f.svc.FinishPurge(f.ctx(), ptrPrincipal(f.principal("erin")), id); err != nil {
+		t.Fatalf("a deleted sibling slot must not wedge an unrelated disposal: %v", err)
+	}
+	if it := f.itemByID(id); it.State != records.ItemDisposed {
+		t.Fatalf("unrelated disposal did not converge: %s", it.State)
+	}
+	// The sibling's remaining evidence is untouched.
+	if f.fs.isDeleted(slot2.Key, slot2.Version) {
+		t.Fatal("the chain-broken sibling's surviving slot must not be deleted by the partner's disposal")
+	}
+}
+
 // ---------------- Finding 3: unsafe namespace fallback ----------------
 
 // Two records share an exact content-addressed object version. The second
