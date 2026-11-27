@@ -422,6 +422,24 @@ func (b *RetentionBackend) OpenTurns(ctx context.Context, before time.Time) ([]T
 	for _, r := range refs {
 		p := strings.Split(strings.TrimPrefix(r.Key, b.prefix), "/")
 		if len(p) >= 2 && p[1] == "events" && (len(p) != 4 || !seen[TurnRef{TenantID: p[0], TurnID: p[2]}]) {
+			if len(p) == 4 && r.DeleteMarker && !seen[TurnRef{TenantID: p[0], TurnID: p[2]}] {
+				// A mid-deletion slot of a turn whose admission is already
+				// gone (its disposal's delete phase): not an open turn and
+				// not corruption.
+				continue
+			}
+			if len(p) == 4 && b.planGovernedSlot(ctx, r, p[0], p[2]) {
+				// The turn's enumeration root (admission) is gone while
+				// signed slot commits remain: the mid-disposal / partially
+				// disposed shape (C07 round-2 finding 1). The events belong
+				// to the durable disposal plan's exact-version inventory,
+				// which the records layer owns; recovery must enumerate the
+				// tenant's OTHER open turns instead of wedging on it. Only a
+				// slot that decodes as a valid signed commit of exactly this
+				// tenant and turn is tolerated - anything unverifiable stays
+				// an integrity violation.
+				continue
+			}
 			return nil, ErrConflict
 		}
 	}
@@ -432,6 +450,26 @@ func (b *RetentionBackend) OpenTurns(ctx context.Context, before time.Time) ([]T
 		return out[i].TenantID < out[j].TenantID
 	})
 	return out, nil
+}
+
+// planGovernedSlot reports whether an event-slot version of a turn with no
+// live admission still decodes as a valid signed commit of exactly that
+// (tenant, turn): the shape a partially disposed or mid-disposal turn's
+// surviving slots have. It never converts an undecodable or foreign slot
+// into permission to skip the integrity check.
+func (b *RetentionBackend) planGovernedSlot(ctx context.Context, r s3transport.Ref, tenant, turn string) bool {
+	if r.DeleteMarker {
+		return false
+	}
+	v, err := b.store.Read(ctx, r.Key, r.VersionID)
+	if err != nil {
+		return false
+	}
+	c, err := decodeSignedCandidate(v.Data, b.trustedKey)
+	if err != nil {
+		return false
+	}
+	return c.Slot == r.Key && c.Tenant == tenant && c.Turn == turn
 }
 
 func (b *RetentionBackend) slotRelaxed(ctx context.Context, key string, refs []s3transport.Ref) (retainedEntry, error) {
