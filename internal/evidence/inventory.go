@@ -56,6 +56,23 @@ func DisposalVersionsOf(b Backend) (DisposalVersions, bool) {
 	return v, ok
 }
 
+// NamespaceVersions is implemented by backends that can enumerate every
+// version under a turn's own namespaces (event slots and data events) plus
+// the object versions the still-decodable slots reference, WITHOUT chain
+// verification. The shared-reference scan uses it as the fallback for a
+// sibling turn whose verified enumeration is unavailable (mid-deletion or a
+// broken chain): the sibling must be neither silently treated as
+// reference-free nor allowed to wedge every disposal in the tenant forever.
+type NamespaceVersions interface {
+	TurnNamespaceRefs(ctx context.Context, tenantID, turnID string) ([]VersionRef, error)
+}
+
+// NamespaceVersionsOf returns the namespace enumerator when implemented.
+func NamespaceVersionsOf(b Backend) (NamespaceVersions, bool) {
+	v, ok := b.(NamespaceVersions)
+	return v, ok
+}
+
 // TurnTerminal is implemented by backends that can report whether a turn's
 // capture has reached a terminal event (turn_completed / turn_failed /
 // turn_aborted). Disposal eligibility requires a verified terminal state: an

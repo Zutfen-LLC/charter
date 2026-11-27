@@ -185,7 +185,17 @@ func (s *Service) sharedReferences(ctx context.Context, it Item) (map[VersionRef
 			continue
 		}
 		if err != nil {
-			return nil, err
+			// The sibling's verified enumeration is unavailable (broken
+			// chain or mid-deletion slots). It must not be treated as
+			// reference-free, and it must not wedge this disposal forever
+			// either: fall back to its namespace enumeration (every version
+			// under its own namespaces plus the objects of its decodable
+			// slots). Unknown storage errors still fail closed below.
+			fallback, ferr := s.namespaceRefs(ctx, it.TenantID, t.TurnID)
+			if ferr != nil {
+				return nil, fmt.Errorf("records: shared-reference scan: sibling turn %s: %w (fallback: %v)", t.TurnID, err, ferr)
+			}
+			enumRefs = fallback
 		}
 		for _, r := range enumRefs {
 			if own[VersionRef(r)] {

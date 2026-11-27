@@ -80,6 +80,17 @@ func (s *Service) disposalRefs(ctx context.Context, tenantID, turnID string) ([]
 	return v.TurnVersionRefs(ctx, tenantID, turnID)
 }
 
+// namespaceRefs enumerates a turn's versions without chain verification
+// (fallback for the shared-reference scan over a sibling whose verified
+// enumeration is unavailable).
+func (s *Service) namespaceRefs(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, error) {
+	n, ok := evidence.NamespaceVersionsOf(s.Backend)
+	if !ok {
+		return nil, errors.New("records: backend cannot enumerate turn namespaces")
+	}
+	return n.TurnNamespaceRefs(ctx, tenantID, turnID)
+}
+
 // Presence classifies an observation of a turn's exact versions. It exists
 // so that a storage failure can never become proof of disposal (C07 review
 // finding 4): only the durable disposal plan can verify full physical
@@ -662,8 +673,18 @@ func (s *Service) requiredVersions(ctx context.Context, tx pgx.Tx, tenantID stri
 			continue
 		}
 		refs, err := s.disposalRefs(ctx, tenantID, t.TurnID)
-		if err != nil {
-			return nil, err
+		if err != nil && !errors.Is(err, evidence.ErrNotFound) {
+			// Unverifiable enumeration of a REQUIRED turn: fall back to the
+			// namespace enumeration. If even that is unavailable, fail
+			// closed (a release must never clear protection on unknown
+			// references).
+			fallback, ferr := s.namespaceRefs(ctx, tenantID, t.TurnID)
+			if ferr != nil {
+				return nil, fmt.Errorf("records: required-version scan: turn %s: %w (fallback: %v)", t.TurnID, err, ferr)
+			}
+			refs = fallback
+		} else if errors.Is(err, evidence.ErrNotFound) {
+			continue
 		}
 		for _, r := range refs {
 			if claimed[VersionRef(r)] {
