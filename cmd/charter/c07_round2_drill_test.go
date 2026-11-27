@@ -767,6 +767,20 @@ func (f *faultingRetentionBackend) Append(ctx context.Context, e evidence.Event)
 	}
 	return f.b.Append(ctx, e)
 }
+
+// The retained profile detection and the retained append semantics are
+// interface assertions on the BACKEND TYPE: the wrapper must forward the
+// retained-turn method set so the recorder treats it as retained and
+// stamps the retained evidence profile (a postgres-profile admission is
+// correctly refused by the retained backend's validation).
+func (f *faultingRetentionBackend) VerifyRetainedTurn(ctx context.Context, tenant, turn string, expected []evidence.Event) error {
+	return f.b.VerifyRetainedTurn(ctx, tenant, turn, expected)
+}
+
+func (f *faultingRetentionBackend) LoadRetainedObjects(ctx context.Context, tenant, turn string, expected []evidence.Event) (map[string][]byte, error) {
+	return f.b.LoadRetainedObjects(ctx, tenant, turn, expected)
+}
+
 func (f *faultingRetentionBackend) PutObject(ctx context.Context, tenant string, data []byte) (evidence.Receipt, error) {
 	return f.b.PutObject(ctx, tenant, data)
 }
