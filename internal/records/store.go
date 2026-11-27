@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -204,6 +205,53 @@ func Held(holds []*Hold, matterID, custodianID string, recordedAt time.Time) boo
 	return false
 }
 
+// samePlacementIntent reports whether a retry carries the EXACT authorized
+// placement intent of the admitted hold: matter, custodian selection, time
+// window, reason and placing officer (C07 round-2 finding 5). A reused
+// idempotency key with a changed intent fails explicitly instead of
+// acknowledging the unrelated existing hold.
+func samePlacementIntent(h *Hold, matterID string, custodians []string, scope Scope, reason, actorID string) bool {
+	if h == nil || h.MatterID != matterID || h.Reason != reason || h.PlacedBy != actorID {
+		return false
+	}
+	if !equalCanonicalSet(h.CustodianIDs, custodians) {
+		return false
+	}
+	if !sameWindow(h.WindowStart, scope.WindowStart) || !sameWindow(h.WindowEnd, scope.WindowEnd) {
+		return false
+	}
+	return true
+}
+
+func sameWindow(a, b *time.Time) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == nil {
+		return true
+	}
+	// Compare at the durable timestamptz resolution (microseconds): values
+	// differing only below the storage resolution are indistinguishable in
+	// the admitted intent.
+	return a.Truncate(time.Microsecond).Equal(b.Truncate(time.Microsecond))
+}
+
+func equalCanonicalSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sa := append([]string(nil), a...)
+	sb := append([]string(nil), b...)
+	sort.Strings(sa)
+	sort.Strings(sb)
+	for i := range sa {
+		if sa[i] != sb[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // PlaceHold commits the hold's epoch and durable record (state pending) and
 // restores matching disposal_pending/purging items to active. It returns the
 // created-or-existing hold; protection establishment is a separate phase
@@ -235,14 +283,20 @@ func (s *Store) PlaceHold(ctx context.Context, p store.Principal, scope Scope, r
 	}
 	created := &Hold{}
 	err := s.beginTx(ctx, p, store.RoleRecordsOfficer, func(tx pgx.Tx) error {
-		// Idempotent retry: the same officer key returns the durable hold
-		// with its current state; it never places a second hold.
+		// Idempotent retry: the same officer key with the SAME authorized
+		// placement intent returns the durable hold with its current state;
+		// it never places a second hold, and a CHANGED intent fails
+		// explicitly instead of acknowledging an unrelated existing hold
+		// (C07 round-2 finding 5).
 		var existing string
 		err := tx.QueryRow(ctx, `SELECT id::text FROM holds WHERE tenant_id=$1 AND idempotency_key=$2`, p.TenantID, idempotencyKey).Scan(&existing)
 		if err == nil {
 			h, herr := loadHold(ctx, tx, existing)
 			if herr != nil {
 				return herr
+			}
+			if !samePlacementIntent(h, matterID, custodians, scope, reason, p.UserID) {
+				return fmt.Errorf("%w: idempotency key %q is bound to a different placement intent", ErrConflict, idempotencyKey)
 			}
 			*created = *h
 			return nil
@@ -287,10 +341,14 @@ func (s *Store) PlaceHold(ctx context.Context, p store.Principal, scope Scope, r
 			if errors.As(err, &pk) && pk.Code == "23505" {
 				// A concurrent placement with the same idempotency key won
 				// the unique race (it committed while this transaction was
-				// waiting on the epoch row): return the durable winner.
+				// waiting on the epoch row): return the durable winner
+				// only when it admitted the SAME placement intent.
 				h, herr := loadHoldByIdempotency(ctx, tx, p.TenantID, idempotencyKey)
 				if herr != nil {
 					return herr
+				}
+				if !samePlacementIntent(h, matterID, custodians, scope, reason, p.UserID) {
+					return fmt.Errorf("%w: idempotency key %q is bound to a different placement intent", ErrConflict, idempotencyKey)
 				}
 				*created = *h
 				return nil
@@ -1179,9 +1237,19 @@ func (s *Store) lockActor(ctx context.Context, tx pgx.Tx, actor store.Principal)
 // The per-version outcomes returned by the deleter are recorded as the
 // disposal plan's verified dispositions in the same transaction. A deleter
 // error rolls the whole transaction back; an outcome of "restored_active",
-// "stale_retry", "disposed" or "blocked" is committed with its audit row.
+// "restored_active_partial", "stale_retry", "disposed" or "blocked" is
+// committed with its audit row.
+//
+// verifyVersions classifies each planned version's physical presence
+// ("present" / "absent"; an error is unknown) by ACTUAL STORAGE READBACK.
+// A restore to active over a plan with outstanding entries is performed
+// only with verified completeness: a prior physical delete may have
+// committed while the disposition transaction rolled back, and partial
+// physical deletion must never be represented as intact active evidence
+// (C07 round-2 finding 4).
 func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenantID, turnID string,
-	deleter func(context.Context, Item) (map[string]string, error), verifyBytes func(context.Context, string) (bool, error), outcome *string) error {
+	deleter func(context.Context, Item) (map[string]string, error), verifyBytes func(context.Context, string) (bool, error),
+	verifyVersions func(context.Context, []PlanRow) (map[string]string, error), outcome *string) error {
 	run := func(tx pgx.Tx) error {
 		// The protection fence serializes the deletes with every protection
 		// mutation and every capture-side reference acquisition of this
@@ -1209,8 +1277,15 @@ func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenan
 		}
 		if it.State != ItemPurging {
 			*outcome = "not_purging"
-			if err := DeletePlan(ctx, tx, it.TenantID, it.TurnID); err != nil {
-				return err
+			// The plan is destroyed only for a turn whose disposal COMPLETED
+			// (every planned version has a verified disposition). A restored
+			// or still-pending item KEEPS its durable exact-version
+			// identity: a partial physical deletion must never lose the
+			// only remaining inventory (C07 round-2 finding 4).
+			if it.State == ItemDisposed {
+				if err := DeletePlan(ctx, tx, it.TenantID, it.TurnID); err != nil {
+					return err
+				}
 			}
 			return nil
 		}
@@ -1226,11 +1301,105 @@ func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenan
 		if it.ObservedEpoch == nil {
 			return ErrConflict
 		}
+		// restoreActive returns a purging item to active because a hold now
+		// matches. When a durable plan exists, restoration requires VERIFIED
+		// completeness (actual storage readback per planned version): a
+		// prior delete may have committed at the storage while this
+		// transaction's predecessor rolled back. Partial deletion is
+		// restored with the loss recorded in the plan (the exact-version
+		// inventory is never destroyed); only verified completeness may
+		// clear the plan; a fully vanished record is completed as disposed
+		// (never active evidence that does not exist). An unknown presence
+		// outcome refuses the restore (the item stays purging, retryable).
+		restoreActive := func() error {
+			plan, err := planOfTx(ctx, tx, it.TenantID, it.TurnID)
+			if err != nil {
+				return err
+			}
+			if len(plan) == 0 {
+				// No durable plan (legacy shape): nothing to verify.
+				if _, err := tx.Exec(ctx, `UPDATE retention_items SET state='active', observed_epoch=NULL, pending_since=NULL, tombstoned_at=NULL, purge_by=NULL WHERE tenant_id=$1 AND turn_id=$2`,
+					it.TenantID, it.TurnID); err != nil {
+					return err
+				}
+				*outcome = "restored_active"
+				return audit(ctx, tx, it.TenantID, actorID(actor), "purge.finish", map[string]any{"turn_id": it.TurnID, "outcome": *outcome})
+			}
+			presence, err := verifyVersions(ctx, plan)
+			if err != nil {
+				return fmt.Errorf("%w: restore verification: %v", ErrConflict, err)
+			}
+			// Completeness counts EVERY planned version, including rows
+			// already dispositioned gone (e.g. by the hold's own partial
+			// coverage): a durable record of loss is a loss, not
+			// intactness.
+			missing := []string{}
+			gone := 0
+			for _, row := range plan {
+				if row.Disposition == "deleted" || row.Disposition == "absent" {
+					gone++
+					missing = append(missing, row.Key+"|"+row.Version)
+					continue
+				}
+				if presence[row.Key+"|"+row.Version] == "absent" {
+					gone++
+					missing = append(missing, row.Key+"|"+row.Version)
+					if err := UpdatePlanDisposition(ctx, tx, it.TenantID, it.TurnID, row.Key, row.Version, "absent"); err != nil {
+						return err
+					}
+				}
+			}
+			if len(plan) > 0 && gone == len(plan) {
+				// Every planned version is verifiably gone: the restore
+				// must not claim active evidence exists.
+				if _, err := tx.Exec(ctx, `UPDATE retention_items SET state='disposed', purged_at=now() WHERE tenant_id=$1 AND turn_id=$2`,
+					it.TenantID, it.TurnID); err != nil {
+					return err
+				}
+				*outcome = "disposed_ambiguous"
+				return audit(ctx, tx, it.TenantID, actorID(actor), "purge.finish", map[string]any{
+					"turn_id": it.TurnID, "outcome": *outcome, "missing_versions": missing,
+				})
+			}
+			if _, err := tx.Exec(ctx, `UPDATE retention_items SET state='active', observed_epoch=NULL, pending_since=NULL, tombstoned_at=NULL, purge_by=NULL WHERE tenant_id=$1 AND turn_id=$2`,
+				it.TenantID, it.TurnID); err != nil {
+				return err
+			}
+			if gone > 0 {
+				// Partial restoration: the loss is recorded and the plan
+				// keeps the durable version identity and dispositions; a
+				// later release and disposal remain recoverable.
+				*outcome = "restored_active_partial"
+				return audit(ctx, tx, it.TenantID, actorID(actor), "purge.finish", map[string]any{
+					"turn_id": it.TurnID, "outcome": *outcome, "missing_versions": missing,
+				})
+			}
+			// Verified complete: the exact-version inventory is intact.
+			if err := DeletePlan(ctx, tx, it.TenantID, it.TurnID); err != nil {
+				return err
+			}
+			*outcome = "restored_active"
+			return audit(ctx, tx, it.TenantID, actorID(actor), "purge.finish", map[string]any{"turn_id": it.TurnID, "outcome": *outcome, "verified_versions": len(plan)})
+		}
 		if epoch != *it.ObservedEpoch {
 			// A hold or release committed since begin_purge: re-evaluate,
 			// never delete blind (state machines case G).
 			if Held(holds, it.MatterID, it.CustodianID, it.RecordedAt) {
 				present := true
+				plan, err := planOfTx(ctx, tx, it.TenantID, it.TurnID)
+				if err != nil {
+					return err
+				}
+				if len(plan) > 0 {
+					// The plan is authoritative exact-version identity:
+					// verify its completeness by storage readback instead
+					// of trusting turn-level presence (a plan with
+					// outstanding entries is not proof the bytes remain).
+					if err := restoreActive(); err != nil {
+						return err
+					}
+					return nil
+				}
 				if verifyBytes != nil {
 					present, err = verifyBytes(ctx, it.TurnID)
 					if err != nil {
@@ -1248,15 +1417,10 @@ func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenan
 					*outcome = "disposed_ambiguous"
 					return audit(ctx, tx, it.TenantID, actorID(actor), "purge.finish", map[string]any{"turn_id": it.TurnID, "outcome": *outcome, "epoch": epoch, "observed": *it.ObservedEpoch})
 				}
-				if _, err := tx.Exec(ctx, `UPDATE retention_items SET state='active', observed_epoch=NULL, pending_since=NULL, tombstoned_at=NULL, purge_by=NULL WHERE tenant_id=$1 AND turn_id=$2`,
-					it.TenantID, it.TurnID); err != nil {
+				if err := restoreActive(); err != nil {
 					return err
 				}
-				if err := DeletePlan(ctx, tx, it.TenantID, it.TurnID); err != nil {
-					return err
-				}
-				*outcome = "restored_active"
-				return audit(ctx, tx, it.TenantID, actorID(actor), "purge.finish", map[string]any{"turn_id": it.TurnID, "outcome": *outcome, "epoch": epoch, "observed": *it.ObservedEpoch})
+				return nil
 			}
 			if _, err := tx.Exec(ctx, `UPDATE retention_items SET state='disposal_pending', observed_epoch=$3, pending_since=now(), tombstoned_at=NULL, purge_by=NULL WHERE tenant_id=$1 AND turn_id=$2`,
 				it.TenantID, it.TurnID, epoch); err != nil {
@@ -1269,15 +1433,10 @@ func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenan
 			// A hold now matches even though the epoch is unchanged (a
 			// pending hold never bumped the epoch it was placed under):
 			// restore, never delete.
-			if _, err := tx.Exec(ctx, `UPDATE retention_items SET state='active', observed_epoch=NULL, pending_since=NULL, tombstoned_at=NULL, purge_by=NULL WHERE tenant_id=$1 AND turn_id=$2`,
-				it.TenantID, it.TurnID); err != nil {
+			if err := restoreActive(); err != nil {
 				return err
 			}
-			if err := DeletePlan(ctx, tx, it.TenantID, it.TurnID); err != nil {
-				return err
-			}
-			*outcome = "restored_active"
-			return audit(ctx, tx, it.TenantID, actorID(actor), "purge.finish", map[string]any{"turn_id": it.TurnID, "outcome": *outcome})
+			return nil
 		}
 		results, err := deleter(ctx, it)
 		if err != nil {
@@ -1447,10 +1606,20 @@ func UpsertClaim(ctx context.Context, tx pgx.Tx, tenantID, holdID string, v Vers
 }
 
 // MarkClaimProtected records verified native protection (readback ON).
+// It REQUIRES the claim row to have been updated: protection completion
+// on a missing claim row is an error, so every native protection
+// mutation keeps a durable owner established beforehand (C07 round-2
+// finding 6).
 func MarkClaimProtected(ctx context.Context, tx pgx.Tx, holdID string, v VersionRef) error {
-	_, err := tx.Exec(ctx, `UPDATE hold_version_claims SET state='protected', verified_at=now()
+	tag, err := tx.Exec(ctx, `UPDATE hold_version_claims SET state='protected', verified_at=now()
 		WHERE hold_id=$1 AND key=$2 AND version=$3`, holdID, v.Key, v.Version)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("%w: protection completion for hold %s on %s|%s has no durable claim row", ErrConflict, holdID, v.Key, v.Version)
+	}
+	return nil
 }
 
 // ClaimsOfHold enumerates the hold's outstanding protection claims.
@@ -1525,6 +1694,61 @@ func (s *Store) PlanOf(ctx context.Context, tenantID, turnID string) ([]PlanRow,
 	}
 	defer rows.Close()
 	return scanPlanRows(rows)
+}
+
+// planOfTx loads the turn's disposal plan inside a transaction (restore
+// verification runs under the delete-phase locks).
+func planOfTx(ctx context.Context, q interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, tenantID, turnID string) ([]PlanRow, error) {
+	rows, err := q.Query(ctx, `SELECT tenant_id::text, turn_id::text, key, version, disposition, plan_epoch
+		FROM disposal_plans WHERE tenant_id=$1 AND turn_id=$2 ORDER BY key, version`, tenantID, turnID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPlanRows(rows)
+}
+
+// MarkPlanAbsent records STORAGE-VERIFIED physical absence of one planned
+// version observed outside a disposal transaction (hold coverage of a
+// partially disposed record): the plan keeps its durable version identity,
+// the disposition stays attributable, and the audit row records the loss.
+func (s *Store) MarkPlanAbsent(ctx context.Context, tenantID, turnID string, v VersionRef) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `UPDATE disposal_plans SET disposition='absent'
+		WHERE tenant_id=$1 AND turn_id=$2 AND key=$3 AND version=$4 AND disposition IN ('planned','protected')`,
+		tenantID, turnID, v.Key, v.Version); err != nil {
+		return err
+	}
+	if err := audit(ctx, tx, tenantID, nil, "plan.absent_verified", map[string]any{
+		"turn_id": turnID, "key": v.Key, "version": v.Version,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// AuditProtectionRepairFailed durably records that recovery could not
+// complete the protection repair of an effective hold: the failure stays
+// attributable and the next recovery retries it (an effective hold is
+// never downgraded).
+func (s *Store) AuditProtectionRepairFailed(ctx context.Context, tenantID, holdID, detail string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if err := audit(ctx, tx, tenantID, nil, "hold.protection_repair_failed", map[string]any{
+		"hold_id": holdID, "detail": detail,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func scanPlanRows(rows pgx.Rows) ([]PlanRow, error) {

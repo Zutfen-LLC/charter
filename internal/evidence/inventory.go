@@ -56,15 +56,32 @@ func DisposalVersionsOf(b Backend) (DisposalVersions, bool) {
 	return v, ok
 }
 
+// NamespaceEnumeration is the fallback enumeration of a turn's own
+// namespaces with its completeness classification (C07 round-2 finding 3).
+type NamespaceEnumeration struct {
+	Refs []VersionRef
+	// Complete reports whether every listed event-slot version was read
+	// AND its signed candidate verified, and the listed slot sequence has
+	// no holes. When false, at least one listed slot could not be read or
+	// verified: its object references are UNKNOWN - the true reference
+	// set is a strict superset of Refs, and an unreadable reference must
+	// never be treated as an absent one.
+	Complete bool
+}
+
 // NamespaceVersions is implemented by backends that can enumerate every
 // version under a turn's own namespaces (event slots and data events) plus
 // the object versions the still-decodable slots reference, WITHOUT chain
-// verification. The shared-reference scan uses it as the fallback for a
-// sibling turn whose verified enumeration is unavailable (mid-deletion or a
-// broken chain): the sibling must be neither silently treated as
-// reference-free nor allowed to wedge every disposal in the tenant forever.
+// verification. The shared-reference and required-version scans use it as
+// the fallback for a sibling turn whose verified enumeration is
+// unavailable (mid-deletion or a broken chain): the sibling must be
+// neither silently treated as reference-free nor allowed to wedge every
+// disposal in the tenant forever. ErrNotFound means authoritatively
+// NOTHING is left under the turn's namespaces; an incomplete enumeration
+// is reported through Complete=false and must cause the caller to refuse
+// the irreversible action it was fencing.
 type NamespaceVersions interface {
-	TurnNamespaceRefs(ctx context.Context, tenantID, turnID string) ([]VersionRef, error)
+	TurnNamespaceRefs(ctx context.Context, tenantID, turnID string) (NamespaceEnumeration, error)
 }
 
 // NamespaceVersionsOf returns the namespace enumerator when implemented.

@@ -58,8 +58,8 @@ type Hold struct {
 	Report         Report     `json:"report"`
 }
 
-// Report is the hold's durable coverage report (ADR: the miss must be visible
-// rather than silent).
+// Report is the hold's durable coverage report (ADR: the miss must be
+// visible rather than silent).
 type Report struct {
 	// The scope revision (the hold's epoch value) this report was verified
 	// under; the effective transition binds to it, so a committed report
@@ -70,9 +70,17 @@ type Report struct {
 	// Turn IDs already disposed when the hold was placed.
 	DisposedBeforeHold []string `json:"disposed_before_hold"`
 	// Turn IDs in scope whose required versions could not all be verified
-	// as protected (establishment failed for them; the hold is not effective
-	// while any remain).
+	// as protected (establishment failed for them; the hold is not
+	// effective while any remain).
 	Uncovered []string `json:"uncovered"`
+	// Turn IDs in scope whose exact-version coverage was established from
+	// a partially disposed root (the durable disposal plan): some planned
+	// versions were physically deleted before the hold was placed. The
+	// loss is explicit, the remaining versions are protected like any
+	// other covered record, and these stay distinguishable from
+	// previously disposed records (disposed_before_hold) and from
+	// unverifiable ones (uncovered) - C07 round-2 finding 1.
+	PartiallyDisposed []string `json:"partially_disposed,omitempty"`
 	// Versions this hold protected (for release reference counting).
 	ProtectedVersions []VersionRef `json:"protected_versions"`
 	// Release cleanup still pending (versions that could not yet have their
@@ -93,6 +101,13 @@ type ReportedItem struct {
 	AlreadyExpired bool      `json:"already_expired"`
 	ExpiresAt      time.Time `json:"retention_expires_at"`
 	Versions       int       `json:"versions"`
+	// PartiallyDisposed: this item's coverage was established from a
+	// partially disposed root (its live enumeration root is gone and the
+	// durable disposal plan supplied the exact version identity);
+	// MissingVersions counts its planned versions verified physically gone
+	// before the hold was placed.
+	PartiallyDisposed bool `json:"partially_disposed,omitempty"`
+	MissingVersions   int  `json:"missing_versions,omitempty"`
 }
 
 // VersionRef is one exact storage version protected by a hold.

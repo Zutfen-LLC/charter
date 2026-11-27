@@ -111,10 +111,23 @@ func (s *Service) FinishPurge(ctx context.Context, actor *store.Principal, turnI
 				s.Hooks.AfterStorageDelete(v.Key, v.Version, err)
 			}
 			switch {
-			case err == nil:
-				outcomes[v.Key+"|"+v.Version] = OutcomeDeleted
-			case errors.Is(err, s3transport.ErrObjectAbsent):
-				outcomes[v.Key+"|"+v.Version] = OutcomeAbsent
+			case err == nil, errors.Is(err, s3transport.ErrObjectAbsent):
+				// Physical absence is verified by ACTUAL STORAGE READBACK,
+				// never by the delete response alone (C07 round-2 finding
+				// 4): a lying or lossy acknowledgment cannot become a
+				// disposal claim.
+				if _, lerr := s.Storage.LegalHold(ctx, v.Key, v.Version); lerr != nil {
+					if errors.Is(lerr, s3transport.ErrObjectAbsent) {
+						if err == nil {
+							outcomes[v.Key+"|"+v.Version] = OutcomeDeleted
+						} else {
+							outcomes[v.Key+"|"+v.Version] = OutcomeAbsent
+						}
+						continue
+					}
+					return nil, fmt.Errorf("delete readback %s: absence unverified: %w", v.Key, lerr)
+				}
+				return nil, fmt.Errorf("delete readback %s: the version is still readable after the delete acknowledged success", v.Key)
 			case errors.Is(err, s3transport.ErrObjectProtected):
 				outcomes[v.Key+"|"+v.Version] = OutcomeProtected
 				blocked = true
@@ -136,11 +149,37 @@ func (s *Service) FinishPurge(ctx context.Context, actor *store.Principal, turnI
 		default:
 			return false, fmt.Errorf("records: presence unresolved (%s)", detail)
 		}
-	}, &outcome)
+	}, s.verifyPlanVersions, &outcome)
 	if err != nil {
 		return outcome, outcomes, err
 	}
 	return outcome, outcomes, nil
+}
+
+// verifyPlanVersions classifies each planned version's physical presence by
+// actual storage readback: "absent" for plan-verified dispositions and
+// versions the storage reports gone, "present" for readable ones, and an
+// ERROR for unknown outcomes (never permission to treat uncertainty as
+// absence).
+func (s *Service) verifyPlanVersions(ctx context.Context, plan []PlanRow) (map[string]string, error) {
+	out := map[string]string{}
+	for _, row := range plan {
+		id := row.Key + "|" + row.Version
+		switch row.Disposition {
+		case OutcomeDeleted, OutcomeAbsent:
+			out[id] = "absent" // plan-verified
+			continue
+		}
+		if _, err := s.Storage.LegalHold(ctx, row.Key, row.Version); err != nil {
+			if errors.Is(err, s3transport.ErrObjectAbsent) {
+				out[id] = "absent"
+				continue
+			}
+			return nil, fmt.Errorf("records: plan presence probe %s: %w", row.Key, err)
+		}
+		out[id] = "present"
+	}
+	return out, nil
 }
 
 // sharedReferences reports which of the turn's versions are also referenced
@@ -148,12 +187,28 @@ func (s *Service) FinishPurge(ctx context.Context, actor *store.Principal, turnI
 // disposal. The scan runs inside the delete transaction under the tenant
 // protection fence, so a capture cannot acquire a new reference to the same
 // exact version between this snapshot and the deletion.
+//
+// Reference resolution distinguishes verified complete references,
+// authoritatively established absence, known partial references backed by
+// durable disposal plans, and UNKNOWN references caused by transient or
+// permanent verification failure: an unknown sibling reference set REFUSES
+// the irreversible deletion - an unreadable reference is never an absent
+// one (C07 round-2 finding 3). The scan covers the union of live turns
+// and non-disposed catalog records, so a record whose live root is gone
+// still fences through its durable plan.
 func (s *Service) sharedReferences(ctx context.Context, it Item) (map[VersionRef]bool, error) {
 	turns, err := s.inventory(ctx, it.TenantID)
 	if err != nil {
 		return nil, err
 	}
-	items := s.retentionIndex(ctx, it.TenantID)
+	items, err := s.retentionIndex(ctx, it.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	live := map[string]bool{}
+	for _, t := range turns {
+		live[t.TurnID] = true
+	}
 	mine, err := s.disposalRefs(ctx, it.TenantID, it.TurnID)
 	if err != nil {
 		planRefs := s.planRefs(ctx, it)
@@ -170,37 +225,45 @@ func (s *Service) sharedReferences(ctx context.Context, it Item) (map[VersionRef
 		own[VersionRef(r)] = true
 	}
 	shared := map[VersionRef]bool{}
+	fence := func(turnID string, known bool, state string) error {
+		if turnID == it.TurnID {
+			return nil
+		}
+		if known && state == ItemDisposed {
+			return nil
+		}
+		refs, res, rerr := s.turnReferenceSet(ctx, it.TenantID, turnID)
+		switch res {
+		case refSetVerified, refSetPlan:
+			for _, r := range refs {
+				if own[VersionRef(r)] {
+					shared[VersionRef(r)] = true
+				}
+			}
+			return nil
+		case refSetAbsent:
+			// Authoritatively nothing left under the sibling's namespaces:
+			// not a live reference source.
+			return nil
+		default:
+			// Unknown sibling references cannot authorize deletion.
+			return fmt.Errorf("records: shared-reference scan: sibling turn %s: %w", turnID, rerr)
+		}
+	}
 	for _, t := range turns {
-		if t.TurnID == it.TurnID {
+		item, known := items[t.TurnID]
+		if err := fence(t.TurnID, known, item.State); err != nil {
+			return nil, err
+		}
+	}
+	// Non-live, non-disposed catalog records still fence their remaining
+	// planned versions (finding 1's union, applied to the shared scan).
+	for _, item := range items {
+		if live[item.TurnID] || item.State == ItemDisposed {
 			continue
 		}
-		if item, known := items[t.TurnID]; known && item.State == ItemDisposed {
-			continue
-		}
-		enumRefs, err := s.disposalRefs(ctx, it.TenantID, t.TurnID)
-		if errors.Is(err, evidence.ErrNotFound) {
-			// The other turn's admission is mid-deletion: it is not a live
-			// reference source anymore and its own disposal plan governs its
-			// remaining versions.
-			continue
-		}
-		if err != nil {
-			// The sibling's verified enumeration is unavailable (broken
-			// chain or mid-deletion slots). It must not be treated as
-			// reference-free, and it must not wedge this disposal forever
-			// either: fall back to its namespace enumeration (every version
-			// under its own namespaces plus the objects of its decodable
-			// slots). Unknown storage errors still fail closed below.
-			fallback, ferr := s.namespaceRefs(ctx, it.TenantID, t.TurnID)
-			if ferr != nil {
-				return nil, fmt.Errorf("records: shared-reference scan: sibling turn %s: %w (fallback: %v)", t.TurnID, err, ferr)
-			}
-			enumRefs = fallback
-		}
-		for _, r := range enumRefs {
-			if own[VersionRef(r)] {
-				shared[VersionRef(r)] = true
-			}
+		if err := fence(item.TurnID, true, item.State); err != nil {
+			return nil, err
 		}
 	}
 	return shared, nil
@@ -222,11 +285,15 @@ func (s *Service) planRefs(ctx context.Context, it Item) []evidence.VersionRef {
 // Recover reconciles every incomplete or ambiguous lifecycle operation from
 // durable state plus the authoritative backend: pending/failed holds are
 // re-established (the effective transition refuses uncovered records and
-// binds to the scope revision), released and narrowed holds' outstanding
-// protection claims are reconciled (cleanup converges), purging items are
-// completed from their durable disposal plans, and presence observations are
-// classified so a storage outage can never become proof of disposal. It
-// never consults workspace tables, and it is idempotent.
+// binds to the scope revision), EFFECTIVE holds comprehensively re-establish
+// any protection their acknowledged guarantees require but the storage
+// lacks (interrupted, denied or recovered captures whose terminal paths
+// could not complete protection - C07 round-2 finding 2), released and
+// narrowed holds' outstanding protection claims are reconciled (cleanup
+// converges), purging items are completed from their durable disposal
+// plans, and presence observations are classified so a storage outage can
+// never become proof of disposal. It never consults workspace tables, and
+// it is idempotent.
 func (s *Service) Recover(ctx context.Context) error {
 	// 1. Holds still awaiting verified protection.
 	pending, err := s.Store.HoldsInState(ctx, HoldPending, HoldFailed)
@@ -239,6 +306,23 @@ func (s *Service) Recover(ctx context.Context) error {
 		}
 		if _, err := s.Reestablish(ctx, h); err != nil {
 			s.logf("records: recover hold %s: %v", h.ID, err)
+		}
+	}
+	// 1b. Effective holds: comprehensively establish missing protection.
+	// This runs the same coverage pass as establishment WITHOUT a state
+	// transition (an effective hold is never downgraded); the claims ledger
+	// records durable progress and the audit row records any repair
+	// failure, so the outcome stays recoverable without a user retry.
+	effective, err := s.Store.HoldsInState(ctx, HoldEffective)
+	if err != nil {
+		return err
+	}
+	for _, h := range effective {
+		if _, err := s.establish(ctx, h); err != nil {
+			s.logf("records: recover effective hold %s protection: %v", h.ID, err)
+			if aerr := s.Store.AuditProtectionRepairFailed(ctx, h.TenantID, h.ID, err.Error()); aerr != nil {
+				s.logf("records: repair audit: %v", aerr)
+			}
 		}
 	}
 	// 2. Outstanding protection claims of EVERY hold (released holds and

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Zutfen-LLC/charter/internal/evidence"
+	"github.com/Zutfen-LLC/charter/internal/evidence/s3transport"
 	"github.com/Zutfen-LLC/charter/internal/store"
 	"github.com/jackc/pgx/v5"
 )
@@ -36,6 +37,12 @@ type Hooks struct {
 	// StorageFault, when set, injects a failure into a storage operation.
 	// stage is "protect", "readback", "delete" or "cleanup".
 	StorageFault func(stage string) error
+	// BeforeApplicableReload runs at the start of the second (native
+	// mutation) phase of EnsureProtected, before the applicable hold set
+	// is re-loaded inside the protection fence: the deterministic
+	// interleave point for a hold that becomes applicable between the two
+	// phases (C07 round-2 finding 6).
+	BeforeApplicableReload func()
 }
 
 // Service is the C07 lifecycle composition: the PG lifecycle store, the
@@ -82,13 +89,72 @@ func (s *Service) disposalRefs(ctx context.Context, tenantID, turnID string) ([]
 
 // namespaceRefs enumerates a turn's versions without chain verification
 // (fallback for the shared-reference scan over a sibling whose verified
-// enumeration is unavailable).
-func (s *Service) namespaceRefs(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, error) {
+// enumeration is unavailable), with its completeness classification.
+func (s *Service) namespaceRefs(ctx context.Context, tenantID, turnID string) (evidence.NamespaceEnumeration, error) {
 	n, ok := evidence.NamespaceVersionsOf(s.Backend)
 	if !ok {
-		return nil, errors.New("records: backend cannot enumerate turn namespaces")
+		return evidence.NamespaceEnumeration{}, errors.New("records: backend cannot enumerate turn namespaces")
 	}
 	return n.TurnNamespaceRefs(ctx, tenantID, turnID)
+}
+
+// refSetResolution classifies how a turn's exact-version reference set was
+// resolved for a fencing decision (C07 round-2 finding 3).
+type refSetResolution int
+
+const (
+	// refSetVerified: the live verified enumeration succeeded, or the
+	// namespace fallback enumerated completely.
+	refSetVerified refSetResolution = iota
+	// refSetPlan: the durable disposal plan supplied the exact version
+	// identity (known partial references backed by durable state).
+	refSetPlan
+	// refSetAbsent: authoritatively nothing is left under the turn's
+	// namespaces; the turn is not a live reference source.
+	refSetAbsent
+	// refSetUnknown: transient or permanent verification failure. The
+	// caller must refuse the irreversible deletion or protection removal.
+	refSetUnknown
+)
+
+// turnReferenceSet resolves the reference set of one turn for
+// shared-reference fencing and required-version decisions. The verified
+// enumeration is authoritative; when it is unavailable, a durable disposal
+// plan supplies the exact version identity; the namespace fallback is used
+// only when it enumerates COMPLETELY. An unknown reference set is never
+// silently treated as an absent one.
+func (s *Service) turnReferenceSet(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, refSetResolution, error) {
+	refs, err := s.disposalRefs(ctx, tenantID, turnID)
+	if err == nil {
+		return refs, refSetVerified, nil
+	}
+	// Durable reference information first: a disposal plan committed before
+	// any deletion holds the turn's complete exact-version identity, so
+	// known partial disposal stays recoverable without wedging unrelated
+	// valid operations.
+	if plan, perr := s.Store.PlanOf(ctx, tenantID, turnID); perr == nil && len(plan) > 0 {
+		var out []evidence.VersionRef
+		for _, row := range plan {
+			if row.Disposition == OutcomeDeleted || row.Disposition == OutcomeAbsent {
+				continue // already gone: not a live reference
+			}
+			out = append(out, evidence.VersionRef{Key: row.Key, Version: row.Version})
+		}
+		if len(out) > 0 {
+			return out, refSetPlan, nil
+		}
+	}
+	enum, nerr := s.namespaceRefs(ctx, tenantID, turnID)
+	if nerr == nil {
+		if enum.Complete {
+			return enum.Refs, refSetVerified, nil
+		}
+		return nil, refSetUnknown, fmt.Errorf("records: turn %s: namespace references incomplete (verified enumeration: %v)", turnID, err)
+	}
+	if errors.Is(nerr, evidence.ErrNotFound) {
+		return nil, refSetAbsent, nil
+	}
+	return nil, refSetUnknown, fmt.Errorf("records: turn %s: verified enumeration: %w (namespace: %v)", turnID, err, nerr)
 }
 
 // Presence classifies an observation of a turn's exact versions. It exists
@@ -289,6 +355,9 @@ func (s *Service) EnsureProtected(ctx context.Context, tenant, matter, custodian
 	// fence, with the holds' committed state re-loaded first: claims of a
 	// hold that was released in between are never re-set natively.
 	return s.withProtection(ctx, tenant, func(tx pgx.Tx) error {
+		if s.Hooks.BeforeApplicableReload != nil {
+			s.Hooks.BeforeApplicableReload()
+		}
 		current, err := holdsOfTx(ctx, tx, tenant)
 		if err != nil {
 			return err
@@ -302,6 +371,18 @@ func (s *Service) EnsureProtected(ctx context.Context, tenant, matter, custodian
 		}
 		if len(applicable) == 0 {
 			return nil
+		}
+		// Claims for EVERY applicable hold are established inside this
+		// fence transaction BEFORE the native mutation: a hold that became
+		// applicable after the initial out-of-fence snapshot can no longer
+		// receive native protection without a durable claim (protection
+		// completion requires an updated claim row - C07 round-2 finding 6).
+		for id := range applicable {
+			for _, r := range refs {
+				if err := UpsertClaim(ctx, tx, tenant, id, VersionRef(r)); err != nil {
+					return err
+				}
+			}
 		}
 		for _, r := range refs {
 			v := VersionRef(r)
@@ -372,13 +453,17 @@ func (s *Service) Place(ctx context.Context, p store.Principal, scope Scope, rea
 	return s.Store.GetHold(ctx, p, h.ID)
 }
 
-// establish applies and verifies protection for every in-scope turn from the
-// authoritative backend inventory (never a workspace index), building the
-// durable coverage report and the durable version-claim ledger. Disposed
-// turns are recorded as gaps - both those still enumerable and those that
-// already left the live inventory (the catalog's disposed rows); items whose
-// versions cannot be verified are uncovered (the hold cannot become
-// effective while any remain, enforced at the MarkEffective transition).
+// establish applies and verifies protection for every in-scope turn from
+// the AUTHORITATIVE union of the live evidence inventory, the durable
+// lifecycle catalog and the durable disposal plans (C07 round-2 finding
+// 1), building the durable coverage report and the durable version-claim
+// ledger. Disposed turns are recorded as gaps - both those still
+// enumerable and those that already left the live inventory (the catalog's
+// disposed rows); turns whose live enumeration root is gone but whose
+// disposal plan still holds live rows are PARTIALLY DISPOSED: their
+// remaining versions are protected and the loss is explicitly reported;
+// records that cannot be verified at all (root gone, no plan) are
+// uncovered and block the effective transition.
 func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 	report := Report{ScopeEpoch: h.Epoch}
 	turns, err := s.inventory(ctx, h.TenantID)
@@ -389,7 +474,17 @@ func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 	if err != nil {
 		return report, err
 	}
-	items := s.retentionIndex(ctx, h.TenantID)
+	items, err := s.Store.itemsOfTenant(ctx, h.TenantID)
+	if err != nil {
+		// A catalog-loading error is never an empty catalog: coverage
+		// determination refuses to acknowledge on silently incomplete
+		// inventory (C07 round-2 finding 1).
+		return report, fmt.Errorf("records: lifecycle catalog: %w", err)
+	}
+	index := make(map[string]Item, len(items))
+	for _, it := range items {
+		index[it.TurnID] = it
+	}
 	live := map[string]bool{}
 	for _, t := range turns {
 		live[t.TurnID] = true
@@ -413,7 +508,7 @@ func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 		if err := s.Store.CatalogTurn(ctx, h.TenantID, t, policy); err != nil {
 			return report, err
 		}
-		item, known := items[t.TurnID]
+		item, known := index[t.TurnID]
 		if known && item.State == ItemDisposed {
 			report.DisposedBeforeHold = append(report.DisposedBeforeHold, t.TurnID)
 			continue
@@ -434,66 +529,11 @@ func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 				report.Uncovered = append(report.Uncovered, t.TurnID)
 				continue
 			}
-			// Protection intent is committed durably BEFORE the native
-			// mutation: if the process dies after SetLegalHold but before
-			// the claim ledger commits, the native protection would be ON
-			// with no ledger entry able to find and eventually clear it (an
-			// unbounded retention leak). With pending claims committed
-			// first, a crash converges: recovery re-establishes (the claims
-			// are re-protected idempotently) or a release reconcile clears
-			// them. The native mutation and its readback run under the
-			// tenant protection fence, and the fence transaction re-loads
-			// the hold's state first: a hold released between the two phases
-			// never has its claims re-set natively (adversarial review).
-			if err := s.withProtection(ctx, h.TenantID, func(tx pgx.Tx) error {
-				for _, r := range refs {
-					if err := UpsertClaim(ctx, tx, h.TenantID, h.ID, VersionRef(r)); err != nil {
-						return err
-					}
-				}
-				return nil
-			}); err != nil {
-				return report, err
+			vrefs := make([]VersionRef, len(refs))
+			for i, r := range refs {
+				vrefs[i] = VersionRef(r)
 			}
-			if err := s.withProtection(ctx, h.TenantID, func(tx pgx.Tx) error {
-				current, err := holdOfTx(ctx, tx, h.TenantID, h.ID)
-				if err != nil {
-					return err
-				}
-				// The hold's state may have PROGRESSED legitimately between
-				// the two phases (pending -> effective by a concurrent
-				// idempotent placement of the same hold): the protection
-				// owner is unchanged. Stale means released (claims are being
-				// reconciled by the release) or scope-changed (a newer epoch
-				// owns the scope; that epoch's establishment covers it).
-				if current == nil || current.State == HoldReleased || current.Epoch != h.Epoch {
-					return ErrStaleEstablishment
-				}
-				for _, r := range refs {
-					if s.Hooks.StorageFault != nil {
-						if ferr := s.Hooks.StorageFault("protect"); ferr != nil {
-							return ferr
-						}
-					}
-					if err := s.Storage.SetLegalHold(ctx, r.Key, r.Version, true); err != nil {
-						return fmt.Errorf("protect %s: %w", r.Key, err)
-					}
-					if s.Hooks.StorageFault != nil {
-						if ferr := s.Hooks.StorageFault("readback"); ferr != nil {
-							return ferr
-						}
-					}
-					state, err := s.Storage.LegalHold(ctx, r.Key, r.Version)
-					if err != nil || state != "ON" {
-						return fmt.Errorf("protection readback failed for %s: %v", r.Key, err)
-					}
-					if err := MarkClaimProtected(ctx, tx, h.ID, VersionRef(r)); err != nil {
-						return err
-					}
-					report.ProtectedVersions = append(report.ProtectedVersions, VersionRef(r))
-				}
-				return nil
-			}); err != nil {
+			if err := s.protectForHold(ctx, h, vrefs, &report); err != nil {
 				return report, err
 			}
 		}
@@ -506,21 +546,166 @@ func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 			AlreadyExpired: time.Now().After(expires), ExpiresAt: expires, Versions: len(refs),
 		})
 	}
+	// Matching catalog records that are NOT in the live inventory (the
+	// enumeration root was deleted mid-disposal, or a restored record whose
+	// root is gone): the durable disposal plan supplies the exact-version
+	// identity. Without a plan the record is unverifiable: it is reported
+	// uncovered and blocks the effective transition. Records are never
+	// silently omitted because their normal enumeration root is missing.
+	for _, it := range items {
+		if live[it.TurnID] || it.State == ItemDisposed {
+			continue
+		}
+		if !Matches(h, it.MatterID, it.CustodianID, it.RecordedAt) {
+			continue
+		}
+		if err := s.coverPlanTurn(ctx, h, it, &report); err != nil {
+			return report, err
+		}
+	}
 	return report, nil
 }
 
-// retentionIndex loads the tenant's lifecycle catalog as a map.
-func (s *Service) retentionIndex(ctx context.Context, tenantID string) map[string]Item {
+// coverPlanTurn establishes hold coverage for a matching catalog record
+// whose live enumeration root is gone, from the durable disposal plan (the
+// exact-version inventory committed before any irreversible deletion).
+// Planned versions verified physically absent are recorded as an explicit
+// partial loss; the remaining versions receive the same verified native
+// protection as any live record. No plan means unverifiable: uncovered.
+func (s *Service) coverPlanTurn(ctx context.Context, h *Hold, it Item, report *Report) error {
+	if !s.Retained {
+		// The PostgreSQL profile has no disposal plans (disposal is
+		// refused there); a catalog record without a live enumeration root
+		// cannot be verified.
+		report.Uncovered = append(report.Uncovered, it.TurnID)
+		return nil
+	}
+	if s.Storage == nil {
+		report.Uncovered = append(report.Uncovered, it.TurnID)
+		return nil
+	}
+	plan, err := s.Store.PlanOf(ctx, h.TenantID, it.TurnID)
+	if err != nil {
+		return err
+	}
+	if len(plan) == 0 {
+		report.Uncovered = append(report.Uncovered, it.TurnID)
+		return nil
+	}
+	var protect []VersionRef
+	missing := 0
+	for _, row := range plan {
+		switch row.Disposition {
+		case OutcomeDeleted, OutcomeAbsent:
+			continue // already dispositioned gone
+		}
+		if _, perr := s.Storage.LegalHold(ctx, row.Key, row.Version); perr != nil {
+			if errors.Is(perr, s3transport.ErrObjectAbsent) {
+				// Storage-verified partial loss: the plan keeps its durable
+				// version identity and the loss stays attributable.
+				missing++
+				if merr := s.Store.MarkPlanAbsent(ctx, h.TenantID, it.TurnID, VersionRef{Key: row.Key, Version: row.Version}); merr != nil {
+					return merr
+				}
+				continue
+			}
+			// The presence probe itself failed: coverage is unknown for
+			// this record; the establishment fails (retryable) rather than
+			// acknowledging silently incomplete coverage.
+			return fmt.Errorf("records: plan presence probe %s: %w", row.Key, perr)
+		}
+		protect = append(protect, VersionRef{Key: row.Key, Version: row.Version})
+	}
+	if len(protect) > 0 {
+		if err := s.protectForHold(ctx, h, protect, report); err != nil {
+			return err
+		}
+	}
+	report.PartiallyDisposed = append(report.PartiallyDisposed, it.TurnID)
+	report.Items = append(report.Items, ReportedItem{
+		TurnID: it.TurnID, Custodian: it.CustodianID, RecordedAt: it.RecordedAt,
+		AlreadyExpired: time.Now().After(it.ExpiresAt), ExpiresAt: it.ExpiresAt,
+		Versions: len(protect), PartiallyDisposed: true, MissingVersions: missing,
+	})
+	return nil
+}
+
+// protectForHold is the two-phase protection establishment for one exact
+// version set on behalf of one hold: protection intent (claims) is
+// committed durably BEFORE the native mutation - if the process dies after
+// SetLegalHold but before the claim ledger commits, the native protection
+// would be ON with no ledger entry able to find and eventually clear it
+// (an unbounded retention leak). With pending claims committed first, a
+// crash converges: recovery re-establishes (the claims are re-protected
+// idempotently) or a release reconcile clears them. The native mutation
+// and its readback run under the tenant protection fence, and the fence
+// transaction re-loads the hold's state first: a hold released between the
+// two phases never has its claims re-set natively (adversarial review).
+func (s *Service) protectForHold(ctx context.Context, h *Hold, refs []VersionRef, report *Report) error {
+	if err := s.withProtection(ctx, h.TenantID, func(tx pgx.Tx) error {
+		for _, r := range refs {
+			if err := UpsertClaim(ctx, tx, h.TenantID, h.ID, r); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return s.withProtection(ctx, h.TenantID, func(tx pgx.Tx) error {
+		current, err := holdOfTx(ctx, tx, h.TenantID, h.ID)
+		if err != nil {
+			return err
+		}
+		// The hold's state may have PROGRESSED legitimately between the
+		// two phases (pending -> effective by a concurrent idempotent
+		// placement of the same hold): the protection owner is unchanged.
+		// Stale means released (claims are being reconciled by the
+		// release) or scope-changed (a newer epoch owns the scope; that
+		// epoch's establishment covers it).
+		if current == nil || current.State == HoldReleased || current.Epoch != h.Epoch {
+			return ErrStaleEstablishment
+		}
+		for _, r := range refs {
+			if s.Hooks.StorageFault != nil {
+				if ferr := s.Hooks.StorageFault("protect"); ferr != nil {
+					return ferr
+				}
+			}
+			if err := s.Storage.SetLegalHold(ctx, r.Key, r.Version, true); err != nil {
+				return fmt.Errorf("protect %s: %w", r.Key, err)
+			}
+			if s.Hooks.StorageFault != nil {
+				if ferr := s.Hooks.StorageFault("readback"); ferr != nil {
+					return ferr
+				}
+			}
+			state, err := s.Storage.LegalHold(ctx, r.Key, r.Version)
+			if err != nil || state != "ON" {
+				return fmt.Errorf("protection readback failed for %s: %v", r.Key, err)
+			}
+			if err := MarkClaimProtected(ctx, tx, h.ID, r); err != nil {
+				return err
+			}
+			report.ProtectedVersions = append(report.ProtectedVersions, r)
+		}
+		return nil
+	})
+}
+
+// retentionIndex loads the tenant's lifecycle catalog as a map. A catalog
+// load failure is an error, never an empty catalog (C07 round-2 finding 1).
+func (s *Service) retentionIndex(ctx context.Context, tenantID string) (map[string]Item, error) {
 	items, err := s.Store.itemsOfTenant(ctx, tenantID)
 	if err != nil {
 		s.logf("records: catalog load: %v", err)
-		return map[string]Item{}
+		return nil, err
 	}
 	out := make(map[string]Item, len(items))
 	for _, it := range items {
 		out[it.TurnID] = it
 	}
-	return out
+	return out, nil
 }
 
 // Release removes the hold's claim, then conservatively clears the storage
@@ -641,55 +826,77 @@ func (s *Service) reconcileClaims(ctx context.Context, h *Hold, actor *string) e
 // requiredVersions maps each claimed version to whether any turn that
 // references it is still required by an active hold (any matter of the
 // tenant: cross-matter references to shared content-addressed versions
-// count). Enumeration is disposal-tolerant, so expired references still
-// fence (C07 review finding 3D).
+// count). The scan runs over the union of live turns and non-disposed
+// catalog records (C07 round-2 finding 1), and reference resolution is
+// fail-closed: a required turn whose reference set cannot be established
+// is an ERROR - the release must never clear protection on unknown
+// references (C07 round-2 finding 3).
 func (s *Service) requiredVersions(ctx context.Context, tx pgx.Tx, tenantID string, claimed map[VersionRef]bool) (map[VersionRef]bool, error) {
 	out := map[VersionRef]bool{}
 	turns, err := s.inventory(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	items := s.retentionIndex(ctx, tenantID)
+	items, err := s.retentionIndex(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	live := map[string]bool{}
 	for _, t := range turns {
-		item, known := items[t.TurnID]
-		if known && item.State == ItemDisposed {
-			continue
+		live[t.TurnID] = true
+	}
+	scan := func(matterID, custodianID string, recordedAt time.Time, turnID string, known bool, state string) error {
+		if known && state == ItemDisposed {
+			return nil
 		}
-		holds, err := ActiveHolds(ctx, tx, tenantID, t.MatterID)
+		holds, err := ActiveHolds(ctx, tx, tenantID, matterID)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		needed := false
 		for _, h := range holds {
 			if h.State == HoldReleased {
 				continue
 			}
-			if Matches(h, t.MatterID, t.CustodianID, t.RecordedAt) {
+			if Matches(h, matterID, custodianID, recordedAt) {
 				needed = true
 				break
 			}
 		}
 		if !needed {
+			return nil
+		}
+		refs, res, rerr := s.turnReferenceSet(ctx, tenantID, turnID)
+		switch res {
+		case refSetVerified, refSetPlan:
+			for _, r := range refs {
+				if claimed[VersionRef(r)] {
+					out[VersionRef(r)] = true
+				}
+			}
+			return nil
+		case refSetAbsent:
+			return nil
+		default:
+			// Unverifiable enumeration of a REQUIRED turn: never clear
+			// protection on unknown references.
+			return fmt.Errorf("records: required-version scan: turn %s: %w", turnID, rerr)
+		}
+	}
+	for _, t := range turns {
+		item, known := items[t.TurnID]
+		if err := scan(t.MatterID, t.CustodianID, t.RecordedAt, t.TurnID, known, item.State); err != nil {
+			return nil, err
+		}
+	}
+	// Non-live, non-disposed catalog records still reference their
+	// remaining planned versions: expiry-tolerant, plan-backed fencing.
+	for _, it := range items {
+		if live[it.TurnID] || it.State == ItemDisposed {
 			continue
 		}
-		refs, err := s.disposalRefs(ctx, tenantID, t.TurnID)
-		if err != nil && !errors.Is(err, evidence.ErrNotFound) {
-			// Unverifiable enumeration of a REQUIRED turn: fall back to the
-			// namespace enumeration. If even that is unavailable, fail
-			// closed (a release must never clear protection on unknown
-			// references).
-			fallback, ferr := s.namespaceRefs(ctx, tenantID, t.TurnID)
-			if ferr != nil {
-				return nil, fmt.Errorf("records: required-version scan: turn %s: %w (fallback: %v)", t.TurnID, err, ferr)
-			}
-			refs = fallback
-		} else if errors.Is(err, evidence.ErrNotFound) {
-			continue
-		}
-		for _, r := range refs {
-			if claimed[VersionRef(r)] {
-				out[VersionRef(r)] = true
-			}
+		if err := scan(it.MatterID, it.CustodianID, it.RecordedAt, it.TurnID, true, it.State); err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
@@ -707,7 +914,11 @@ func (s *Service) Inventory(ctx context.Context, p store.Principal) ([]evidence.
 // Sweep marks eligible items disposal_pending with the verified terminal
 // capture state required for disposal eligibility: an admitted, actively
 // executing turn is never swept, and a turn whose terminal state cannot be
-// verified fails closed (C07 review finding 6A).
+// verified fails closed (C07 review finding 6A). The sweep covers the
+// union of live inventory turns and ACTIVE catalog records whose live
+// enumeration root is gone (a partially disposed record restored to active
+// stays disposable through its durable catalog identity - C07 round-2
+// finding 4).
 func (s *Service) Sweep(ctx context.Context, p store.Principal) (int, error) {
 	p, ok := canonP(p)
 	if !ok {
@@ -716,6 +927,23 @@ func (s *Service) Sweep(ctx context.Context, p store.Principal) (int, error) {
 	turns, err := s.inventory(ctx, p.TenantID)
 	if err != nil {
 		return 0, err
+	}
+	live := map[string]bool{}
+	for _, t := range turns {
+		live[t.TurnID] = true
+	}
+	items, err := s.Store.itemsOfTenant(ctx, p.TenantID)
+	if err != nil {
+		return 0, err
+	}
+	for _, it := range items {
+		if live[it.TurnID] || it.State != ItemActive {
+			continue
+		}
+		turns = append(turns, evidence.TurnIdentity{
+			TenantID: it.TenantID, ProjectID: it.ProjectID, MatterID: it.MatterID,
+			CustodianID: it.CustodianID, TurnID: it.TurnID, RecordedAt: it.RecordedAt,
+		})
 	}
 	policy, err := s.Store.Policy(ctx, p.TenantID)
 	if err != nil {

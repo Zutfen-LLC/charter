@@ -688,19 +688,21 @@ func (b *RetentionBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnI
 // (event slots and data events) plus the object versions referenced by the
 // still-decodable slots, WITHOUT chain verification. See the interface
 // comment in inventory.go: this is the shared-reference scan's fallback for
-// a sibling whose verified enumeration is unavailable. Versions that are
-// listed but unreadable are still included (a listed version under the
-// turn's namespace is one of its versions); the object references of a slot
-// that can no longer be decoded are unknowable and excluded - such a slot's
-// chain is already broken, so its objects are unreachable through the turn's
-// serving path regardless.
-func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turnID string) ([]VersionRef, error) {
+// a sibling whose verified enumeration is unavailable.
+//
+// The result is classified for completeness (C07 round-2 finding 3): a
+// listed slot whose read fails (other than mid-deletion absence), whose
+// signed candidate cannot be verified, whose key holds only delete
+// markers, or a hole in the listed slot sequence, all mean the turn's true
+// reference set is a strict superset of the returned one (unknown object
+// references). An unreadable reference is never treated as an absent one.
+func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turnID string) (NamespaceEnumeration, error) {
 	if !idRe.MatchString(tenantID) || !idRe.MatchString(turnID) {
-		return nil, ErrNotFound
+		return NamespaceEnumeration{}, ErrNotFound
 	}
 	refs, err := b.store.Versions(ctx, b.prefix+tenantID+"/")
 	if err != nil {
-		return nil, err
+		return NamespaceEnumeration{}, err
 	}
 	out := map[VersionRef]bool{}
 	add := func(key, version string) {
@@ -709,23 +711,47 @@ func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turn
 		}
 		out[VersionRef{Key: key, Version: version}] = true
 	}
+	complete := true
 	slotRoot := b.prefix + tenantID + "/events/" + turnID + "/"
 	dataRoot := b.prefix + tenantID + "/data/events/" + turnID + "/"
+	seqs := map[uint64]bool{}
+	decoded := map[uint64]bool{}
 	for _, r := range refs {
 		switch {
 		case strings.HasPrefix(r.Key, slotRoot):
+			s := strings.TrimPrefix(r.Key, slotRoot)
+			seq, serr := strconv.ParseUint(s, 10, 53)
+			if serr != nil || strconv.FormatUint(seq, 10) != s {
+				return NamespaceEnumeration{}, ErrConflict
+			}
+			seqs[seq] = true
 			if r.DeleteMarker {
+				// Only delete markers remain listed under this slot key:
+				// the slot's data version is gone, so its object
+				// references are unknown - never silently absent.
+				complete = false
 				continue
 			}
 			add(r.Key, r.VersionID)
 			v, err := b.store.Read(ctx, r.Key, r.VersionID)
 			if err != nil {
-				continue
+				if errors.Is(err, s3transport.ErrObjectAbsent) {
+					// Listed but gone (mid-deletion): this slot's object
+					// references are unknowable.
+					complete = false
+					continue
+				}
+				return NamespaceEnumeration{}, err
 			}
 			c, err := decodeSignedCandidate(v.Data, b.trustedKey)
 			if err != nil || c.Turn != turnID || c.Tenant != tenantID {
+				// A live, readable slot whose candidate cannot be verified
+				// (invalid signed metadata): its object references are
+				// unknown - never silently absent.
+				complete = false
 				continue
 			}
+			decoded[seq] = true
 			add(c.Event.Key, c.Event.Version)
 			for _, o := range c.Objects {
 				add(o.Key, o.Version)
@@ -736,15 +762,30 @@ func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turn
 			}
 		}
 	}
+	if len(seqs) > 0 {
+		// A hole in the listed slot sequence: the missing slots' object
+		// references are unknown.
+		maxSeq := uint64(0)
+		for seq := range seqs {
+			if seq > maxSeq {
+				maxSeq = seq
+			}
+		}
+		for i := uint64(1); i <= maxSeq; i++ {
+			if !seqs[i] || !decoded[i] {
+				complete = false
+			}
+		}
+	}
 	if len(out) == 0 {
-		return nil, ErrNotFound
+		return NamespaceEnumeration{}, ErrNotFound
 	}
 	res := make([]VersionRef, 0, len(out))
 	for r := range out {
 		res = append(res, r)
 	}
 	sort.Slice(res, func(i, j int) bool { return res[i].Key < res[j].Key })
-	return res, nil
+	return NamespaceEnumeration{Refs: res, Complete: complete}, nil
 }
 
 // TurnVersionRefs enumerates the exact versions that make up one turn with
