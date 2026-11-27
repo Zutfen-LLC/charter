@@ -53,6 +53,9 @@ type fakeBackend struct {
 	// namespace fallback still enumerates completely - the round-3
 	// finding-1 shape where the fallback alone decides the reference set.
 	chainConflict map[string]bool
+	// chainAmbiguous: two admissions claim the same turn - the reference
+	// identity is ambiguous (unknown, never complete or absent).
+	chainAmbiguous map[string]bool
 	storage          *fakeStorage // deletion cross-check for the walk
 }
 
@@ -65,7 +68,7 @@ type fakeCommit struct {
 }
 
 func newFakeBackend() *fakeBackend {
-	return &fakeBackend{turns: map[string][]evidence.TurnIdentity{}, refs: map[string][]evidence.VersionRef{}, commits: map[string][]fakeCommit{}, missing: map[string]bool{}, noRefs: map[string]bool{}, failEnum: map[string]error{}, expired: map[string]bool{}, nonterminal: map[string]bool{}, namespaceFail: map[string]bool{}, namespaceCorrupt: map[string]bool{}, chainConflict: map[string]bool{}}
+	return &fakeBackend{turns: map[string][]evidence.TurnIdentity{}, refs: map[string][]evidence.VersionRef{}, commits: map[string][]fakeCommit{}, missing: map[string]bool{}, noRefs: map[string]bool{}, failEnum: map[string]error{}, expired: map[string]bool{}, nonterminal: map[string]bool{}, namespaceFail: map[string]bool{}, namespaceCorrupt: map[string]bool{}, chainConflict: map[string]bool{}, chainAmbiguous: map[string]bool{}}
 }
 
 // addCommitTurn registers a turn with an explicit commit chain so the
@@ -182,6 +185,12 @@ func (b *fakeBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnID str
 		}
 	}
 	out := []evidence.VersionRef{commits[0].slot}
+	// The admission commit's event data and input objects are part of the
+	// turn's exact version set (the real walk adds them at sequence 0).
+	if commits[0].event != nil {
+		out = append(out, *commits[0].event)
+	}
+	out = append(out, commits[0].objects...)
 	for _, c := range commits[1:] {
 		if gone(c.slot) {
 			break

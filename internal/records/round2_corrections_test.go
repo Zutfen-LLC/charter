@@ -19,12 +19,16 @@ import (
 // TurnNamespaceRefs mirrors the retained backend's namespace fallback
 // enumeration: every version listed under the turn's own namespaces (event
 // slots, data events) plus the object versions of its still-decodable slot
-// commits, WITHOUT chain verification, with completeness classification: a
-// listed slot marker whose read fails (namespaceFail) or whose candidate
-// cannot be verified (namespaceCorrupt) makes the enumeration INCOMPLETE -
-// its references are unknown, never silently absent. A GONE slot (its
-// version deleted) is a deleted slot: the remaining references enumerate
-// completely.
+// commits AND its admission marker's sequence-0 references (the admission
+// commit is the only place a turn's input objects are referenced - C07
+// round-3 finding 1), WITHOUT chain verification, with completeness
+// classification: a listed slot marker whose read fails (namespaceFail) or
+// whose candidate cannot be verified (namespaceCorrupt) makes the
+// enumeration INCOMPLETE - its references are unknown, never silently
+// absent. A GONE slot (its version deleted) is a deleted slot: the
+// remaining references enumerate completely. A GONE admission (its marker
+// deleted) is a deleted root - the durable disposal plan governs the turn
+// - so the remaining references enumerate completely for it too.
 func (b *fakeBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turnID string) (evidence.NamespaceEnumeration, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -37,9 +41,34 @@ func (b *fakeBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turnID st
 	gone := func(r evidence.VersionRef) bool {
 		return b.storage != nil && b.storage.isDeleted(r.Key, r.Version)
 	}
+	if b.chainAmbiguous[turnID] {
+		// Two admissions claim the same turn: the reference identity is
+		// ambiguous - unknown, never complete or absent.
+		complete = false
+	}
+	if !gone(commits[0].slot) && !b.chainAmbiguous[turnID] {
+		// The admission marker is present and verifiable: its slot, its
+		// event data and its content-addressed input objects are part of
+		// the turn's reference set (finding 1).
+		out = append(out, commits[0].slot)
+		if b.namespaceFail[turnID] || b.namespaceCorrupt[turnID] {
+			// Unreadable or unverifiable admission marker: its references
+			// are unknown.
+			complete = false
+		} else {
+			if commits[0].event != nil && !gone(*commits[0].event) {
+				out = append(out, *commits[0].event)
+			}
+			for _, o := range commits[0].objects {
+				if !gone(o) {
+					out = append(out, o)
+				}
+			}
+		}
+	}
 	for i, c := range commits {
 		if i == 0 {
-			continue // the namespace walk has no admission root
+			continue // the admission was handled above
 		}
 		if gone(c.slot) {
 			// A deleted slot: its references are unknowable through any

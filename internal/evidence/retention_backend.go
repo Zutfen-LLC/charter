@@ -728,6 +728,21 @@ func (b *RetentionBackend) TurnDisposalRefs(ctx context.Context, tenantID, turnI
 // comment in inventory.go: this is the shared-reference scan's fallback for
 // a sibling whose verified enumeration is unavailable.
 //
+// The turn's ADMISSION MARKER is enumerated too (C07 round-3 finding 1):
+// the admission commit is the only place a turn's input objects are
+// referenced (sequence-0 content-addressed receipts), so a fallback set
+// that excludes it silently authorizes the deletion of a surviving turn's
+// admission-only evidence by the disposal of another record referencing
+// the same exact object version. The admission is enumerated with full
+// signature and coordinate verification; an ADMISSION THAT IS PRESENT but
+// unreadable, unverifiable or AMBIGUOUS (more than one admission claiming
+// the same turn) makes the enumeration INCOMPLETE: its references are
+// unknown, and unknown reference identity is never classified as complete
+// or absent. An admission that is GONE (its key is not listed, or only
+// deleted versions remain) is a deleted root: the turn's disposal plan
+// governs it (the plan is consulted before this fallback) and the
+// enumeration of the remaining references stays complete for them.
+//
 // The result is classified for completeness (C07 round-2 finding 3). A
 // listed slot that is READABLE but whose signed candidate cannot be
 // verified makes the enumeration INCOMPLETE: its object references are
@@ -756,6 +771,51 @@ func (b *RetentionBackend) TurnNamespaceRefs(ctx context.Context, tenantID, turn
 		out[VersionRef{Key: key, Version: version}] = true
 	}
 	complete := true
+	// The turn's admission markers, verified by signature and coordinates.
+	// A present-but-unverifiable or ambiguous admission makes the reference
+	// set UNKNOWN (incomplete); a gone admission is a deleted root (the
+	// plan governs the turn).
+	admissions := 0
+	for _, r := range refs {
+		p := strings.Split(strings.TrimPrefix(r.Key, b.prefix), "/")
+		if len(p) < 2 || p[1] != "admissions" {
+			continue
+		}
+		if len(p) != 3 || !idRe.MatchString(p[0]) || !validRetainedDigest(p[2]) {
+			return NamespaceEnumeration{}, ErrConflict
+		}
+		ent, serr := b.slotRelaxed(ctx, r.Key, refs)
+		if errors.Is(serr, ErrNotFound) {
+			// The admission marker is deleted (mid-deletion turn): the
+			// durable disposal plan governs the turn's versions; the
+			// remaining references are the best available truth.
+			continue
+		}
+		if serr != nil {
+			return NamespaceEnumeration{}, serr
+		}
+		c := ent.commit
+		if c.Turn != turnID {
+			continue
+		}
+		if c.Tenant != tenantID || c.Seq != 0 || c.Admission == nil || r.Key != b.prefix+c.Tenant+"/admissions/"+c.Admission.IdempotencyDigest {
+			// A malformed or foreign admission claiming this turn is a
+			// namespace integrity violation: fail closed.
+			return NamespaceEnumeration{}, ErrConflict
+		}
+		admissions++
+		if admissions > 1 {
+			// Two admissions claim the same turn: the reference identity is
+			// ambiguous - unknown, never complete or absent.
+			complete = false
+			continue
+		}
+		add(r.Key, ent.marker.Version)
+		add(c.Event.Key, c.Event.Version)
+		for _, o := range c.Objects {
+			add(o.Key, o.Version)
+		}
+	}
 	slotRoot := b.prefix + tenantID + "/events/" + turnID + "/"
 	dataRoot := b.prefix + tenantID + "/data/events/" + turnID + "/"
 	for _, r := range refs {
