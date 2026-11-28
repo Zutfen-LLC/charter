@@ -1011,6 +1011,23 @@ func (s *Store) itemsOf(ctx context.Context, q queryRunner, tenantID string) ([]
 	return scanItems(rows, err)
 }
 
+// itemOf loads ONE turn's lifecycle catalog record. The runner is the
+// caller's connection (an open transaction reuses its own connection - see
+// planOf); known=false when the turn is not in the catalog.
+func (s *Store) itemOf(ctx context.Context, q queryRunner, tenantID, turnID string) (Item, bool, error) {
+	rows, err := q.Query(ctx, `SELECT tenant_id::text, turn_id::text, matter_id::text, project_id::text, custodian_id::text,
+		recorded_at, retention_expires_at, state, observed_epoch, pending_since, sweep_by::text, purge_by::text, tombstoned_at, purged_at
+		FROM retention_items WHERE tenant_id=$1 AND turn_id=$2`, tenantID, turnID)
+	items, err := scanItems(rows, err)
+	if err != nil {
+		return Item{}, false, err
+	}
+	if len(items) == 0 {
+		return Item{}, false, nil
+	}
+	return items[0], true, nil
+}
+
 // queryRunner is the read subset shared by the pool and an open
 // transaction, so in-transaction helpers can reuse the transaction's
 // connection (see planOf).
@@ -1803,6 +1820,16 @@ func (s *Store) SetRepairState(ctx context.Context, tenantID, holdID string, pen
 	h, err := loadHold(ctx, tx, holdID)
 	if err != nil {
 		return false, err
+	}
+	// Round-4 finding 3: repair results describe an EFFECTIVE hold's
+	// coverage obligations. A hold released or transitioned after
+	// recovery's effective listing but before this write has no repair
+	// obligation: publishing stale effective-hold repair results after a
+	// release would misrepresent the lifecycle state (the released hold's
+	// claims were reconciled by the release). The row is already locked FOR
+	// UPDATE, so the lifecycle-state verification is atomic with the write.
+	if h.State != HoldEffective {
+		return false, nil
 	}
 	if repairErr == h.Report.RepairError && sameStringSet(pending, h.Report.RepairPending) {
 		// Unchanged repair state: an idempotent no-op.

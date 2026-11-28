@@ -275,7 +275,10 @@ func clean(err error) error {
 	if errors.As(err, &r) {
 		switch r.HTTPStatusCode() {
 		case 404:
-			return &Error{"not found"}
+			// The canonical absent sentinel (same identity as Head's and
+			// DeleteVersion's), so a 404 from ANY operation is verifiable
+			// absence - callers can errors.Is it instead of string-matching.
+			return ErrObjectAbsent
 		case 401, 403:
 			return &Error{"access denied"}
 		case 409, 412:

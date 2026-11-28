@@ -21,6 +21,46 @@ type TurnInventory interface {
 	InventoryTurns(ctx context.Context, tenantID string) ([]TurnIdentity, error)
 }
 
+// AdmissionGap names one admitted turn whose admission marker SURVIVES while
+// its event-zero identity bytes are verifiably gone (an interrupted disposal
+// whose admission stayed protected while the deletion loop deleted the
+// event-zero data): the turn's identity is not resolvable from live storage
+// alone, and the reconciling caller resolves it from durable lifecycle state.
+type AdmissionGap struct {
+	// TenantID, ProjectID and TurnID are the admission commit's verified
+	// coordinates (the signed admission marker names them exactly).
+	TenantID, ProjectID, TurnID string
+	// AdmissionKey and AdmissionVersion identify the surviving admission
+	// marker version itself.
+	AdmissionKey, AdmissionVersion string
+	// Err is the verified identity-loss cause (ErrObjectAbsent for a
+	// deleted event-zero version).
+	Err error
+}
+
+// TurnInventoryGaps is implemented by backends that can enumerate the live
+// inventory while separating admission gaps from hard failures: identities
+// are returned WITHOUT the gap turns (a gap turn's coverage, fencing and
+// disposal are governed by its durable disposal plan and lifecycle catalog),
+// and each gap is reported for durable reconciliation. Hard identity
+// failures (corrupt, ambiguous, transient) still fail the whole inventory.
+type TurnInventoryGaps interface {
+	InventoryTurnsWithGaps(ctx context.Context, tenantID string) (identities []TurnIdentity, gaps []AdmissionGap, err error)
+}
+
+// TurnsInventory returns the inventory when the backend implements it.
+func TurnsInventory(b Backend) (TurnInventory, bool) {
+	i, ok := b.(TurnInventory)
+	return i, ok
+}
+
+// GapTolerantInventory returns the gap-separating inventory when the backend
+// implements it.
+func GapTolerantInventory(b Backend) (TurnInventoryGaps, bool) {
+	g, ok := b.(TurnInventoryGaps)
+	return g, ok
+}
+
 // VersionRef is one exact object version of the retained namespace.
 type VersionRef struct{ Key, Version string }
 
@@ -29,12 +69,6 @@ type VersionRef struct{ Key, Version string }
 // content-addressed objects) that make up one turn.
 type TurnVersions interface {
 	TurnVersionRefs(ctx context.Context, tenantID, turnID string) ([]VersionRef, error)
-}
-
-// TurnsInventory returns the inventory when the backend implements it.
-func TurnsInventory(b Backend) (TurnInventory, bool) {
-	i, ok := b.(TurnInventory)
-	return i, ok
 }
 
 // VersionsOf returns the version enumerator when the backend implements it.

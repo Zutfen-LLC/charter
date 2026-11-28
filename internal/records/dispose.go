@@ -205,7 +205,7 @@ func (s *Service) verifyPlanVersions(ctx context.Context, plan []PlanRow) (map[s
 // and non-disposed catalog records, so a record whose live root is gone
 // still fences through its durable plan.
 func (s *Service) sharedReferences(ctx context.Context, tx pgx.Tx, it Item) (map[VersionRef]bool, error) {
-	turns, err := s.inventory(ctx, it.TenantID)
+	turns, err := s.inventory(ctx, tx, it.TenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -219,16 +219,29 @@ func (s *Service) sharedReferences(ctx context.Context, tx pgx.Tx, it Item) (map
 	for _, t := range turns {
 		live[t.TurnID] = true
 	}
-	mine, err := s.disposalRefs(ctx, it.TenantID, it.TurnID)
-	if err != nil {
-		planRefs := s.planRefs(ctx, tx, it)
-		if len(planRefs) > 0 {
+	// Round-4 finding 1 (CRITICAL): the exact version set evaluated for
+	// shared-reference protection must COVER the deleter's version set -
+	// the durable disposal plan's outstanding rows. A live enumeration that
+	// SUCCEEDS can still be TRUNCATED (a deleted suffix shrinks the
+	// contiguity horizon), so it is UNIONED with the plan's outstanding
+	// versions and never allowed to shrink the evaluation below what the
+	// durable plan knows: a truncated live enumeration must never override
+	// known durable references.
+	mine, enumErr := s.disposalRefs(ctx, it.TenantID, it.TurnID)
+	if plan, perr := s.Store.planOf(ctx, tx, it.TenantID, it.TurnID); perr == nil && len(plan) > 0 {
+		outstanding := planOutstanding(plan)
+		switch {
+		case enumErr != nil && len(outstanding) > 0:
 			// The enumeration root may already be gone mid-plan; the plan
 			// remains the authoritative version set.
-			mine = planRefs
-		} else {
-			return nil, err
+			mine = outstanding
+		case enumErr == nil && len(outstanding) > 0:
+			mine = unionRefs(mine, outstanding)
+		case enumErr != nil:
+			return nil, enumErr
 		}
+	} else if enumErr != nil {
+		return nil, enumErr
 	}
 	own := map[VersionRef]bool{}
 	for _, r := range mine {
@@ -277,19 +290,6 @@ func (s *Service) sharedReferences(ctx context.Context, tx pgx.Tx, it Item) (map
 		}
 	}
 	return shared, nil
-}
-
-// planRefs projects the turn's disposal plan as its exact version set.
-func (s *Service) planRefs(ctx context.Context, q queryRunner, it Item) []evidence.VersionRef {
-	plan, err := s.Store.planOf(ctx, q, it.TenantID, it.TurnID)
-	if err != nil {
-		return nil
-	}
-	var out []evidence.VersionRef
-	for _, r := range plan {
-		out = append(out, evidence.VersionRef{Key: r.Key, Version: r.Version})
-	}
-	return out
 }
 
 // Recover reconciles every incomplete or ambiguous lifecycle operation from
@@ -370,7 +370,12 @@ func (s *Service) Recover(ctx context.Context) error {
 	}
 	// 2. Outstanding protection claims of EVERY hold (released holds and
 	// narrowed scopes alike): cleanup converges from the durable claim
-	// ledger, with recovery attribution.
+	// ledger, with recovery attribution. A hold with ZERO ledger claims is
+	// exactly the state whose stale report must converge (round-4 finding
+	// 3): the cleanup report is refreshed from the committed ownership
+	// ledger whether or not claims remain, so verified clearance is always
+	// published and a stale release_cleanup_pending can never outlive the
+	// claims it described.
 	holds, err := s.Store.HoldsInState(ctx, HoldPending, HoldFailed, HoldEffective, HoldReleased)
 	if err != nil {
 		return err
@@ -381,16 +386,13 @@ func (s *Service) Recover(ctx context.Context) error {
 			s.logf("records: recover claims of hold %s: %v", h.ID, err)
 			continue
 		}
-		if len(claims) == 0 {
-			continue
-		}
-		if err := s.reconcileClaims(ctx, h, nil); err != nil {
-			s.logf("records: hold %s cleanup still pending: %v", h.ID, err)
-		}
-		if pending, err := s.claimsPending(ctx, h.ID); err == nil {
-			if merr := s.Store.MarkReleaseCleanup(ctx, h.ID, pending); merr != nil {
-				s.logf("records: cleanup recording: %v", merr)
+		if len(claims) > 0 {
+			if err := s.reconcileClaims(ctx, h, nil); err != nil {
+				s.logf("records: hold %s cleanup still pending: %v", h.ID, err)
 			}
+		}
+		if err := s.recordCleanupState(ctx, h); err != nil {
+			s.logf("records: hold %s cleanup report convergence: %v", h.ID, err)
 		}
 	}
 	// 3. Purging items: complete the conditional delete from the durable

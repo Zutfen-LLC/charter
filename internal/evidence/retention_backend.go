@@ -550,13 +550,42 @@ func (b *RetentionBackend) eventZeroIdentity(ctx context.Context, ent retainedEn
 // deliberately NOT required here: the lifecycle must see expired evidence
 // (sweeping and disposing it is its purpose); serving paths keep their own
 // strict durability invariant.
+//
+// This is the STRICT view: an admission whose event-zero identity bytes are
+// verifiably gone (an interrupted disposal whose admission survived
+// protection) is an unresolved turn and fails the inventory. The reconciling
+// caller uses InventoryTurnsWithGaps to separate those turns (round-4
+// finding 2) instead of wedging on them.
 func (b *RetentionBackend) InventoryTurns(ctx context.Context, tenantID string) ([]TurnIdentity, error) {
+	ids, gaps, err := b.InventoryTurnsWithGaps(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if len(gaps) > 0 {
+		// Faithful to the pre-round-4 contract: the identity loss surfaces
+		// as the underlying verified absence, never as silent truncation.
+		return nil, gaps[0].Err
+	}
+	return ids, nil
+}
+
+// InventoryTurnsWithGaps enumerates the tenant's verifiable turn identities
+// and separately reports admission gaps: turns whose admission marker
+// SURVIVES while its event-zero identity bytes are verifiably GONE. A gap
+// turn is omitted from the identities (its exact versions, coverage and
+// fencing are governed by its durable disposal plan and lifecycle catalog);
+// the caller reconciles each gap against durable state and fails closed when
+// the loss is not plan-backed. Any OTHER identity failure - a present but
+// corrupt or unverifiable event-zero payload, an ambiguous admission, a
+// transient read failure - still fails the whole inventory: unknown identity
+// loss is never classified as authorized disposal.
+func (b *RetentionBackend) InventoryTurnsWithGaps(ctx context.Context, tenantID string) ([]TurnIdentity, []AdmissionGap, error) {
 	if !idRe.MatchString(tenantID) {
-		return nil, ErrNotFound
+		return nil, nil, ErrNotFound
 	}
 	refs, err := b.store.Versions(ctx, b.prefix+tenantID+"/")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keys := map[string]bool{}
 	for _, r := range refs {
@@ -565,11 +594,12 @@ func (b *RetentionBackend) InventoryTurns(ctx context.Context, tenantID string) 
 			continue
 		}
 		if len(p) != 3 || !idRe.MatchString(p[0]) || !validRetainedDigest(p[2]) {
-			return nil, ErrConflict
+			return nil, nil, ErrConflict
 		}
 		keys[r.Key] = true
 	}
 	out := make([]TurnIdentity, 0, len(keys))
+	var gaps []AdmissionGap
 	for key := range keys {
 		ent, err := b.slotRelaxed(ctx, key, refs)
 		if errors.Is(err, ErrNotFound) {
@@ -578,16 +608,29 @@ func (b *RetentionBackend) InventoryTurns(ctx context.Context, tenantID string) 
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		id, err := b.eventZeroIdentity(ctx, ent)
 		if err != nil {
-			return nil, err
+			if errors.Is(err, s3transport.ErrObjectAbsent) {
+				// The event-zero DATA version is verifiably gone while the
+				// admission marker survives: an interrupted disposal state
+				// (the production deletion loop continues after
+				// ErrObjectProtected). Reconcilable from durable state -
+				// reported as a gap, never as silent truncation and never
+				// as an inventory-wide failure.
+				gaps = append(gaps, AdmissionGap{
+					TenantID: ent.commit.Tenant, ProjectID: ent.commit.Project, TurnID: ent.commit.Turn,
+					AdmissionKey: key, AdmissionVersion: ent.marker.Version, Err: err,
+				})
+				continue
+			}
+			return nil, nil, err
 		}
 		out = append(out, id)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].TurnID < out[j].TurnID })
-	return out, nil
+	return out, gaps, nil
 }
 
 // TurnDisposalRefs enumerates the exact versions that make up one turn for

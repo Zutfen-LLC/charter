@@ -104,8 +104,25 @@ func (b *fakeBackend) dropTurn(tenantID, turnID string) {
 }
 
 func (b *fakeBackend) InventoryTurns(ctx context.Context, tenantID string) ([]evidence.TurnIdentity, error) {
+	// Strict view, faithful to the real retained backend's contract.
+	ids, gaps, err := b.InventoryTurnsWithGaps(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if len(gaps) > 0 {
+		return nil, gaps[0].Err
+	}
+	return ids, nil
+}
+
+// InventoryTurnsWithGaps mirrors the real backend's gap-separating walk:
+// turns whose admission marker SURVIVES while its event-zero data is
+// verifiably gone are reported as admission gaps and omitted from the
+// identities (round-4 finding 2's interrupted-disposal state).
+func (b *fakeBackend) InventoryTurnsWithGaps(ctx context.Context, tenantID string) ([]evidence.TurnIdentity, []evidence.AdmissionGap, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	var gaps []evidence.AdmissionGap
 	out := make([]evidence.TurnIdentity, 0, len(b.turns[tenantID]))
 	for _, t := range b.turns[tenantID] {
 		commits, ok := b.commits[t.TurnID]
@@ -126,12 +143,17 @@ func (b *fakeBackend) InventoryTurns(ctx context.Context, tenantID string) ([]ev
 			// enumerated admission requires its event-zero bytes. An
 			// admission marker that SURVIVES while its event-zero data was
 			// deleted (an interrupted disposal whose admission stayed
-			// protected) fails the whole inventory (round-4 finding 2).
-			return nil, s3transport.ErrObjectAbsent
+			// protected) is a reconcilable gap, not an inventory failure.
+			gaps = append(gaps, evidence.AdmissionGap{
+				TenantID: t.TenantID, ProjectID: t.ProjectID, TurnID: t.TurnID,
+				AdmissionKey: commits[0].slot.Key, AdmissionVersion: commits[0].slot.Version,
+				Err: s3transport.ErrObjectAbsent,
+			})
+			continue
 		}
 		out = append(out, t)
 	}
-	return out, nil
+	return out, gaps, nil
 }
 
 func (b *fakeBackend) TurnVersionRefs(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, error) {

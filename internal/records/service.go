@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/Zutfen-LLC/charter/internal/evidence"
@@ -94,12 +95,76 @@ func (s *Service) logf(format string, a ...any) {
 	}
 }
 
-func (s *Service) inventory(ctx context.Context, tenantID string) ([]evidence.TurnIdentity, error) {
+// inventory enumerates the tenant's live turns from the authoritative
+// backend. An admission whose event-zero identity bytes are verifiably GONE
+// while the admission marker survives (an interrupted disposal whose
+// admission stayed protected) is NOT a live-enumerable turn: its identity and
+// remaining versions are reconciled from the durable lifecycle catalog and
+// the exact-version disposal plan (round-4 finding 2). Reconciliation fails
+// closed when the loss is not plan-backed - arbitrary missing or unreadable
+// identity bytes are never treated as authorized disposal - so a verified
+// partial disposal never blocks unrelated valid lifecycle operations while
+// an unplanned identity loss keeps refusing them.
+//
+// The runner is the caller's connection: callers executing inside an open
+// transaction pass it so the gap reconciliation's plan and catalog reads
+// reuse the transaction's connection (pool exhaustion under concurrent
+// finishes would otherwise deadlock - C07 round-3 CI follow-up).
+func (s *Service) inventory(ctx context.Context, q queryRunner, tenantID string) ([]evidence.TurnIdentity, error) {
 	inv, ok := evidence.TurnsInventory(s.Backend)
 	if !ok {
 		return nil, errors.New("records: backend cannot enumerate turns")
 	}
-	return inv.InventoryTurns(ctx, tenantID)
+	gaps, gok := evidence.GapTolerantInventory(s.Backend)
+	if !gok {
+		return inv.InventoryTurns(ctx, tenantID)
+	}
+	ids, admissionGaps, err := gaps.InventoryTurnsWithGaps(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range admissionGaps {
+		if gerr := s.reconcileAdmissionGap(ctx, q, tenantID, g); gerr != nil {
+			return nil, gerr
+		}
+		// Plan-backed gap turns are governed by their durable disposal plans
+		// and lifecycle catalogs, not by live enumeration: they are omitted
+		// from the live inventory (the catalog and plan loops of establish,
+		// the shared-reference scan and the required-version scan cover
+		// them; the sweep only marks ACTIVE catalog records).
+	}
+	return ids, nil
+}
+
+// reconcileAdmissionGap verifies that an admission whose event-zero identity
+// bytes are verifiably gone is a PLAN-BACKED interrupted disposal: a durable
+// disposal plan (committed by the authorized disposal lifecycle before any
+// irreversible deletion) and a durable lifecycle catalog record must both
+// exist and bind to the exact tenant, turn and project the surviving
+// admission names. Without that binding the identity loss is unplanned and
+// the operation fails closed (round-4 finding 2).
+func (s *Service) reconcileAdmissionGap(ctx context.Context, q queryRunner, tenantID string, g evidence.AdmissionGap) error {
+	if g.TenantID != tenantID || g.TurnID == "" {
+		return fmt.Errorf("records: inventory: admission gap with foreign coordinates (tenant %q turn %q)", g.TenantID, g.TurnID)
+	}
+	plan, err := s.Store.planOf(ctx, q, tenantID, g.TurnID)
+	if err != nil {
+		return fmt.Errorf("records: turn %s: admission survives but its event-zero identity bytes are gone and the disposal plan cannot be loaded: %w", g.TurnID, err)
+	}
+	if len(plan) == 0 {
+		return fmt.Errorf("records: turn %s: admission survives but its event-zero identity bytes are gone without a durable disposal plan (unplanned identity loss: failing closed)", g.TurnID)
+	}
+	it, known, err := s.Store.itemOf(ctx, q, tenantID, g.TurnID)
+	if err != nil {
+		return fmt.Errorf("records: turn %s: admission gap reconciliation: %w", g.TurnID, err)
+	}
+	if !known {
+		return fmt.Errorf("records: turn %s: no durable lifecycle identity for an admission whose event-zero identity bytes are gone", g.TurnID)
+	}
+	if it.TenantID != g.TenantID || it.TurnID != g.TurnID || (g.ProjectID != "" && g.ProjectID != it.ProjectID) {
+		return fmt.Errorf("records: turn %s: the admission's coordinates disagree with the durable lifecycle catalog", g.TurnID)
+	}
+	return nil
 }
 
 // disposalRefs enumerates the turn's versions for disposal: expired
@@ -152,6 +217,18 @@ const (
 // plan supplies the exact version identity; the namespace fallback is used
 // only when it enumerates COMPLETELY. An unknown reference set is never
 // silently treated as an absent one.
+//
+// Round-4 finding 1: a durable disposal plan remains authoritative
+// throughout interrupted disposal REGARDLESS of whether the live enumeration
+// succeeds - a SUCCEEDED enumeration can be truncated (a deleted suffix
+// shrinks the contiguity horizon), so its result is UNIONED with the plan's
+// outstanding versions and never allowed to override known durable
+// references. The plan's not-yet-dispositioned rows (including
+// physically-deleted-but-undispositioned versions of a rolled-back
+// interrupted deletion) keep fencing until a verified disposition replaces
+// them; rows dispositioned deleted or absent are verifiably gone and are not
+// live references.
+//
 // turnReferenceSet resolves the turn's authoritative reference set. The
 // runner is the caller's connection: callers executing inside an open
 // transaction pass it so the plan lookup reuses the transaction's
@@ -159,24 +236,22 @@ const (
 // deadlock - C07 round-3 CI follow-up).
 func (s *Service) turnReferenceSet(ctx context.Context, q queryRunner, tenantID, turnID string) ([]evidence.VersionRef, refSetResolution, error) {
 	refs, err := s.disposalRefs(ctx, tenantID, turnID)
-	if err == nil {
-		return refs, refSetVerified, nil
-	}
-	// Durable reference information first: a disposal plan committed before
-	// any deletion holds the turn's complete exact-version identity, so
-	// known partial disposal stays recoverable without wedging unrelated
-	// valid operations.
 	if plan, perr := s.Store.planOf(ctx, q, tenantID, turnID); perr == nil && len(plan) > 0 {
-		var out []evidence.VersionRef
-		for _, row := range plan {
-			if row.Disposition == OutcomeDeleted || row.Disposition == OutcomeAbsent {
-				continue // already gone: not a live reference
-			}
-			out = append(out, evidence.VersionRef{Key: row.Key, Version: row.Version})
+		outstanding := planOutstanding(plan)
+		switch {
+		case err == nil && len(outstanding) > 0:
+			// The live enumeration may be truncated: union it with the
+			// durable plan's outstanding versions.
+			return unionRefs(refs, outstanding), refSetVerified, nil
+		case err == nil:
+			// Every planned version is already dispositioned gone: the live
+			// result is the remaining truth.
+			return refs, refSetVerified, nil
+		case len(outstanding) > 0:
+			return outstanding, refSetPlan, nil
 		}
-		if len(out) > 0 {
-			return out, refSetPlan, nil
-		}
+	} else if err == nil {
+		return refs, refSetVerified, nil
 	}
 	enum, nerr := s.namespaceRefs(ctx, tenantID, turnID)
 	if nerr == nil {
@@ -189,6 +264,39 @@ func (s *Service) turnReferenceSet(ctx context.Context, q queryRunner, tenantID,
 		return nil, refSetAbsent, nil
 	}
 	return nil, refSetUnknown, fmt.Errorf("records: turn %s: verified enumeration: %w (namespace: %v)", turnID, err, nerr)
+}
+
+// planOutstanding projects the disposal plan's versions that are not yet
+// verifiably gone: every disposition except deleted/absent. A rolled-back
+// interrupted deletion leaves its physically deleted versions at 'planned' -
+// those durable identities keep fencing (the truncated live enumeration
+// must not override them) until a verified disposition records the loss.
+func planOutstanding(plan []PlanRow) []evidence.VersionRef {
+	var out []evidence.VersionRef
+	for _, row := range plan {
+		switch row.Disposition {
+		case OutcomeDeleted, OutcomeAbsent:
+			continue
+		}
+		out = append(out, evidence.VersionRef{Key: row.Key, Version: row.Version})
+	}
+	return out
+}
+
+// unionRefs merges two reference sets (deterministically ordered by key).
+func unionRefs(a, b []evidence.VersionRef) []evidence.VersionRef {
+	seen := make(map[evidence.VersionRef]bool, len(a)+len(b))
+	out := make([]evidence.VersionRef, 0, len(a)+len(b))
+	for _, set := range [][]evidence.VersionRef{a, b} {
+		for _, r := range set {
+			if !seen[r] {
+				seen[r] = true
+				out = append(out, r)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
 }
 
 // Presence classifies an observation of a turn's exact versions. It exists
@@ -563,7 +671,7 @@ func (s *Service) Place(ctx context.Context, p store.Principal, scope Scope, rea
 // uncovered and block the effective transition.
 func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 	report := Report{ScopeEpoch: h.Epoch}
-	turns, err := s.inventory(ctx, h.TenantID)
+	turns, err := s.inventory(ctx, s.Store.DB, h.TenantID)
 	if err != nil {
 		return report, err
 	}
@@ -617,6 +725,32 @@ func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 		// storage legal hold (flagged as already_expired in the report).
 		var refs []evidence.VersionRef
 		if s.Retained {
+			// Round-4 finding 2: a LIVE turn with a durable disposal plan is
+			// an interrupted (or authorized-but-unfinished) disposal: its
+			// exact-version coverage is established from the plan like any
+			// partially disposed record - every outstanding planned version
+			// is probed, the present ones protected and the verifiably gone
+			// ones reported as partial loss. The live enumeration of such a
+			// turn can be truncated (a deleted suffix), and must never be
+			// silently passed as complete coverage.
+			if plan, perr := s.Store.PlanOf(ctx, h.TenantID, t.TurnID); perr != nil {
+				return report, perr
+			} else if len(plan) > 0 {
+				it := item
+				if !known {
+					var ferr error
+					it, known, ferr = s.Store.itemOf(ctx, s.Store.DB, h.TenantID, t.TurnID)
+					if ferr != nil {
+						return report, ferr
+					}
+				}
+				if known {
+					if cerr := s.coverPlanTurn(ctx, h, it, &report); cerr != nil {
+						return report, cerr
+					}
+					continue
+				}
+			}
 			refs, err = s.disposalRefs(ctx, h.TenantID, t.TurnID)
 			if err != nil || len(refs) == 0 {
 				report.Uncovered = append(report.Uncovered, t.TurnID)
@@ -831,21 +965,43 @@ func (s *Service) Release(ctx context.Context, p store.Principal, holdID, reason
 		if err := s.reconcileClaims(ctx, h, &p.UserID); err != nil {
 			s.logf("records: hold %s release cleanup retry: %v", holdID, err)
 		}
+		// Round-4 finding 3: a retry that CLEARS every claim must converge
+		// the report to the committed ledger (zero outstanding claims),
+		// not return with the stale release_cleanup_pending in place.
+		if err := s.recordCleanupState(ctx, h); err != nil {
+			s.logf("records: hold %s cleanup report convergence: %v", holdID, err)
+		}
 		return s.Store.GetHold(ctx, p, holdID)
 	}
 	if err := s.reconcileClaims(ctx, h, &p.UserID); err != nil {
 		s.logf("records: hold %s release cleanup: %v", holdID, err)
 	}
-	pending, err := s.claimsPending(ctx, h.ID)
-	if err != nil {
-		s.logf("records: hold %s cleanup pending load: %v", holdID, err)
-	}
-	if len(pending) > 0 {
-		if merr := s.Store.MarkReleaseCleanup(ctx, holdID, pending); merr != nil {
-			s.logf("records: cleanup pending recording: %v", merr)
-		}
+	if err := s.recordCleanupState(ctx, h); err != nil {
+		s.logf("records: hold %s cleanup report convergence: %v", holdID, err)
 	}
 	return s.Store.GetHold(ctx, p, holdID)
+}
+
+// recordCleanupState converges the hold's release-cleanup report to the
+// committed ownership ledger (round-4 finding 3): the report is written
+// whenever there is anything to converge - outstanding claims to record, or
+// a stale non-empty pending list to clear (verified clearance). Distinguished
+// states: an empty report with zero ledger claims is VERIFIED clearance; a
+// non-empty report is STILL-REQUIRED protection or an unresolved failure
+// (retryable, conservative: pending means over-protection, never
+// under-protection). The write is a single transaction on the hold row and
+// is idempotent, so an interruption between the native mutation, the ledger
+// commit and this report publication converges on the next release retry or
+// recovery pass.
+func (s *Service) recordCleanupState(ctx context.Context, h *Hold) error {
+	pending, err := s.claimsPending(ctx, h.ID)
+	if err != nil {
+		return err
+	}
+	if len(pending) > 0 || len(h.Report.ReleaseCleanupPending) > 0 {
+		return s.Store.MarkReleaseCleanup(ctx, h.ID, pending)
+	}
+	return nil
 }
 
 // claimsPending projects the hold's outstanding claims as the legacy report
@@ -935,7 +1091,7 @@ func (s *Service) reconcileClaims(ctx context.Context, h *Hold, actor *string) e
 // references (C07 round-2 finding 3).
 func (s *Service) requiredVersions(ctx context.Context, tx pgx.Tx, tenantID string, claimed map[VersionRef]bool) (map[VersionRef]bool, error) {
 	out := map[VersionRef]bool{}
-	turns, err := s.inventory(ctx, tenantID)
+	turns, err := s.inventory(ctx, tx, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -1012,7 +1168,7 @@ func (s *Service) Inventory(ctx context.Context, p store.Principal) ([]evidence.
 	if !ok {
 		return nil, ErrForbidden
 	}
-	return s.inventory(ctx, p.TenantID)
+	return s.inventory(ctx, s.Store.DB, p.TenantID)
 }
 
 // Sweep marks eligible items disposal_pending with the verified terminal
@@ -1028,7 +1184,7 @@ func (s *Service) Sweep(ctx context.Context, p store.Principal) (int, error) {
 	if !ok {
 		return 0, ErrForbidden
 	}
-	turns, err := s.inventory(ctx, p.TenantID)
+	turns, err := s.inventory(ctx, s.Store.DB, p.TenantID)
 	if err != nil {
 		return 0, err
 	}

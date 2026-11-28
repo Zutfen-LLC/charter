@@ -76,7 +76,11 @@ func TestSurvivingAdmissionWithDeletedEventZeroDoesNotWedgeLifecycle(t *testing.
 	if item == nil || !item.PartiallyDisposed || item.MissingVersions < 6 {
 		t.Fatalf("FINDING 2: the interrupted disposal's partial loss is not reported from the durable plan: %+v (want >= 6 missing)", item)
 	}
-	// Exercise release cleanup, recovery and the disposal retry.
+	// Exercise release cleanup, recovery and the disposal retry. The hold
+	// placement restored the interrupted record to ACTIVE (the hold-wins
+	// rule), so ordinary disposal must resume through the ordinary path
+	// after the release: recovery, retention re-expiry, sweep, begin and
+	// finish.
 	if _, err := f.svc.Release(f.ctx(), f.principal("carol"), hc.ID, "release the interrupted record"); err != nil {
 		t.Fatal(err)
 	}
@@ -87,10 +91,17 @@ func TestSurvivingAdmissionWithDeletedEventZeroDoesNotWedgeLifecycle(t *testing.
 		t.Fatalf("FINDING 2: recovery failed over the interrupted disposal: %v", err)
 	}
 	// The original temporary protection is gone (the hold's claims were
-	// reconciled by the releases): ordinary disposal must resume and reach a
-	// verified disposition, and the tenant must not remain wedged.
-	if it := f.itemByID(c); it.State != records.ItemDisposed {
-		t.Fatalf("FINDING 2: the interrupted record's disposal never completed after recovery (state %s)", it.State)
+	// reconciled by the releases): the tenant must not remain wedged.
+	time.Sleep(1100 * time.Millisecond) // retention (1s) re-expires
+	if _, err := f.svc.Sweep(f.ctx(), f.principal("carol")); err != nil {
+		t.Fatalf("FINDING 2: sweep remains wedged after the interrupted record converged: %v", err)
+	}
+	if outcome, err := f.rs.BeginPurge(f.ctx(), f.principal("erin"), c, nil); err != nil || outcome != "purging" {
+		t.Fatalf("FINDING 2: the interrupted record never resumed disposal (begin outcome %s err %v)", outcome, err)
+	}
+	outcome, _, err = f.svc.FinishPurge(f.ctx(), ptrPrincipal(f.principal("erin")), c)
+	if err != nil || outcome != "disposed" {
+		t.Fatalf("FINDING 2: the interrupted record's disposal never completed after recovery (outcome %q err %v)", outcome, err)
 	}
 	if !f.fs.isDeleted(admission.Key, admission.Version) {
 		t.Fatalf("FINDING 2: the admission marker was not deleted by the converged disposal")

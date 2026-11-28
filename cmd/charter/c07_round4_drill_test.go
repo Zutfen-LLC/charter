@@ -548,8 +548,19 @@ func TestC07Round4ReviewDrill(t *testing.T) {
 	}
 	// The interrupted record's disposal completes after the temporary
 	// protection is removed (its own authorized disposal may delete the
-	// shared version only if no live referent remains - f1A3 is live).
+	// shared version only if no live referent remains - f1A3 is live). The
+	// hold placement restored it to ACTIVE (the hold-wins rule), so the
+	// ordinary sweep/begin/finish path resumes it.
 	must(svcRecords.Recover(ctx))
+	time.Sleep(1100 * time.Millisecond) // retention (1s) re-expires
+	if _, serr := svcRecords.Sweep(ctx, officer1); serr != nil {
+		t.Fatal(serr)
+	}
+	if outcome, serr := svcRecords.Store.BeginPurge(ctx, officer2, f1B3, func(context.Context, pgx.Tx, string) (bool, error) {
+		return true, nil
+	}); serr != nil || outcome != "purging" {
+		t.Fatalf("F1c begin: %s %v", outcome, serr)
+	}
 	outcome, _, ferr = svcRecords.FinishPurge(ctx, &officer2, f1B3)
 	if ferr != nil || outcome != "disposed" {
 		t.Fatalf("F1c: the interrupted record's disposal did not complete: outcome %q err %v", outcome, ferr)
@@ -611,8 +622,21 @@ func TestC07Round4ReviewDrill(t *testing.T) {
 		t.Fatal(err)
 	}
 	must(svcRecords.Recover(ctx))
-	if it := itemState(f2C); it != records.ItemDisposed {
-		t.Fatalf("F2 FINDING 2: the interrupted record's disposal never completed after recovery (state %s)", it)
+	// The hold placement restored the interrupted record to ACTIVE (the
+	// hold-wins rule): ordinary disposal resumes through the ordinary path
+	// after the release and retention re-expiry.
+	time.Sleep(1100 * time.Millisecond) // retention (1s) re-expires
+	if _, serr := svcRecords.Sweep(ctx, officer1); serr != nil {
+		t.Fatalf("F2 FINDING 2: sweep remains wedged after the interrupted record converged: %v", serr)
+	}
+	if outcome, serr := svcRecords.Store.BeginPurge(ctx, officer2, f2C, func(context.Context, pgx.Tx, string) (bool, error) {
+		return true, nil
+	}); serr != nil || outcome != "purging" {
+		t.Fatalf("F2 FINDING 2: the interrupted record never resumed disposal (begin outcome %s err %v)", outcome, serr)
+	}
+	outcome, _, ferr = svcRecords.FinishPurge(ctx, &officer2, f2C)
+	if ferr != nil || outcome != "disposed" {
+		t.Fatalf("F2 FINDING 2: the interrupted record's disposal never completed after recovery (outcome %q err %v)", outcome, ferr)
 	}
 	if !gone(f2Admission.Key, f2Admission.Version) {
 		t.Fatal("F2: the admission marker was not deleted by the converged disposal")
