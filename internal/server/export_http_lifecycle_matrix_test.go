@@ -35,17 +35,15 @@ func (p *c08LifecycleProbe) Request(_ context.Context, actor store.Principal, re
 	if p.deny || req.Intent.ProjectID != p.e.p1 || req.Intent.MatterID == "foreign-matter" || containsID(req.Intent.CustodianIDs, p.e.users["bob"]) || !req.Intent.WindowStart.Before(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)) {
 		return records.ExportSummary{}, store.ErrNotFound
 	}
-	if p.requester == "" {
-		p.requester = actor.UserID
-		if err := p.e.st.DB.QueryRow(context.Background(), `SELECT granted_at FROM tenant_roles WHERE tenant_id=$1 AND user_id=$2 AND role=$3`, actor.TenantID, actor.UserID, store.RoleRecordsOfficer).Scan(&p.requesterGrant); err != nil {
-			return records.ExportSummary{}, err
-		}
+	p.requester = actor.UserID
+	if err := p.e.st.DB.QueryRow(context.Background(), `SELECT granted_at FROM tenant_roles WHERE tenant_id=$1 AND user_id=$2 AND role=$3`, actor.TenantID, actor.UserID, store.RoleRecordsOfficer).Scan(&p.requesterGrant); err != nil {
+		return records.ExportSummary{}, err
 	}
 	return records.ExportSummary{ID: "11111111-1111-4111-8111-111111111111", State: records.ExportRequested, SnapshotDigest: strings.Repeat("a", 64)}, nil
 }
 func (p *c08LifecycleProbe) Approve(_ context.Context, actor store.Principal, id, digest string) (records.ExportSummary, error) {
 	p.calls["approve"]++
-	if p.deny || actor.UserID == p.e.users["dave"] {
+	if p.deny || actor.UserID == p.requester {
 		return records.ExportSummary{}, records.ErrExportConflict
 	}
 	var activeGrant time.Time
@@ -174,6 +172,20 @@ func TestC08HTTPExportLifecycleAuthorizationMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	denyNoLeak(approval(), http.StatusForbidden) // stale request remains stale after regrant
+	if err := e.st.SeedRole(ctx, e.tenant, e.users["alice"], store.RoleRecordsOfficer); err != nil {
+		t.Fatal(err)
+	}
+	if rec := request("alice", "combined-approves-other", intent); rec.Code != http.StatusOK {
+		t.Fatalf("other request status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	approveOther := httptest.NewRequest(http.MethodPost, "/v1/exports/"+id+"/approve", strings.NewReader(`{"snapshot_digest":"`+strings.Repeat("a", 64)+`"}`))
+	approveOther.Header.Set("Authorization", "Bearer "+e.idp.Token("sub-dave"))
+	approveOther.Header.Set("Content-Type", "application/json")
+	approveOtherRec := httptest.NewRecorder()
+	e.h.ServeHTTP(approveOtherRec, approveOther)
+	if approveOtherRec.Code != http.StatusOK {
+		t.Fatalf("combined role could not approve another request: %d %q", approveOtherRec.Code, approveOtherRec.Body.String())
+	}
 
 	// Other-tenant reviewer reaches the production route but cannot discover an
 	// export ID; response is 404 without package or manifest metadata.
