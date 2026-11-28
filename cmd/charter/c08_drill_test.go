@@ -238,6 +238,26 @@ func runC08NativeRoutes(t *testing.T, ctx context.Context, c config.Config, owne
 	if verified.Status != exportbundle.Complete || verified.Turns != 1 || files["events/"+excluded+".jsonl"] != nil {
 		t.Fatal("export census or exclusion mismatch")
 	}
+	var manifest struct {
+		CustodyAudit struct {
+			Rows []struct {
+				ID, Action string
+				Actor      string `json:"actor_id"`
+			} `json:"rows"`
+		} `json:"custody_audit"`
+	}
+	must(json.Unmarshal(files["manifest.json"], &manifest))
+	if len(manifest.CustodyAudit.Rows) != 2 {
+		t.Fatal("bundle lacks exact custody projection")
+	}
+	for _, row := range manifest.CustodyAudit.Rows {
+		var id, actor string
+		must(owner.QueryRow(ctx, `SELECT id::text,actor_id::text FROM audit_log
+			WHERE tenant_id=$1 AND detail->>'export_id'=$2 AND action=$3`, tenant, export, row.Action).Scan(&id, &actor))
+		if row.ID != id || row.Actor != actor {
+			t.Fatal("projected custody disagrees with append-only source row")
+		}
+	}
 	refs, err := source.TurnVersionRefs(ctx, tenant, turn)
 	must(err)
 	exact, err := source.LoadExportReadback(ctx, tenant, project, turn, refs)

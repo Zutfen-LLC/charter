@@ -41,6 +41,8 @@ CREATE TABLE scoped_exports (
  CHECK(state<>'ready' OR (approved_at IS NOT NULL AND approver_id IS NOT NULL AND expires_at IS NOT NULL AND manifest_digest IS NOT NULL))
 );
 CREATE INDEX scoped_exports_tenant_state ON scoped_exports(tenant_id,state,created_at);
+CREATE INDEX scoped_export_authority_audit ON audit_log(tenant_id,(detail->>'export_id'),id)
+ WHERE action IN ('export.request','export.approve');
 CREATE FUNCTION scoped_exports_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'scoped export metadata is retained'; END IF;

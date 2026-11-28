@@ -83,13 +83,24 @@ revoked or deleted by Charter.
   and the original event lineage are not deduplicated away.
 
 The manifest binds `schema_version`, `profile`, `export_id`, `snapshot`,
-`scope`, `custody`, `turns`, `objects`, and `gaps`. No unknown fields or extra
+`scope`, `custody`, `turns`, `objects`, and `gaps`. The retained profile also
+requires `custody_audit`. No unknown fields or extra
 files are accepted. `scope` supplies scoped tenant/project/matter IDs,
 explicit custodian allowlist, and half-open UTC `window_start`/`window_end`.
 The time window selects admissions, not the later events of an admitted turn.
 `snapshot` binds `id`, `revision` (decimal matter hold epoch), `captured_at`,
 and `hold_ids`. `custody` binds `requester_id`, `approver_id`, `requested_at`,
-`approved_at`, and `snapshot_id`. The two actors must differ. Values represent
+`approved_at`, and `snapshot_id`.
+`custody_audit` uses `version: scoped_projection_v1` and exactly two `rows`
+in append sequence: `export.request`, then `export.approve`. Each row carries
+decimal `id`, UTC `at`, `action`, `actor_id`, `tenant_id`, `export_id`,
+`snapshot_id`, and the shared `intent_digest`. This is a whitelist projection
+of the append-only journal for this tenant and export, not a raw audit-log
+dump. The projection is read at generation admission. Unrelated payloads and
+free-text reasons are not copied. Publication and retrieval postdate this
+projection; they remain in Charter's journal, not inside the bundle whose
+digest they reference. The independent anchor binds the projection but does
+not let an offline verifier inspect the live journal. The two actors must differ. Values represent
 Charter's control-plane record, not a reviewer attestation or legal finding.
 
 Each turn supplies `turn_id`, `custodian_id`, `recorded_at`, `hold_ids`,

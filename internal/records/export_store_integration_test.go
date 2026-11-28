@@ -127,9 +127,17 @@ func TestScopedExportTransactionalAuthorizationAndPublication(t *testing.T) {
 	if _, err = f.rs.ApproveExport(ctx, f.principal("erin"), f.tenant, req.ID, req.SnapshotDigest, revalidate); err != nil {
 		t.Fatal(err)
 	}
-	_, token, err = f.rs.BeginExport(ctx, f.principal("carol"), f.tenant, req.ID, time.Minute, revalidate)
+	// Unrelated audit records, even with a colliding export_id in a different
+	// tenant, must not enter the immutable request/approval projection.
+	if _, err = f.pool.Exec(ctx, `INSERT INTO audit_log(tenant_id,action,detail) VALUES(gen_random_uuid(),'export.request',jsonb_build_object('export_id',$2::text,'debug','unrelated synthetic details')),($1,'export.retrieve',jsonb_build_object('export_id',$2::text,'debug','unrelated synthetic delivery'))`, f.tenant, req.ID); err != nil {
+		t.Fatal(err)
+	}
+	started, token, err := f.rs.BeginExport(ctx, f.principal("carol"), f.tenant, req.ID, time.Minute, revalidate)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if a := started.CustodyAudit; len(a) != 2 || a[0].Action != "export.request" || a[1].Action != "export.approve" || a[0].ActorID != req.RequesterID || a[1].ActorID != f.u["erin"] || a[0].SnapshotDigest != req.SnapshotDigest || a[1].IntentDigest != req.RequestDigest {
+		t.Fatal("generation did not receive exactly its authoritative custody audit projection")
 	}
 	if _, err = f.pool.Exec(ctx, `CREATE FUNCTION fail_export_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='export.ready' THEN RAISE EXCEPTION 'audit unavailable'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_export_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION fail_export_audit()`); err != nil {
 		t.Fatal(err)

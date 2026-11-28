@@ -140,7 +140,11 @@ func verifyBundle(fs bundleReader, profile, expected string) (Result, error) {
 	if err != nil || !bytes.Equal(raw, canonical) {
 		return bad("integrity", "manifest is not exact canonical JSON")
 	}
-	if err = fields(m, "schema_version", "profile", "export_id", "snapshot", "scope", "custody", "turns", "objects", "gaps"); err != nil {
+	manifestFields := []string{"schema_version", "profile", "export_id", "snapshot", "scope", "custody", "turns", "objects", "gaps"}
+	if profile == evidence.RetentionProfile {
+		manifestFields = append(manifestFields, "custody_audit")
+	}
+	if err = fields(m, manifestFields...); err != nil {
 		return bad("unsupported", err.Error())
 	}
 	if m["schema_version"] != SchemaVersion {
@@ -155,6 +159,11 @@ func verifyBundle(fs bundleReader, profile, expected string) (Result, error) {
 	}
 	if err = validateSnapshot(m["snapshot"], m["scope"], m["custody"]); err != nil {
 		return bad("integrity", err.Error())
+	}
+	if profile == evidence.RetentionProfile {
+		if err = validateCustodyAudit(m); err != nil {
+			return bad("integrity", err.Error())
+		}
 	}
 	expectedFiles := map[string]bool{"manifest.json": true}
 	objects := map[string][]byte{}

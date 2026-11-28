@@ -45,6 +45,7 @@ type ExportSummary struct {
 	CustodianIDs                                                                              []string
 	WindowStart, WindowEnd                                                                    time.Time
 	Reason, State, RequestDigest, SnapshotDigest, ManifestDigest, RequesterRole, ApproverRole string
+	CustodyAudit                                                                              []ExportCustodyAudit
 	Snapshot, Package                                                                         []byte
 	RequesterAt, ApprovedAt, LeaseUntil, ExpiresAt, requesterGrantAt, approverGrantAt         *time.Time
 	ApproverID, AttemptToken                                                                  *string
@@ -247,7 +248,7 @@ func (s *Store) ApproveExport(ctx context.Context, p store.Principal, tenant, id
 		if err != nil {
 			return err
 		}
-		if err = audit(ctx, tx, tenant, &p.UserID, "export.approve", map[string]any{"export_id": id, "snapshot_digest": e.SnapshotDigest}); err != nil {
+		if err = audit(ctx, tx, tenant, &p.UserID, "export.approve", map[string]any{"export_id": id, "snapshot_digest": e.SnapshotDigest, "request_digest": e.RequestDigest}); err != nil {
 			return err
 		}
 		out, err = loadExport(ctx, tx, tenant, id)
@@ -297,6 +298,10 @@ func (s *Store) BeginExport(ctx context.Context, p store.Principal, tenant, id s
 			return err
 		}
 		out, err = loadExport(ctx, tx, tenant, id)
+		if err != nil {
+			return err
+		}
+		out.CustodyAudit, err = loadExportCustodyAudit(ctx, tx, out)
 		return err
 	})
 	return out, token, err

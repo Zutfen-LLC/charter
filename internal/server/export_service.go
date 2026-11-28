@@ -241,12 +241,18 @@ func assembleRetainedDirectory(ctx context.Context, s records.ExportSummary, rea
 		custodians = append(custodians, id)
 	}
 	utc := func(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
+	auditProjection := make([]any, 0, len(s.CustodyAudit))
+	for _, row := range s.CustodyAudit {
+		auditProjection = append(auditProjection, map[string]any{"id": row.ID, "at": utc(row.At), "action": row.Action, "actor_id": row.ActorID, "tenant_id": row.TenantID, "export_id": row.ExportID, "snapshot_id": "sha256:" + row.SnapshotDigest, "intent_digest": "sha256:" + row.IntentDigest})
+	}
 	raw, err := evidence.Canonical(map[string]any{
 		"schema_version": exportbundle.SchemaVersion, "profile": evidence.RetentionProfile, "export_id": s.ID,
 		"snapshot": map[string]any{"id": snapshotID, "revision": strconv.FormatInt(frozen.Epoch, 10), "captured_at": utc(frozen.CustodyAt), "hold_ids": exportStrings(frozen.HoldIDs)},
 		"scope":    map[string]any{"tenant_id": s.TenantID, "project_id": s.ProjectID, "matter_id": s.MatterID, "custodian_ids": custodians, "window_start": utc(s.WindowStart), "window_end": utc(s.WindowEnd)},
 		"custody":  map[string]any{"requester_id": s.RequesterID, "approver_id": *s.ApproverID, "approved_at": utc(*s.ApprovedAt), "requested_at": utc(*s.RequesterAt), "snapshot_id": snapshotID},
 		"turns":    turns, "objects": objs, "gaps": gaps,
+		"custody_audit": map[string]any{"version": "scoped_projection_v1", "rows": auditProjection},
 	})
 	if err != nil {
 		return nil, "", err

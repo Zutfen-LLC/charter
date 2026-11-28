@@ -26,7 +26,7 @@ func TestC08MigrationPreservesC07HeldCatalog(t *testing.T) {
 	}
 	// Remove only C08-owned objects and its ledger row. No CASCADE: an
 	// unexpected predecessor dependency on C08 must fail this fixture.
-	_, err := pool.Exec(ctx, `DROP TABLE scoped_exports; DROP FUNCTION scoped_exports_guard(); DELETE FROM schema_migrations WHERE version='0010_scoped_exports.sql'`)
+	_, err := pool.Exec(ctx, `DROP INDEX scoped_export_authority_audit; DROP TABLE scoped_exports; DROP FUNCTION scoped_exports_guard(); DELETE FROM schema_migrations WHERE version='0010_scoped_exports.sql'`)
 	must(err)
 	st := store.Store{DB: pool}
 	tenant, err := st.CreateTenant(ctx, "https://synthetic.invalid", "c07", "legacy C07")
