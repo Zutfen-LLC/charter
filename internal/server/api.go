@@ -50,6 +50,7 @@ type Auth struct {
 	// Records is the C07 hold/retention lifecycle service; nil keeps the
 	// records routes at 501 after authorization.
 	Records *records.Service
+	Exports ExportAPI
 
 	routes []string // every registered pattern, for tests
 }
@@ -95,8 +96,7 @@ func WithAuth(a *Auth) Option {
 		a.route(mux, "DELETE /v1/artifacts/{id}", a.deleteArtifact)
 		a.route(mux, "DELETE /v1/projects/{pid}", a.admin(a.deleteProject))
 
-		// C07 hold and retention lifecycle (records officers only). Exports
-		// remain #8 and answer 501 after authorization.
+		// C07 hold and retention lifecycle (records officers only).
 		g := a.recordsGuard
 		a.route(mux, "POST /v1/holds", a.role(store.RoleRecordsOfficer, g(a.placeHold)))
 		a.route(mux, "GET /v1/holds", a.role(store.RoleRecordsOfficer, g(a.listHolds)))
@@ -111,8 +111,12 @@ func WithAuth(a *Auth) Option {
 		a.route(mux, "GET /v1/retention/items/{turn}/objects/{sha}", a.role(store.RoleRecordsOfficer, g(a.itemObject)))
 		a.route(mux, "POST /v1/retention/items/{turn}/purge", a.role(store.RoleRecordsOfficer, g(a.purgeBegin)))
 		a.route(mux, "POST /v1/retention/items/{turn}/purge/finish", a.role(store.RoleRecordsOfficer, g(a.purgeFinish)))
-		a.route(mux, "POST /v1/exports", a.role(store.RoleRecordsOfficer, notImplemented))
-		a.route(mux, "POST /v1/exports/{id}/approve", a.role(store.RoleExportReviewer, notImplemented))
+		x := a.exportRoute
+		a.route(mux, "POST /v1/exports", x(store.RoleRecordsOfficer, "request", a.requestExport))
+		a.route(mux, "POST /v1/exports/{id}/approve", x(store.RoleExportReviewer, "approve", a.approveExport))
+		a.route(mux, "POST /v1/exports/{id}/generate", x(store.RoleRecordsOfficer, "generate", a.generateExport))
+		a.route(mux, "GET /v1/exports/{id}/package", x(store.RoleExportReviewer, "retrieve", a.retrieveExport))
+		a.route(mux, "POST /v1/exports/{id}/cancel", x(store.RoleRecordsOfficer, "cancel", a.cancelExport))
 	}
 }
 
