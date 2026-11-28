@@ -271,7 +271,7 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 		t.Errorf("REC-04 required generating state with attempt token; got state=%q token_valid=%v", state4, persistedToken.Valid)
 	}
 	if _, err = export.Generate(ctx, requester, a4.ID); err != nil {
-		t.Fatalf("REC-04 retry: %v", err)
+		t.Errorf("REC-04 retry after persisted readback failure: %v", err)
 	}
 	// REC-05 staged-but-unverified package failure leaves no publication. A
 	// rejected verifier represents the verification boundary transactionally.
