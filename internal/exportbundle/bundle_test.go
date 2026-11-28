@@ -105,8 +105,8 @@ func TestScopeBindsEveryEventAndCustodianTime(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir, anchor := makeCurrentBundle(t)
-			anchor = alterManifest(t, dir, tc.change)
+			dir, _ := makeCurrentBundle(t)
+			anchor := alterManifest(t, dir, tc.change)
 			if _, err := Verify(dir, currentProfile, anchor); err == nil {
 				t.Fatal("scope substitution accepted")
 			}
@@ -159,8 +159,8 @@ func TestRejectSymlinkedBundleAncestorWithValidDigest(t *testing.T) {
 }
 
 func TestObjectLengthBoundBeforeRead(t *testing.T) {
-	dir, anchor := makeCurrentBundle(t)
-	anchor = alterManifest(t, dir, func(m map[string]any) {
+	dir, _ := makeCurrentBundle(t)
+	anchor := alterManifest(t, dir, func(m map[string]any) {
 		m["objects"].([]any)[0].(map[string]any)["bytes"] = json.Number(fmt.Sprint(MaxBundle + 1))
 	})
 	if _, err := Verify(dir, currentProfile, anchor); err == nil {
@@ -193,13 +193,13 @@ func TestRejectHardlinkAndFIFO(t *testing.T) {
 }
 
 func TestRejectUnreferencedObjectEvenWhenManifestListsIt(t *testing.T) {
-	dir, anchor := makeCurrentBundle(t)
+	dir, _ := makeCurrentBundle(t)
 	extra := []byte("unreferenced object")
 	sha := evidence.SHA256(extra)
 	if err := os.WriteFile(filepath.Join(dir, "objects", sha[len("sha256:"):]), extra, 0600); err != nil {
 		t.Fatal(err)
 	}
-	anchor = alterManifest(t, dir, func(m map[string]any) {
+	anchor := alterManifest(t, dir, func(m map[string]any) {
 		entries := m["objects"].([]any)
 		entry := map[string]any{"sha256": sha, "bytes": json.Number(fmt.Sprint(len(extra)))}
 		m["objects"] = append(entries, entry)

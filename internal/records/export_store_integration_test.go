@@ -3,11 +3,13 @@ package records_test
 import (
 	"context"
 	"errors"
+	"strings"
+	"testing"
+	"time"
+
 	"github.com/Zutfen-LLC/charter/internal/records"
 	"github.com/Zutfen-LLC/charter/internal/store"
 	"github.com/jackc/pgx/v5"
-	"testing"
-	"time"
 )
 
 func TestScopedExportTransactionalAuthorizationAndPublication(t *testing.T) {
@@ -58,7 +60,9 @@ func TestScopedExportTransactionalAuthorizationAndPublication(t *testing.T) {
 	if _, err = f.rs.RequestExport(ctx, f.principal("carol"), records.NewExportRequest{RequestID: "matter-export-7", Intent: changed}, snapshot, revalidate); !errors.Is(err, records.ErrExportConflict) {
 		t.Fatalf("changed intent error=%v", err)
 	}
-	_, err = f.rs.ApproveExport(ctx, f.principal("erin"), f.tenant, req.ID, req.SnapshotDigest, revalidate)
+	if _, err = f.rs.ApproveExport(ctx, f.principal("erin"), f.tenant, req.ID, req.SnapshotDigest, revalidate); err != nil {
+		t.Fatalf("independent approval: %v", err)
+	}
 	if _, err = f.rs.ApproveExport(ctx, f.principal("erin"), f.tenant, req.ID, req.SnapshotDigest, revalidate); err != nil {
 		t.Fatalf("same approver replay: %v", err)
 	}
@@ -158,8 +162,30 @@ func TestScopedExportTransactionalAuthorizationAndPublication(t *testing.T) {
 	if string(got) != string(payload) {
 		t.Fatalf("retrieved=%q", got)
 	}
-	if _, err = f.rs.GetApprovedExport(ctx, f.principal("frank"), f.tenant, req.ID, revalidate); !errors.Is(err, records.ErrForbidden) {
-		t.Fatalf("non-approver retrieval=%v", err)
+	if got, err = f.rs.GetApprovedExport(ctx, f.principal("frank"), f.tenant, req.ID, revalidate); !errors.Is(err, records.ErrForbidden) || len(got) != 0 {
+		t.Fatalf("non-approver retrieval disclosed %d bytes, err=%v", len(got), err)
+	}
+	if _, err = f.pool.Exec(ctx, `CREATE FUNCTION fail_retrieval_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='export.retrieve' THEN RAISE EXCEPTION 'synthetic delivery audit unavailable'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_retrieval_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION fail_retrieval_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	reviewer := f.principal("erin")
+	if got, err = f.rs.GetApprovedExport(ctx, reviewer, f.tenant, req.ID, revalidate); err == nil || len(got) != 0 {
+		t.Fatalf("unaudited delivery disclosed %d bytes, err=%v", len(got), err)
+	}
+	if _, err = f.pool.Exec(ctx, `DROP TRIGGER fail_retrieval_audit ON audit_log; DROP FUNCTION fail_retrieval_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.pool.Exec(ctx, `DELETE FROM tenant_roles WHERE tenant_id=$1 AND user_id=$2 AND role='export_reviewer'`, f.tenant, reviewer.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = f.rs.GetApprovedExport(ctx, reviewer, f.tenant, req.ID, revalidate); !errors.Is(err, records.ErrForbidden) || len(got) != 0 {
+		t.Fatalf("revoked reviewer received %d bytes, err=%v", len(got), err)
+	}
+	if err = f.st.SeedRole(ctx, f.tenant, reviewer.UserID, store.RoleExportReviewer); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = f.rs.GetApprovedExport(ctx, reviewer, f.tenant, req.ID, revalidate); !errors.Is(err, records.ErrForbidden) || len(got) != 0 {
+		t.Fatalf("reviewer regrant resurrected delivery, bytes=%d err=%v", len(got), err)
 	}
 	if err = f.rs.CancelExport(ctx, f.principal("carol"), f.tenant, req.ID); err != nil {
 		t.Fatal(err)
@@ -167,5 +193,36 @@ func TestScopedExportTransactionalAuthorizationAndPublication(t *testing.T) {
 	got, err = f.rs.GetApprovedExport(ctx, f.principal("erin"), f.tenant, req.ID, revalidate)
 	if err == nil || got != nil {
 		t.Fatalf("cancelled package returned bytes=%q err=%v", got, err)
+	}
+	for _, name := range []string{"carol", "frank"} {
+		if err := f.st.SeedRole(ctx, f.tenant, f.u[name], store.RoleExportReviewer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	competing, err := f.rs.RequestExport(ctx, f.principal("carol"), records.NewExportRequest{RequestID: "competing-reviewers", Intent: intent}, snapshot, revalidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requester := f.principal("carol")
+	requester.UserID = strings.ToUpper(requester.UserID)
+	if _, err := f.rs.ApproveExport(ctx, requester, f.tenant, competing.ID, competing.SnapshotDigest, revalidate); !errors.Is(err, records.ErrExportConflict) {
+		t.Fatalf("canonicalized requester was not refused own approval: %v", err)
+	}
+	gate := make(chan struct{})
+	done := make(chan error, 2)
+	for _, p := range []store.Principal{reviewer, f.principal("frank")} {
+		go func() {
+			<-gate
+			_, err := f.rs.ApproveExport(ctx, p, f.tenant, competing.ID, competing.SnapshotDigest, revalidate)
+			done <- err
+		}()
+	}
+	close(gate)
+	a, b := <-done, <-done
+	if !((a == nil && errors.Is(b, records.ErrExportConflict)) || (b == nil && errors.Is(a, records.ErrExportConflict))) {
+		t.Fatalf("competing approvals did not serialize: %v; %v", a, b)
+	}
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action='export.approve' AND detail->>'export_id'=$1`, competing.ID).Scan(&approvals); err != nil || approvals != 1 {
+		t.Fatalf("competing approval audit count=%d err=%v", approvals, err)
 	}
 }

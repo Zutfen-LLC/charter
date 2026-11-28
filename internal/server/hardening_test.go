@@ -169,6 +169,7 @@ var expectedRoutes = []string{
 	"PUT /v1/users/{uid}/roles/{role}", "DELETE /v1/users/{uid}/roles/{role}",
 	"POST /v1/users/{uid}/disable",
 	"POST /v1/holds", "POST /v1/holds/{id}/release", "POST /v1/exports", "POST /v1/exports/{id}/approve",
+	"POST /v1/exports/{id}/generate", "GET /v1/exports/{id}/package", "POST /v1/exports/{id}/cancel",
 	"DELETE /v1/artifacts/{id}", "DELETE /v1/projects/{pid}",
 	"GET /v1/holds", "GET /v1/holds/{id}", "PUT /v1/holds/{id}",
 	"POST /v1/retention/policy", "POST /v1/retention/sweep", "GET /v1/retention/items",
