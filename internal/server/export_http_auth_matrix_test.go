@@ -76,8 +76,7 @@ func TestC08HTTPExportAuthRoleMatrix(t *testing.T) {
 		for _, user := range users {
 			t.Run(tc.operation+"/"+user, func(t *testing.T) {
 				before := probe.calls[tc.operation]
-				var body *strings.Reader
-				body = strings.NewReader(tc.body)
+				body := strings.NewReader(tc.body)
 				req := httptest.NewRequest(tc.method, tc.path, body)
 				req.Header.Set("Authorization", "Bearer "+e.idp.Token("sub-"+user))
 				if tc.operation == "request" {
