@@ -1044,14 +1044,19 @@ class GuardedStore(Store):
             if it["state"] == "disposed":
                 report["disposed_before_hold"].append(it["id"])
                 continue
-            if it.get("root_gone"):
+            plan = self.plans.get(it["id"])
+            if it.get("root_gone") or plan:
                 # The live enumeration root is gone (mid-deletion or a
-                # restored record): coverage comes from the DURABLE
-                # DISPOSAL PLAN (partially disposed - the loss is explicit,
-                # the remaining versions are protected), or the record is
-                # unverifiable and blocks the effective transition
-                # (C07 round-2 finding 1).
-                plan = self.plans.get(it["id"])
+                # restored record), OR the record is a LIVE turn with a
+                # durable disposal plan (round-4 finding 2: an interrupted
+                # or authorized-but-unfinished disposal whose live walk can
+                # be TRUNCATED): coverage comes from the DURABLE DISPOSAL
+                # PLAN in both shapes - every outstanding planned version
+                # is probed, the present ones protected and the verifiably
+                # gone ones reported as partial loss, never a truncated
+                # live enumeration silently passed as complete coverage -
+                # or the record is unverifiable and blocks the effective
+                # transition (C07 round-2 finding 1).
                 if not plan:
                     report["uncovered"].append(it["id"])
                     continue
@@ -1095,17 +1100,12 @@ class GuardedStore(Store):
                 report["items"].append(entry)
                 continue
             refs = self.versions_of(it["id"])
-            plan = self.plans.get(it["id"])
             live_refs = []
             for key, version in refs:
                 if (key, version) in self.deleted:
-                    if plan:
-                        # A partially disposed record (a non-empty durable
-                        # plan): the live enumeration is the SURVIVING
-                        # versions (Go's verified walk enumerates the
-                        # existing chain; the plan records the loss as
-                        # missing versions), never an uncoverable hole.
-                        continue
+                    # An unplanned live record with a deleted version is
+                    # unverifiable (planned records are covered from their
+                    # durable plans above).
                     report["uncovered"].append(it["id"])
                     break
                 live_refs.append((key, version))
@@ -1208,14 +1208,33 @@ class GuardedStore(Store):
         marker's sequence-0 content-addressed receipts are part of the
         reference set whenever the admission is present and verifiable,
         so a chain-broken sibling still fences its admission-only shared
-        object."""
-        if not item.get("chain_broken", False):
-            return set(self.versions_of(item["id"]))
+        object.
+
+        Round-4 finding 1: a durable disposal plan remains AUTHORITATIVE
+        throughout interrupted disposal regardless of whether the live
+        enumeration succeeds - a SUCCEEDED enumeration can be truncated
+        (a deleted suffix shrinks the contiguity horizon), so its result
+        is the UNION of the live references and the plan's outstanding
+        rows: a truncated live enumeration never overrides known durable
+        references. Rows already dispositioned deleted or absent are
+        verifiably gone and not live references; a rolled-back
+        interrupted deletion leaves its physically deleted versions
+        undispositioned, and those durable identities keep fencing until
+        a verified disposition records the loss."""
         plan = self.plans.get(item["id"])
         if plan:
-            # Plan-backed partial identity: rows already dispositioned
-            # gone are not live references.
-            return {kv for kv, d in plan.items() if d not in ("deleted", "absent")}
+            # The plan's outstanding rows (not yet verifiably gone).
+            outstanding = {kv for kv, d in plan.items() if d not in ("deleted", "absent")}
+            if not item.get("chain_broken", False):
+                # The verified live walk UNIONED with the plan's
+                # outstanding rows (the Go union of disposalRefs and
+                # planOutstanding).
+                return set(self.versions_of(item["id"])) | outstanding
+            # Chain-broken: the plan supplies the exact identity.
+            if outstanding:
+                return outstanding
+        if not item.get("chain_broken", False):
+            return set(self.versions_of(item["id"]))
         # Namespace fallback (complete, admission-carried references
         # included): the model's versions_of is exactly the full set.
         return set(self.versions_of(item["id"]))
@@ -1360,6 +1379,12 @@ class GuardedStore(Store):
                     # change together, and an UNCHANGED condition is an
                     # idempotent no-op (repeated recovery never
                     # duplicates audit evidence).
+                    # Round-4 finding 3: repair results describe an
+                    # EFFECTIVE hold's coverage obligations; a hold released
+                    # after recovery's listing never publishes stale repair
+                    # state (the Go SetRepairState lifecycle-state guard).
+                    if h["state"] != HOLD_EFFECTIVE:
+                        return
                     if h.get("scope_epoch", 0) != want_epoch:
                         return
                     unchanged = (
@@ -1390,10 +1415,20 @@ class GuardedStore(Store):
                 if h["report"].get("repair_pending") or h["report"].get("repair_error"):
                     _transition_detail = {}
                     _transition([], "", "hold.protection_repair_complete")
-        # 2. Outstanding protection claims of every hold converge.
+        # 2. Outstanding protection claims of every hold converge
+        # (round-4 finding 3): a hold with ZERO ledger claims is exactly
+        # the state whose stale cleanup report must clear - the report is
+        # refreshed from the committed claims ledger whether or not claims
+        # remain, so verified clearance is always published and a stale
+        # release_cleanup_pending can never outlive the claims it
+        # described.
         for hold_id in list(self.holds):
             if self.claims.get(hold_id):
                 self.reconcile_claims(hold_id)
+            else:
+                rep = self.reports.get(hold_id)
+                if isinstance(rep, dict) and rep.get("release_cleanup_pending"):
+                    rep["release_cleanup_pending"] = []
         # 3. Purging items complete from their plans.
         for item_id, it in list(self.items.items()):
             if it["state"] == "purging":
