@@ -106,7 +106,32 @@ func (b *fakeBackend) dropTurn(tenantID, turnID string) {
 func (b *fakeBackend) InventoryTurns(ctx context.Context, tenantID string) ([]evidence.TurnIdentity, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]evidence.TurnIdentity(nil), b.turns[tenantID]...), nil
+	out := make([]evidence.TurnIdentity, 0, len(b.turns[tenantID]))
+	for _, t := range b.turns[tenantID] {
+		commits, ok := b.commits[t.TurnID]
+		if !ok {
+			out = append(out, t)
+			continue
+		}
+		gone := func(r evidence.VersionRef) bool {
+			return b.storage != nil && b.storage.isDeleted(r.Key, r.Version)
+		}
+		if gone(commits[0].slot) {
+			// The admission marker is deleted (mid-deletion turn): the turn
+			// is no longer enumerable from live inventory.
+			continue
+		}
+		if commits[0].event != nil && gone(*commits[0].event) {
+			// Faithful to the real backend's eventZeroIdentity: every
+			// enumerated admission requires its event-zero bytes. An
+			// admission marker that SURVIVES while its event-zero data was
+			// deleted (an interrupted disposal whose admission stayed
+			// protected) fails the whole inventory (round-4 finding 2).
+			return nil, s3transport.ErrObjectAbsent
+		}
+		out = append(out, t)
+	}
+	return out, nil
 }
 
 func (b *fakeBackend) TurnVersionRefs(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, error) {
