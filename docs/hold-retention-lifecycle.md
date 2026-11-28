@@ -170,8 +170,7 @@ and scope change is also fixed).
 - **Coverage is the authoritative union** of the live evidence inventory,
   the durable lifecycle catalog and the durable disposal plans: a matching
   record whose live enumeration root is gone is covered from its plan
-  (reported `partially_disposed` with the storage-verified losses counted
-  and the remaining versions protected); a root-gone record WITHOUT a plan
+  plus any verifiable surviving live references; a root-gone record WITHOUT a plan
   is `uncovered` and blocks the effective transition; a catalog-loading
   error fails the establishment instead of becoming an empty catalog. No
   record is silently omitted because its normal enumeration root is
@@ -299,12 +298,11 @@ and scope change is also fixed).
   the surviving admission names; unplanned identity loss (no plan, no
   catalog binding) still fails closed. Plan-backed gap turns keep the
   full lifecycle operational - hold placement over the interrupted
-  record reports `partially_disposed` with the storage-verified losses
-  counted, hold placement over UNRELATED records is never blocked, and
-  ordinary disposal resumes after release and retention expiry. A LIVE
-  record with a durable disposal plan is covered the same way (from the
-  plan, probing every outstanding version) - a truncated live
-  enumeration is never silently passed as complete coverage. A 404 from
+  record reports verified losses, hold placement over UNRELATED records
+  remains possible, and ordinary disposal resumes after release and
+  retention expiry. A LIVE record with a durable disposal plan uses the
+  same union of live references and outstanding plan rows; a truncated
+  live enumeration never overrides durable references. A 404 from
   any storage read is the canonical `ErrObjectAbsent`, so absence is
   verifiable wherever it is observed.
 - **Release-cleanup reports converge to the committed ownership ledger**
@@ -381,3 +379,28 @@ and scope change is also fixed).
   drill and the qualification report).
 - `pending` holds fence disposal but records-officer content access requires
   a matching hold in any active state; see the role matrix for content scope.
+
+### Plan-backed hold coverage classification
+
+A durable disposal plan authorizes an exact-version inventory. It does
+not prove a delete occurred. Hold placement, scope reestablishment and
+recovery check the union of discoverable live references and outstanding
+plan references; a broken chain uses complete, verifiable surviving
+namespace enumeration. Shared surviving exact versions count as covered,
+not as missing. Every covered surviving version requires native legal-hold
+readback.
+
+- No verified missing version: a normal covered item. The optional
+  `partially_disposed` and `missing_versions` item fields are omitted
+  (false and zero).
+- Both missing and surviving versions: `partially_disposed` identifies
+  the record, `missing_versions` counts exact losses, and `versions`
+  counts protected survivors. Previously dispositioned `deleted` and
+  `absent` rows remain part of the historical loss, counted once.
+- No surviving versions and verified planned loss: `disposed_before_hold`
+  records a complete historical gap, not a covered item with zero versions.
+- An unreadable plan, unknown presence, incomplete surviving references,
+  unplanned loss or failed protection does not acknowledge coverage.
+  A retryable hold still fences disposal. Durable establishment reports
+  describe their scope revision; recovery retries pending or failed
+  establishment and verifies protection for effective holds.

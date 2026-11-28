@@ -67,19 +67,15 @@ type Report struct {
 	ScopeEpoch int64 `json:"scope_epoch,omitempty"`
 	// Turns enumerated in scope at establishment, with per-item outcomes.
 	Items []ReportedItem `json:"items"`
-	// Turn IDs already disposed when the hold was placed.
+	// Historical gaps: catalog-disposed turns, or plan-backed turns with
+	// no surviving exact versions after verified presence classification.
 	DisposedBeforeHold []string `json:"disposed_before_hold"`
 	// Turn IDs in scope whose required versions could not all be verified
 	// as protected (establishment failed for them; the hold is not
 	// effective while any remain).
 	Uncovered []string `json:"uncovered"`
-	// Turn IDs in scope whose exact-version coverage was established from
-	// a partially disposed root (the durable disposal plan): some planned
-	// versions were physically deleted before the hold was placed. The
-	// loss is explicit, the remaining versions are protected like any
-	// other covered record, and these stay distinguishable from
-	// previously disposed records (disposed_before_hold) and from
-	// unverifiable ones (uncovered) - C07 round-2 finding 1.
+	// Plan-backed turns with both verified loss and surviving versions.
+	// Every survivor has verified protection. A plan alone is not loss.
 	PartiallyDisposed []string `json:"partially_disposed,omitempty"`
 	// Versions this hold protected (for release reference counting).
 	ProtectedVersions []VersionRef `json:"protected_versions"`
@@ -114,11 +110,9 @@ type ReportedItem struct {
 	AlreadyExpired bool      `json:"already_expired"`
 	ExpiresAt      time.Time `json:"retention_expires_at"`
 	Versions       int       `json:"versions"`
-	// PartiallyDisposed: this item's coverage was established from a
-	// partially disposed root (its live enumeration root is gone and the
-	// durable disposal plan supplied the exact version identity);
-	// MissingVersions counts its planned versions verified physically gone
-	// before the hold was placed.
+	// PartiallyDisposed requires both verified missing and protected
+	// surviving versions. MissingVersions counts exact planned versions
+	// verified absent or already durably dispositioned deleted/absent.
 	PartiallyDisposed bool `json:"partially_disposed,omitempty"`
 	MissingVersions   int  `json:"missing_versions,omitempty"`
 }

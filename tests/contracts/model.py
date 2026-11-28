@@ -1050,58 +1050,51 @@ class GuardedStore(Store):
                 continue
             plan = self.plans.get(it["id"])
             if it.get("root_gone") or plan:
-                # The live enumeration root is gone (mid-deletion or a
-                # restored record), OR the record is a LIVE turn with a
-                # durable disposal plan (round-4 finding 2: an interrupted
-                # or authorized-but-unfinished disposal whose live walk can
-                # be TRUNCATED): coverage comes from the DURABLE DISPOSAL
-                # PLAN in both shapes - every outstanding planned version
-                # is probed, the present ones protected and the verifiably
-                # gone ones reported as partial loss, never a truncated
-                # live enumeration silently passed as complete coverage -
-                # or the record is unverifiable and blocks the effective
-                # transition (C07 round-2 finding 1).
+                # Intent is not a disposition. The exact-version plan
+                # complements the surviving live reference inventory.
                 if not plan:
                     report["uncovered"].append(it["id"])
                     continue
-                missing, protected = 0, 0
-                failed = False
-                for (key, version), d in sorted(plan.items()):
-                    if d in ("deleted", "absent"):
-                        # A durable record of loss is a loss: previously
-                        # dispositioned plan rows count as missing
-                        # versions (independent-review follow-up, Go
-                        # parity), never as intactness.
-                        missing += 1
-                        continue
-                    if (key, version) in self.deleted:
-                        # Storage-verified partial loss, recorded in the
-                        # plan: the inventory is never destroyed.
-                        plan[(key, version)] = "absent"
-                        missing += 1
+                if self.storage_down:
+                    error = StorageUnavailable("presence probe")
+                    error.report = report
+                    raise error
+                historical = {kv for kv, d in plan.items() if d in ("deleted", "absent")}
+                live = set(self.versions_of(it["id"]))
+                candidates = (live | set(plan)) - historical
+                present = []
+                for kv in sorted(candidates):
+                    if kv not in self.deleted:
+                        present.append(kv)
+                    elif kv in plan:
+                        plan[kv] = "absent"
+                        historical.add(kv)
+                    else:
+                        report["uncovered"].append(it["id"])
+                        break
+                else:
+                    if not present:
+                        report["disposed_before_hold"].append(it["id"])
                         continue
                     try:
-                        self.set_legal_hold(key, version, True)
-                        if self.legal_hold_state(key, version) != "ON":
-                            failed = True
-                    except StorageUnavailable:
-                        failed = True
-                    if failed:
-                        break
-                    self.claims.setdefault(hold["id"], set()).add((key, version))
-                    report["protected_versions"].append((key, version))
-                    protected += 1
-                if failed:
-                    report["uncovered"].append(it["id"])
-                    continue
-                report["partially_disposed"].append(it["id"])
-                entry = dict(id=it["id"], custodian_id=it["custodian_id"],
-                             recorded_at=it["recorded_at"], versions=protected,
-                             partially_disposed=True, missing_versions=missing)
-                if now >= it["retention_expires_at"]:
-                    entry["already_expired"] = True
-                    report["already_expired"].append(it["id"])
-                report["items"].append(entry)
+                        for key, version in present:
+                            self.set_legal_hold(key, version, True)
+                            if self.legal_hold_state(key, version) != "ON":
+                                raise StorageUnavailable("readback")
+                            self.claims.setdefault(hold["id"], set()).add((key, version))
+                            report["protected_versions"].append((key, version))
+                    except StorageUnavailable as e:
+                        e.report = report
+                        raise
+                    entry = dict(id=it["id"], custodian_id=it["custodian_id"],
+                                 recorded_at=it["recorded_at"], versions=len(present))
+                    if historical:
+                        report["partially_disposed"].append(it["id"])
+                        entry.update(partially_disposed=True, missing_versions=len(historical))
+                    if now >= it["retention_expires_at"]:
+                        entry["already_expired"] = True
+                        report["already_expired"].append(it["id"])
+                    report["items"].append(entry)
                 continue
             refs = self.versions_of(it["id"])
             live_refs = []

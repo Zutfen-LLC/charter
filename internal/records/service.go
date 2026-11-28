@@ -679,9 +679,8 @@ func (s *Service) Place(ctx context.Context, p store.Principal, scope Scope, rea
 // 1), building the durable coverage report and the durable version-claim
 // ledger. Disposed turns are recorded as gaps - both those still
 // enumerable and those that already left the live inventory (the catalog's
-// disposed rows); turns whose live enumeration root is gone but whose
-// disposal plan still holds live rows are PARTIALLY DISPOSED: their
-// remaining versions are protected and the loss is explicitly reported;
+// disposed rows); plan-backed turns are classified by verified physical loss and their
+// surviving versions are protected;
 // records that cannot be verified at all (root gone, no plan) are
 // uncovered and block the effective transition.
 func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
@@ -740,31 +739,26 @@ func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 		// storage legal hold (flagged as already_expired in the report).
 		var refs []evidence.VersionRef
 		if s.Retained {
-			// Round-4 finding 2: a LIVE turn with a durable disposal plan is
-			// an interrupted (or authorized-but-unfinished) disposal: its
-			// exact-version coverage is established from the plan like any
-			// partially disposed record - every outstanding planned version
-			// is probed, the present ones protected and the verifiably gone
-			// ones reported as partial loss. The live enumeration of such a
-			// turn can be truncated (a deleted suffix), and must never be
-			// silently passed as complete coverage.
-			if plan, perr := s.Store.PlanOf(ctx, h.TenantID, t.TurnID); perr != nil {
-				return report, perr
-			} else if len(plan) > 0 {
-				it := item
+			// A live walk alone can miss the deleted suffix of an interrupted
+			// disposal. Its references and the durable plan both matter.
+			plan, err := s.Store.PlanOf(ctx, h.TenantID, t.TurnID)
+			if err != nil {
+				return report, err
+			}
+			if len(plan) > 0 {
 				if !known {
-					var ferr error
-					it, known, ferr = s.Store.itemOf(ctx, s.Store.DB, h.TenantID, t.TurnID)
-					if ferr != nil {
-						return report, ferr
+					item, known, err = s.Store.itemOf(ctx, s.Store.DB, h.TenantID, t.TurnID)
+					if err != nil {
+						return report, err
+					}
+					if !known {
+						return report, fmt.Errorf("records: plan has no catalog item for turn %s", t.TurnID)
 					}
 				}
-				if known {
-					if cerr := s.coverPlanTurn(ctx, h, it, &report); cerr != nil {
-						return report, cerr
-					}
-					continue
+				if err := s.coverPlanTurn(ctx, h, item, plan, &report); err != nil {
+					return report, err
 				}
+				continue
 			}
 			refs, err = s.disposalRefs(ctx, h.TenantID, t.TurnID)
 			if err != nil || len(refs) == 0 {
@@ -805,78 +799,110 @@ func (s *Service) establish(ctx context.Context, h *Hold) (Report, error) {
 		if !Matches(h, it.MatterID, it.CustodianID, it.RecordedAt) {
 			continue
 		}
-		if err := s.coverPlanTurn(ctx, h, it, &report); err != nil {
+		if !s.Retained {
+			report.Uncovered = append(report.Uncovered, it.TurnID)
+			continue
+		}
+		plan, err := s.Store.PlanOf(ctx, h.TenantID, it.TurnID)
+		if err != nil {
+			return report, err
+		}
+		if err := s.coverPlanTurn(ctx, h, it, plan, &report); err != nil {
 			return report, err
 		}
 	}
 	return report, nil
 }
 
-// coverPlanTurn establishes hold coverage for a matching catalog record
-// whose live enumeration root is gone, from the durable disposal plan (the
-// exact-version inventory committed before any irreversible deletion).
-// Planned versions verified physically absent are recorded as an explicit
-// partial loss; the remaining versions receive the same verified native
-// protection as any live record. No plan means unverifiable: uncovered.
-func (s *Service) coverPlanTurn(ctx context.Context, h *Hold, it Item, report *Report) error {
-	if !s.Retained {
-		// The PostgreSQL profile has no disposal plans (disposal is
-		// refused there); a catalog record without a live enumeration root
-		// cannot be verified.
+// planCoverageRefs obtains the live side of the plan/live union. A broken
+// or missing chain can leave signed surviving markers outside the normal
+// walk. Require complete fallback enumeration, not merely a readable plan:
+// an unreadable surviving marker could identify a requirement not in it.
+func (s *Service) planCoverageRefs(ctx context.Context, tenantID, turnID string) ([]evidence.VersionRef, error) {
+	live, err := s.disposalRefs(ctx, tenantID, turnID)
+	if err == nil {
+		return live, nil
+	}
+	if !errors.Is(err, evidence.ErrNotFound) && !errors.Is(err, evidence.ErrConflict) && !errors.Is(err, s3transport.ErrObjectAbsent) {
+		return nil, err
+	}
+	enum, nerr := s.namespaceRefs(ctx, tenantID, turnID)
+	if errors.Is(nerr, evidence.ErrNotFound) {
+		return nil, nil
+	}
+	if nerr != nil {
+		return nil, nerr
+	}
+	if !enum.Complete {
+		return nil, fmt.Errorf("records: turn %s: plan-backed namespace references incomplete", turnID)
+	}
+	return enum.Refs, nil
+}
+
+// coverPlanTurn distinguishes intent (the durable plan) from loss (exact
+// version absence or a prior verified disposition). Its candidates are the
+// union of live references and the outstanding plan, including shared
+// versions. Historical dispositions count once even if a live marker still
+// points at the missing version.
+func (s *Service) coverPlanTurn(ctx context.Context, h *Hold, it Item, plan []PlanRow, report *Report) error {
+	if s.Storage == nil || len(plan) == 0 {
 		report.Uncovered = append(report.Uncovered, it.TurnID)
 		return nil
 	}
-	if s.Storage == nil {
-		report.Uncovered = append(report.Uncovered, it.TurnID)
-		return nil
-	}
-	plan, err := s.Store.PlanOf(ctx, h.TenantID, it.TurnID)
+	live, err := s.planCoverageRefs(ctx, h.TenantID, it.TurnID)
 	if err != nil {
-		return err
+		return fmt.Errorf("records: turn %s: plan-backed live references: %w", it.TurnID, err)
 	}
-	if len(plan) == 0 {
-		report.Uncovered = append(report.Uncovered, it.TurnID)
-		return nil
-	}
-	var protect []VersionRef
+	byRef := make(map[evidence.VersionRef]string, len(plan))
 	missing := 0
 	for _, row := range plan {
-		switch row.Disposition {
-		case OutcomeDeleted, OutcomeAbsent:
-			// Already dispositioned gone: still a LOSS for coverage
-			// reporting (a durable record of loss is a loss, not
-			// intactness - C07 round-3 finding 3), counted like a
-			// storage-verified missing version.
+		byRef[evidence.VersionRef{Key: row.Key, Version: row.Version}] = row.Disposition
+		if row.Disposition == OutcomeDeleted || row.Disposition == OutcomeAbsent {
+			missing++
+		}
+	}
+	var protect []VersionRef
+	for _, ref := range unionRefs(live, planOutstanding(plan)) {
+		disposition, planned := byRef[ref]
+		if disposition == OutcomeDeleted || disposition == OutcomeAbsent {
+			continue
+		}
+		if err := s.Storage.Head(ctx, ref.Key, ref.Version); err != nil {
+			if !errors.Is(err, s3transport.ErrObjectAbsent) {
+				return fmt.Errorf("records: plan presence probe %s: %w", ref.Key, err)
+			}
+			if !planned {
+				// A verified loss outside the authorized inventory is not a
+				// plan-backed disposition. Keep the record uncovered, as for
+				// any other unplanned missing requirement.
+				report.Uncovered = append(report.Uncovered, it.TurnID)
+				return nil
+			}
+			if err := s.Store.MarkPlanAbsent(ctx, h.TenantID, it.TurnID, VersionRef(ref)); err != nil {
+				return err
+			}
 			missing++
 			continue
 		}
-		if herr := s.Storage.Head(ctx, row.Key, row.Version); herr != nil {
-			if errors.Is(herr, s3transport.ErrObjectAbsent) {
-				// Storage-verified partial loss: the plan keeps its durable
-				// version identity and the loss stays attributable.
-				missing++
-				if merr := s.Store.MarkPlanAbsent(ctx, h.TenantID, it.TurnID, VersionRef{Key: row.Key, Version: row.Version}); merr != nil {
-					return merr
-				}
-				continue
-			}
-			// The presence probe itself failed: coverage is unknown for
-			// this record; the establishment fails (retryable) rather than
-			// acknowledging silently incomplete coverage.
-			return fmt.Errorf("records: plan presence probe %s: %w", row.Key, herr)
-		}
-		protect = append(protect, VersionRef{Key: row.Key, Version: row.Version})
+		protect = append(protect, VersionRef(ref))
 	}
-	if len(protect) > 0 {
-		if err := s.protectForHold(ctx, h, protect, report); err != nil {
-			return err
-		}
+	if len(protect) == 0 {
+		// Full verified historical loss is a gap, not a covered item with
+		// zero versions. The hold still fences its scope going forward.
+		report.DisposedBeforeHold = append(report.DisposedBeforeHold, it.TurnID)
+		return nil
 	}
-	report.PartiallyDisposed = append(report.PartiallyDisposed, it.TurnID)
+	if err := s.protectForHold(ctx, h, protect, report); err != nil {
+		return err
+	}
+	partial := missing > 0
+	if partial {
+		report.PartiallyDisposed = append(report.PartiallyDisposed, it.TurnID)
+	}
 	report.Items = append(report.Items, ReportedItem{
 		TurnID: it.TurnID, Custodian: it.CustodianID, RecordedAt: it.RecordedAt,
 		AlreadyExpired: time.Now().After(it.ExpiresAt), ExpiresAt: it.ExpiresAt,
-		Versions: len(protect), PartiallyDisposed: true, MissingVersions: missing,
+		Versions: len(protect), PartiallyDisposed: partial, MissingVersions: missing,
 	})
 	return nil
 }
