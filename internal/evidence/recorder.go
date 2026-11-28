@@ -140,10 +140,35 @@ func (e *AbortedError) Error() string {
 }
 func (e *AbortedError) Unwrap() error { return e.Cause }
 
+// TurnLifecycleGuard enforces hold protection for new matching work (C07).
+// HoldApplies is consulted with the turn's exact recorded time (its event 0);
+// when a matching active hold exists, EnsureProtected must establish and
+// verify storage-native protection for every version of the turn published
+// so far before the turn may proceed. Any error fails the turn closed.
+type TurnLifecycleGuard interface {
+	HoldApplies(ctx context.Context, tenant, matter, custodian string, recordedAt time.Time) (bool, error)
+	EnsureProtected(ctx context.Context, tenant, matter, custodian, turn string, recordedAt time.Time) error
+}
+
+// ReferenceFencer, when implemented by the lifecycle guard, serializes
+// capture-side reference acquisition (turn admission, event append and
+// object staging) against concurrent disposal deletion of the same exact
+// content-addressed versions: a new reference can never be acquired between
+// a disposal's shared-reference snapshot and its irreversible deletion (C07
+// review finding 6B). The release commits the fence transaction; a fence
+// error fails the write closed.
+type ReferenceFencer interface {
+	AcquireReferenceFence(ctx context.Context, tenant string) (func(context.Context) error, error)
+}
+
 // Recorder is the durable write path. Its ordering enforces ADR 0001 R1-R4
 // before each event is stored, and every step fails closed.
 type Recorder struct {
 	Backend Backend
+	// Lifecycle, when configured, is the C07 hold guard: new matching work is
+	// protected (and the protection verified) before anything is released,
+	// so no successful response escapes without its required hold protection.
+	Lifecycle TurnLifecycleGuard
 	// Fence is required by the serving entrypoint. Its backend must be bound to
 	// the same ownership session using PG.WithFence.
 	Fence *Fence
@@ -257,6 +282,9 @@ func (t *turn) svc() map[string]any {
 }
 
 // emit stores one event and, only on success, extends the in-memory chain.
+// The append is a reference acquisition (its commit references
+// content-addressed object versions), so it is fenced against concurrent
+// disposal deletion of the same exact versions (finding 6B).
 func (t *turn) emit(ctx context.Context, typ string, p map[string]any) (Event, Receipt, error) {
 	e, err := t.build(typ, t.svc(), p)
 	if err != nil {
@@ -264,7 +292,28 @@ func (t *turn) emit(ctx context.Context, typ string, p map[string]any) (Event, R
 	}
 	wc, cancel := t.rc.wctx(ctx)
 	defer cancel()
+	var releaseFence func(context.Context) error
+	if f, ok := t.rc.Lifecycle.(ReferenceFencer); ok {
+		var ferr error
+		releaseFence, ferr = f.AcquireReferenceFence(wc, t.tenant)
+		if ferr != nil {
+			return nil, Receipt{}, fmt.Errorf("%w: append reference fence: %v", ErrFailClosed, ferr)
+		}
+	}
+	defer func() {
+		if releaseFence != nil {
+			if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+				t.rc.Logf("evidence: append fence release: %v", rerr)
+			}
+		}
+	}()
 	r, err := t.rc.Backend.Append(wc, e)
+	if releaseFence != nil {
+		if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+			t.rc.Logf("evidence: append fence release: %v", rerr)
+		}
+		releaseFence = nil
+	}
 	if err != nil {
 		return nil, Receipt{}, err
 	}
@@ -305,7 +354,30 @@ func (t *turn) emitAcked(ctx context.Context, typ string, p map[string]any) erro
 func (rc *Recorder) put(ctx context.Context, tenant string, data []byte) error {
 	wc, cancel := rc.wctx(ctx)
 	defer cancel()
+	// Object staging is a reference acquisition to a content-addressed
+	// version: fenced against concurrent disposal deletion (finding 6B).
+	var releaseFence func(context.Context) error
+	if f, ok := rc.Lifecycle.(ReferenceFencer); ok {
+		var ferr error
+		releaseFence, ferr = f.AcquireReferenceFence(wc, tenant)
+		if ferr != nil {
+			return fmt.Errorf("%w: object reference fence: %v", ErrFailClosed, ferr)
+		}
+	}
+	defer func() {
+		if releaseFence != nil {
+			if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+				rc.Logf("evidence: object fence release: %v", rerr)
+			}
+		}
+	}()
 	_, err := rc.Backend.PutObject(wc, tenant, data)
+	if releaseFence != nil {
+		if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+			rc.Logf("evidence: object fence release: %v", rerr)
+		}
+		releaseFence = nil
+	}
 	return err
 }
 
@@ -389,9 +461,34 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 	}
 	wc, cancel := rc.wctx(ctx)
 	defer cancel()
+	// Reference acquisition is fenced against concurrent disposal deletion
+	// of the same exact content-addressed versions (finding 6B). The fence
+	// is released before the lifecycle guard's own protection pass, which
+	// takes the same tenant lock internally.
+	var releaseFence func(context.Context) error
+	if f, ok := rc.Lifecycle.(ReferenceFencer); ok {
+		var ferr error
+		releaseFence, ferr = f.AcquireReferenceFence(wc, req.TenantID)
+		if ferr != nil {
+			return nil, nil, fmt.Errorf("%w: admission reference fence: %v", ErrFailClosed, ferr)
+		}
+	}
+	defer func() {
+		if releaseFence != nil {
+			if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+				rc.Logf("evidence: admission fence release: %v", rerr)
+			}
+		}
+	}()
 	res, err := rc.Backend.Admit(wc, Admission{TenantID: req.TenantID, ProjectID: req.ProjectID,
 		MatterID: req.MatterID, CustodianID: req.CustodianID, IdempotencyKey: req.IdempotencyKey,
 		TurnID: id, Fingerprint: fp}, first, [][]byte{req.Input})
+	if releaseFence != nil {
+		if rerr := releaseFence(context.WithoutCancel(wc)); rerr != nil {
+			rc.Logf("evidence: admission fence release: %v", rerr)
+		}
+		releaseFence = nil
+	}
 	if err != nil {
 		if errors.Is(err, ErrIdempotencyMismatch) {
 			return nil, nil, err
@@ -401,7 +498,40 @@ func (rc *Recorder) admit(ctx context.Context, req Request) (*turn, *struct{}, e
 	if !res.Created {
 		return &turn{rc: rc, tenant: req.TenantID, id: res.TurnID}, &struct{}{}, nil
 	}
+	if rc.Lifecycle != nil {
+		if err := rc.ensureProtected(wc, req, id, first); err != nil {
+			return nil, nil, fmt.Errorf("%w: admission hold protection: %w", ErrFailClosed, err)
+		}
+	}
 	return &turn{rc: rc, tenant: req.TenantID, id: id, events: []Event{first}}, nil, nil
+}
+
+// ensureProtected fails the turn closed unless a matching active hold's
+// storage-native protection is established and verified for the turn.
+func (rc *Recorder) ensureProtected(ctx context.Context, req Request, turnID string, first Event) error {
+	recorded, err := time.Parse(time.RFC3339Nano, str(first, "recorded_at"))
+	if err != nil {
+		return err
+	}
+	applies, err := rc.Lifecycle.HoldApplies(ctx, req.TenantID, req.MatterID, req.CustodianID, recorded)
+	if err != nil || !applies {
+		return err
+	}
+	return rc.Lifecycle.EnsureProtected(ctx, req.TenantID, req.MatterID, req.CustodianID, turnID, recorded)
+}
+
+// EnsureTurnProtected re-checks hold protection immediately before release
+// (the release gate) and before a replay delivery, using the stored event-0
+// identity of the turn. It is a no-op when no lifecycle guard is configured.
+func (rc *Recorder) EnsureTurnProtected(ctx context.Context, t *turn) error {
+	if rc.Lifecycle == nil || len(t.events) == 0 {
+		return nil
+	}
+	wc, cancel := rc.wctx(ctx)
+	defer cancel()
+	first := t.events[0]
+	req := Request{TenantID: str(first, "tenant_id"), MatterID: str(first, "matter_id"), CustodianID: str(actorOf(first), "id")}
+	return rc.ensureProtected(wc, req, t.id, first)
 }
 
 // replay answers a repeated idempotency key from the log only. It never
@@ -423,6 +553,7 @@ func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(
 	if len(evs) == 0 {
 		return bad("empty stored log")
 	}
+	t.events = evs
 	lastEv := evs[len(evs)-1]
 	if !isTerminal(str(lastEv, "type")) {
 		return Result{}, ErrTurnInFlight
@@ -489,6 +620,9 @@ func (rc *Recorder) replay(ctx context.Context, t *turn, req Request, gate func(
 	}
 	if err := rc.reconcile(ctx, t); err != nil {
 		return bad("budget reconciliation pending")
+	}
+	if err := rc.EnsureTurnProtected(ctx, t); err != nil {
+		return bad("hold protection: %v", err)
 	}
 	if err := rc.finalGate(ctx, gate, "delivery"); err != nil {
 		return Result{}, err
@@ -607,6 +741,12 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 			rc.abort(ctx, t, "policy_error")
 			return Result{}, fmt.Errorf("%w: policy_error terminal: %v", ErrFailClosed, writeErr)
 		}
+		// The denied turn's terminal evidence is protected like any other
+		// matching evidence (C07 round-2 finding 2); failures are left to
+		// lifecycle recovery.
+		if perr := rc.EnsureTurnProtected(ctx, t); perr != nil {
+			rc.Logf("evidence: denied turn %s hold protection pending recovery: %v", t.id, perr)
+		}
 		return Result{}, fmt.Errorf("%w: policy evaluation failed: %v", ErrDenied, err)
 	}
 	if !d.Allow {
@@ -616,6 +756,10 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 		}
 		if _, _, err := t.emit(ctx, TypeTurnCompleted, map[string]any{"outcome": "denied"}); err != nil {
 			return fail("evidence_write_failed", err)
+		}
+		// Same terminal-path protection obligation as above.
+		if perr := rc.EnsureTurnProtected(ctx, t); perr != nil {
+			rc.Logf("evidence: denied turn %s hold protection pending recovery: %v", t.id, perr)
 		}
 		return Result{}, ErrDenied
 	}
@@ -782,6 +926,14 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	}
 
 	// Release gate: output is durable; the caller may still veto the release.
+	// Hold protection (C07) is verified here, after the last evidence write
+	// and before release authorization: a hold that committed while this turn
+	// was in flight is seen now, and its protection is established before any
+	// output can escape.
+	if err := rc.EnsureTurnProtected(ctx, t); err != nil {
+		rc.abort(ctx, t, "hold_protection_failed")
+		return Result{}, fmt.Errorf("%w: release hold protection: %w", ErrFailClosed, err)
+	}
 	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
 		return fail("retained_readback_failed", err)
 	}
@@ -810,6 +962,13 @@ func (rc *Recorder) run(ctx context.Context, t *turn, req Request, call ModelFun
 	// If it refuses, the log still says the release was authorized and the turn
 	// completed (the output is durable and a delivery-only retry stays possible
 	// through replay), but this call returns no output.
+	// Hold protection (C07) is verified here a second time, after the LAST
+	// evidence write of the turn (the terminal event): every version the
+	// response's evidence names is protected and verified before any output
+	// escapes.
+	if err := rc.EnsureTurnProtected(ctx, t); err != nil {
+		return Result{TurnID: t.id}, fmt.Errorf("%w: delivery hold protection: %w", ErrFailClosed, err)
+	}
 	if err := rc.verifyRetained(ctx, t, t.events); err != nil {
 		return fail("retained_readback_failed", err)
 	}
@@ -879,12 +1038,23 @@ func (rc *Recorder) abort(ctx context.Context, t *turn, reason string) {
 // resolve closes a turn. Shared by the live abort path and crash recovery. If
 // it loses a race with another resolver (a live request vs. recovery, or two
 // recoveries) the turn is terminal by the time it looks again, which is success:
-// the database allows exactly one terminal event.
+// the database allows exactly one terminal event. Once the turn is terminal
+// its published version set is final: hold protection for matching holds is
+// established here - denied, interrupted, failed-finalization and recovered
+// turns carry the same protection obligations as successful ones (C07
+// round-2 finding 2). A protection failure is logged for lifecycle recovery
+// (records.Service.Recover repairs effective holds); the turn's evidence is
+// already durable and is never discarded.
 func (rc *Recorder) resolve(ctx context.Context, t *turn, reason string) error {
 	err := rc.resolveOnce(ctx, t, reason)
 	if err != nil && (errors.Is(err, ErrConflict) || errors.Is(err, ErrTerminal)) {
 		if t.reload(ctx) == nil && isTerminal(str(t.events[len(t.events)-1], "type")) {
-			return nil
+			err = nil
+		}
+	}
+	if err == nil {
+		if perr := rc.EnsureTurnProtected(ctx, t); perr != nil {
+			rc.Logf("evidence: turn %s hold protection pending recovery: %v", t.id, perr)
 		}
 	}
 	return err

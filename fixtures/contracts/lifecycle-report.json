@@ -1,0 +1,68 @@
+{
+  "description": "C07 hold coverage reports: one verifiable report and one that violates the effective-hold invariant",
+  "matter_id": "m-0001",
+  "scope": {
+    "custodian_ids": [],
+    "window_start": "2026-01-01",
+    "window_end": null
+  },
+  "positive": {
+    "hold": {
+      "id": "H1",
+      "state": "effective",
+      "epoch": 1,
+      "reason": "regulatory hold",
+      "placed_by": "records-officer-1",
+      "custodian_ids": [],
+      "matter_id": "m-0001",
+      "window_start": "2026-01-01",
+      "window_end": null
+    },
+    "report": {
+      "items": [
+        {"turn_id": "A", "custodian_id": "c1", "recorded_at": "2026-01-10", "versions": 4, "already_expired": false, "retention_expires_at": 100},
+        {"turn_id": "B", "custodian_id": "c2", "recorded_at": "2026-01-11", "versions": 4, "already_expired": true, "retention_expires_at": 100}
+      ],
+      "disposed_before_hold": ["D"],
+      "uncovered": [],
+      "protected_versions": [
+        {"key": "A/admissions", "version": "v-A-0"},
+        {"key": "A/events/0", "version": "v-A-1"},
+        {"key": "A/events/h", "version": "v-A-2"},
+        {"key": "shared/A-obj", "version": "v-A-3"},
+        {"key": "B/admissions", "version": "v-B-0"},
+        {"key": "B/events/0", "version": "v-B-1"},
+        {"key": "B/events/h", "version": "v-B-2"},
+        {"key": "shared/B-obj", "version": "v-B-3"}
+      ]
+    }
+  },
+  "negative_effective_with_uncovered": {
+    "hold": {
+      "id": "H2",
+      "state": "effective",
+      "epoch": 2,
+      "reason": "tampered: effective while a matching record is uncovered",
+      "placed_by": "records-officer-1",
+      "custodian_ids": [],
+      "matter_id": "m-0001",
+      "window_start": "2026-01-01",
+      "window_end": null
+    },
+    "report": {
+      "items": [
+        {"turn_id": "A", "custodian_id": "c1", "recorded_at": "2026-01-10", "versions": 4, "already_expired": false, "retention_expires_at": 100}
+      ],
+      "disposed_before_hold": [],
+      "uncovered": ["C"],
+      "protected_versions": [
+        {"key": "A/admissions", "version": "v-A-0"}
+      ]
+    }
+  },
+  "in_scope_items": [
+    {"id": "A", "matter_id": "m-0001", "custodian_id": "c1", "recorded_at": "2026-01-10", "retention_expires_at": 100},
+    {"id": "B", "matter_id": "m-0001", "custodian_id": "c2", "recorded_at": "2026-01-11", "retention_expires_at": 100},
+    {"id": "C", "matter_id": "m-0002", "custodian_id": "c1", "recorded_at": "2026-01-12", "retention_expires_at": 100}
+  ]
+}

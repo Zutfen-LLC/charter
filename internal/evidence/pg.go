@@ -308,3 +308,60 @@ func inputSHA(first Event) string {
 	}
 	return SHA256(nil)
 }
+
+// InventoryTurns enumerates every admitted turn of the tenant from the
+// append-only admission table. admitted_at is written in the same transaction
+// as event 0, so it is the turn's recorded time for lifecycle purposes.
+func (b PG) InventoryTurns(ctx context.Context, tenantID string) ([]TurnIdentity, error) {
+	if !idRe.MatchString(tenantID) {
+		return nil, ErrNotFound
+	}
+	query := b.DB.Query
+	if b.fence != nil {
+		conn, release, err := b.fence.lease(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		query = conn.Query
+	}
+	rows, err := query(ctx, `SELECT tenant_id::text, project_id::text, matter_id::text, custodian_id::text, turn_id::text, admitted_at
+		FROM evidence_turns WHERE tenant_id=$1::uuid ORDER BY admitted_at`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TurnIdentity
+	for rows.Next() {
+		var t TurnIdentity
+		if err := rows.Scan(&t.TenantID, &t.ProjectID, &t.MatterID, &t.CustodianID, &t.TurnID, &t.RecordedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// TurnTerminal reports whether the turn's capture reached a terminal event
+// (C07 review finding 6A: disposal eligibility requires a verified terminal
+// capture state; an actively executing turn is never swept).
+func (b PG) TurnTerminal(ctx context.Context, tenantID, turnID string) (bool, error) {
+	if !idRe.MatchString(tenantID) || !idRe.MatchString(turnID) {
+		return false, ErrNotFound
+	}
+	queryRow := b.DB.QueryRow
+	if b.fence != nil {
+		conn, release, err := b.fence.lease(ctx)
+		if err != nil {
+			return false, err
+		}
+		defer release()
+		queryRow = conn.QueryRow
+	}
+	var terminal bool
+	err := queryRow(ctx, `SELECT EXISTS (SELECT 1 FROM evidence_events WHERE tenant_id=$1::uuid AND turn_id=$2::uuid AND type IN ('turn_completed','turn_interrupted'))`, tenantID, turnID).Scan(&terminal)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	return terminal, err
+}

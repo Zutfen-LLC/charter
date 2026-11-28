@@ -20,6 +20,7 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/evidence"
 	"github.com/Zutfen-LLC/charter/internal/migrate"
 	"github.com/Zutfen-LLC/charter/internal/oidc"
+	"github.com/Zutfen-LLC/charter/internal/records"
 	"github.com/Zutfen-LLC/charter/internal/routing"
 	"github.com/Zutfen-LLC/charter/internal/server"
 	"github.com/Zutfen-LLC/charter/internal/sharepoint"
@@ -223,6 +224,24 @@ func serveWithSharePoint(ctx context.Context, cfg config.Config, connector *shar
 		depsReady = append(depsReady, check)
 	}
 	rec := &evidence.Recorder{Backend: backend, Fence: fence, Logf: log.Printf}
+	// C07 records lifecycle: control-plane store on the workspace credential,
+	// authoritative backend for enumeration, and (when the deployment binds a
+	// records-scoped storage credential) native legal holds and versioned
+	// deletes. The guard keeps new matching work under hold protection.
+	recordsService := &records.Service{Store: &records.Store{DB: deps.Workspace}, Backend: backend, Retained: cfg.EvidenceBackend == config.EvidenceBackendRetentionS3, Logf: log.Printf}
+	if cfg.EvidenceBackend == config.EvidenceBackendRetentionS3 {
+		if cfg.RetentionS3.RecordsAccessKey == "" || cfg.RetentionS3.RecordsSecretFile == "" {
+			// Without the records transport, storage-native protection cannot
+			// be established: holds fail closed (never silently effective)
+			// and disposal is refused.
+			log.Printf("records lifecycle: storage transport not configured; holds stay pending and disposal is refused")
+		} else if rtc, err := connectRecordsTransport(ctx, cfg.RetentionS3); err != nil {
+			return fmt.Errorf("records storage transport refused: %w", err)
+		} else {
+			recordsService.Storage = rtc
+		}
+	}
+	rec.Lifecycle = recordsService
 	ledger := evidence.PG{DB: deps.Budget}
 	if deps.Budget != nil {
 		modelCfg := routing.DefaultConfig()
@@ -240,6 +259,9 @@ func serveWithSharePoint(ctx context.Context, cfg config.Config, connector *shar
 		return fmt.Errorf("evidence recovery: %w", err)
 	}
 	log.Printf("evidence recovery: resolved %d unfinished turn(s)", n)
+	if err := recordsService.Recover(ctx); err != nil {
+		return fmt.Errorf("records lifecycle recovery: %w", err)
+	}
 	if deps.Budget != nil {
 		if err := ledger.RecoverBudget(ctx, backend); err != nil {
 			return fmt.Errorf("budget recovery: %w", err)
@@ -253,7 +275,7 @@ func serveWithSharePoint(ctx context.Context, cfg config.Config, connector *shar
 		if err != nil {
 			return err
 		}
-		auth := &server.Auth{Verifier: v, Store: &store.Store{DB: deps.Workspace}, Evidence: rec, Budget: ledger.Summary, SharePoint: connector}
+		auth := &server.Auth{Verifier: v, Store: &store.Store{DB: deps.Workspace}, Evidence: rec, Budget: ledger.Summary, SharePoint: connector, Records: recordsService}
 		opts = append(opts, server.WithAuth(auth))
 		log.Printf("OIDC enabled: issuer=%s tenant=%s", o.Issuer, o.TenantID)
 		if o.AllowInsecureLoopback {

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -226,4 +227,108 @@ func audit(ctx context.Context, tx pgx.Tx, actor Principal, action string, detai
 	_, err = tx.Exec(ctx, `INSERT INTO audit_log(tenant_id, actor_id, action, detail) VALUES ($1,$2,$3,$4)`,
 		actor.TenantID, actor.UserID, action, b)
 	return err
+}
+
+// DeleteArtifact removes one workspace artifact (a chat or working note).
+// This is a workspace-only change: evidence is stored by the separate
+// evidence credential in append-only tables this role cannot even read, so a
+// deletion here can never alter, block or destroy evidence. Membership of the
+// artifact's project is re-verified inside the transaction under the tenant
+// lock; deleting a missing artifact is a no-op and an actual removal is
+// audited.
+func (s *Store) DeleteArtifact(ctx context.Context, actor Principal, artifactID string) error {
+	actor, okp := actor.canon()
+	if !okp {
+		return ErrForbidden
+	}
+	artifactID, valid := CanonicalID(artifactID)
+	if !valid {
+		return ErrNotFound
+	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var locked bool
+	if err := tx.QueryRow(ctx, `SELECT true FROM tenants WHERE id=$1 FOR NO KEY UPDATE`, actor.TenantID).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrForbidden
+		}
+		return err
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT disabled_at IS NULL FROM users WHERE id=$1 AND tenant_id=$2`, actor.UserID, actor.TenantID).Scan(&active); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrForbidden
+		}
+		return err
+	}
+	if !active {
+		return ErrForbidden
+	}
+	var project string
+	err = tx.QueryRow(ctx, `SELECT a.project_id::text FROM artifacts a WHERE a.id=$1 AND a.tenant_id=$2`, artifactID, actor.TenantID).Scan(&project)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // already gone: idempotent
+	}
+	if err != nil {
+		return err
+	}
+	var member bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM project_members m JOIN users u ON u.id=m.user_id AND u.tenant_id=m.tenant_id
+		WHERE m.project_id=$1 AND m.tenant_id=$2 AND m.user_id=$3 AND u.disabled_at IS NULL)`, project, actor.TenantID, actor.UserID).Scan(&member); err != nil {
+		return err
+	}
+	if !member {
+		return ErrNotFound
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM artifacts WHERE id=$1 AND tenant_id=$2`, artifactID, actor.TenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
+	}
+	if err := audit(ctx, tx, actor, "workspace.artifact.delete", map[string]string{"artifact_id": artifactID, "project_id": project}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// DeleteProject removes a project and its workspace artifacts. The project
+// row, membership and artifacts are workspace tier only; evidence, holds and
+// the retention catalog are untouched. Requires tenant_admin.
+func (s *Store) DeleteProject(ctx context.Context, actor Principal, projectID string) error {
+	actor, okp := actor.canon()
+	if !okp {
+		return ErrForbidden
+	}
+	projectID, valid := CanonicalID(projectID)
+	if !valid {
+		return ErrNotFound
+	}
+	return s.inTx(ctx, actor, func(tx pgx.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM projects WHERE id=$1 AND tenant_id=$2)`, projectID, actor.TenantID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM artifacts WHERE project_id=$1 AND tenant_id=$2`, projectID, actor.TenantID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM project_members WHERE project_id=$1 AND tenant_id=$2`, projectID, actor.TenantID); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM projects WHERE id=$1 AND tenant_id=$2`, projectID, actor.TenantID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return nil
+		}
+		return audit(ctx, tx, actor, "workspace.project.delete", map[string]string{"project_id": projectID})
+	})
 }

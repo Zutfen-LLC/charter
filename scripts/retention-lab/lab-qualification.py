@@ -21,6 +21,11 @@ public = pathlib.Path(os.environ['C04_PRIVATE'])
 report = json.loads(rd.read_bytes())
 assert p['DEFAULT_ONLY'] and all(x['passed'] for x in report['checks'])
 results = {x['name']: x for x in report['checks']}
+records_path = public / 'c07-records.json'
+has_records = records_path.exists()
+if has_records:
+    for name in ('legal_hold_set_and_readback','legal_hold_blocks_delete','legal_hold_release_allows_delete','records_delete_expired','runtime_cannot_change_legal_hold'):
+        assert results[name]['passed'], name
 controls = {
  'admin_exact_delete': ['admin_delete_exact', 'admin_bypass_compliance'],
  'admin_shorten': ['admin_shorten_to_future'],
@@ -107,6 +112,10 @@ assert ok
 cert = dict(version='charter-s3-lab-qualification-v2', coordination_database=coordination, profile='charter-s3-compliance-v1',endpoint=p['ORIGIN'],region='us-east-1',bucket=protected,deployment=run,runtime_access_key_sha256=sha(rt.access.encode()),
     storage_implementation='SeaweedFS 4.55 a98c9e27185cf1003eca095761a39973c60734db',storage_digest='sha256:b0e48a0d0bd26d206cc4e96b3edcfebded8086b47d77f619b9a676f4f51abd36',qualification_report_sha256=sha(rd.read_bytes()),issued_at=p['brief'](now), valid_until=p['brief'](valid),controls=list(controls),
     canary=dict(key=key,version=made.version,sha256=sha(body),length=len(body),mode='COMPLIANCE',retain_until=p['brief'](retain)))
+if has_records:
+    rc = p['Client']('c07-records')
+    cert.update(records_access_key_sha256=sha(rc.access.encode()),
+                controls=list(controls)+['legal_hold_set_and_readback','legal_hold_blocks_delete','legal_hold_release_allows_delete','records_delete_expired','runtime_cannot_change_legal_hold'])
 def sh(*cmd): return subprocess.check_output(cmd)
 qual = public/'qualification.private.pem'
 seed = public/'commit.private.pem'
@@ -122,7 +131,11 @@ envelope = json.dumps(dict(payload=payload,signature=sig.hex()))+'\n'
 (base/'qualification.json').write_text(envelope)
 (base/'commit.seed').write_text(sh('openssl','pkey','-in',str(seed),'-outform','DER')[-32:].hex()+'\n')
 (base/'s3.secret').write_text(rt.secret+'\n')
+if has_records:
+    (base/'records.secret').write_text(rc.secret+'\n')
 for f in base.iterdir(): os.chown(f,65534,65534)
+if has_records:
+    os.chown(base/'records.secret',65534,65534)
 (public/'serving.env').write_text('\n'.join(f'export {k}={v}' for k,v in dict(
-    CHARTER_S3_ENDPOINT=p['ORIGIN'],CHARTER_S3_REGION='us-east-1',CHARTER_S3_BUCKET=protected,CHARTER_S3_DEPLOYMENT=run,CHARTER_S3_RUNTIME_ACCESS_KEY=rt.access,CHARTER_S3_RUNTIME_SECRET_FILE=base/'s3.secret',CHARTER_S3_COMMIT_SEED_FILE=base/'commit.seed',CHARTER_S3_COMMIT_PUBLIC_KEY=cpub,CHARTER_S3_QUALIFICATION_FILE=base/'qualification.json',CHARTER_S3_QUALIFICATION_PUBLIC_KEY=qpub,CHARTER_S3_RETENTION_SECONDS='600',CHARTER_S3_SYNTHETIC_OPT_IN='I_OWN_THIS_SYNTHETIC_CHARTER_C04_LAB').items())+'\n')
+    CHARTER_S3_ENDPOINT=p['ORIGIN'],CHARTER_S3_REGION='us-east-1',CHARTER_S3_BUCKET=protected,CHARTER_S3_DEPLOYMENT=run,CHARTER_S3_RUNTIME_ACCESS_KEY=rt.access,CHARTER_S3_RUNTIME_SECRET_FILE=base/'s3.secret',CHARTER_S3_COMMIT_SEED_FILE=base/'commit.seed',CHARTER_S3_COMMIT_PUBLIC_KEY=cpub,CHARTER_S3_QUALIFICATION_FILE=base/'qualification.json',CHARTER_S3_QUALIFICATION_PUBLIC_KEY=qpub,CHARTER_S3_RETENTION_SECONDS='600',CHARTER_S3_SYNTHETIC_OPT_IN='I_OWN_THIS_SYNTHETIC_CHARTER_C04_LAB',CHARTER_S3_RECORDS_ACCESS_KEY=(rc.access if has_records else ''),CHARTER_S3_RECORDS_SECRET_FILE=(base/'records.secret' if has_records else '')).items())+'\n')
 (rd.parent / ('qualification-' + p['RUN'] + '.json')).write_text(json.dumps(dict(certificate=json.loads(envelope),qualification_public_key=qpub,commit_public_key=cpub,canary_readback=obs),indent=2)+'\n')

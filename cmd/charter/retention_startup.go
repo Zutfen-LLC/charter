@@ -36,6 +36,12 @@ var requiredStorageControls = []string{
 	"admin_exact_delete", "admin_shorten", "runtime_exact_delete", "runtime_delete_marker", "runtime_retention_mutations", "runtime_cannot_administer", "runtime_cannot_escalate", "runtime_single_bucket", "latest_exact_version", "linearizable_conditional_create", "unprotected_positive_controls",
 }
 
+// requiredRecordsControls are the C07 legal-hold capabilities a statement must
+// certify before the records-scoped transport is trusted with holds.
+var requiredRecordsControls = []string{
+	"legal_hold_set_and_readback", "legal_hold_blocks_delete", "legal_hold_release_allows_delete", "records_delete_expired", "runtime_cannot_change_legal_hold",
+}
+
 type qualificationEnvelope struct {
 	Payload   string `json:"payload"`
 	Signature string `json:"signature"`
@@ -49,23 +55,27 @@ type qualificationCanary struct {
 	Until   string `json:"retain_until"`
 }
 type qualificationStatement struct {
-	Version        string              `json:"version"`
-	Profile        string              `json:"profile"`
-	Endpoint       string              `json:"endpoint"`
-	Region         string              `json:"region"`
-	Bucket         string              `json:"bucket"`
-	Deployment     string              `json:"deployment"`
-	Coordination   string              `json:"coordination_database"`
-	Credential     string              `json:"runtime_access_key_sha256"`
-	CommitKey      string              `json:"commit_public_key"`
-	MinSeconds     string              `json:"minimum_retention_seconds"`
-	Implementation string              `json:"storage_implementation"`
-	ImageDigest    string              `json:"storage_digest"`
-	EvidenceReport string              `json:"qualification_report_sha256"`
-	IssuedAt       string              `json:"issued_at"`
-	ValidUntil     string              `json:"valid_until"`
-	Controls       []string            `json:"controls"`
-	Canary         qualificationCanary `json:"canary"`
+	Version      string `json:"version"`
+	Profile      string `json:"profile"`
+	Endpoint     string `json:"endpoint"`
+	Region       string `json:"region"`
+	Bucket       string `json:"bucket"`
+	Deployment   string `json:"deployment"`
+	Coordination string `json:"coordination_database"`
+	Credential   string `json:"runtime_access_key_sha256"`
+	// RecordsCredential binds the records-scoped access key (C07). An empty
+	// value certifies no records capability: holds then cannot become
+	// effective on the retained backend.
+	RecordsCredential string              `json:"records_access_key_sha256"`
+	CommitKey         string              `json:"commit_public_key"`
+	MinSeconds        string              `json:"minimum_retention_seconds"`
+	Implementation    string              `json:"storage_implementation"`
+	ImageDigest       string              `json:"storage_digest"`
+	EvidenceReport    string              `json:"qualification_report_sha256"`
+	IssuedAt          string              `json:"issued_at"`
+	ValidUntil        string              `json:"valid_until"`
+	Controls          []string            `json:"controls"`
+	Canary            qualificationCanary `json:"canary"`
 }
 
 func strictlyDecode(raw []byte, target any) bool {
@@ -128,10 +138,22 @@ func loadQualification(ctx context.Context, c config.RetentionS3, now time.Time)
 	if e1 != nil || e2 != nil || e3 != nil || issued.After(now) || !end.After(now) || end.Sub(issued) > 24*time.Hour || until.Before(end) {
 		return s, fail
 	}
-	if len(s.Controls) != len(requiredStorageControls) {
+	required := requiredStorageControls
+	if c.RecordsAccessKey != "" {
+		if s.RecordsCredential == "" || s.RecordsCredential != evidence.SHA256([]byte(c.RecordsAccessKey)) {
+			return s, fail
+		}
+		required = append(append([]string(nil), requiredStorageControls...), requiredRecordsControls...)
+	} else if s.RecordsCredential != "" {
+		// A statement certifying a records credential the deployment does not
+		// configure is a binding mismatch: refuse rather than silently
+		// ignoring certified capability.
 		return s, fail
 	}
-	for _, want := range requiredStorageControls {
+	if len(s.Controls) != len(required) {
+		return s, fail
+	}
+	for _, want := range required {
 		if !slices.Contains(s.Controls, want) {
 			return s, fail
 		}
@@ -321,4 +343,28 @@ func (d readinessDeps) Ping(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// connectRecordsTransport opens the records-scoped S3 transport (C07). The
+// credential is bound by the qualification statement's records_access_key
+// hash; it may set and clear legal holds and delete exact versions, and it
+// deliberately does not serve evidence.
+func connectRecordsTransport(ctx context.Context, c config.RetentionS3) (*s3transport.Client, error) {
+	secret, err := sizedRead(c.RecordsSecretFile, 1024, true)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(string(secret)) == "" || len(c.RecordsAccessKey) < 3 {
+		return nil, errors.New("invalid records storage credential")
+	}
+	client, err := s3transport.New(s3transport.Config{Endpoint: c.Endpoint, Bucket: c.Bucket, Region: c.Region, AccessKeyID: c.RecordsAccessKey, SecretAccessKey: strings.TrimSpace(string(secret)), UseBucketDefault: false})
+	if err != nil {
+		return nil, err
+	}
+	// The records transport must be able to observe protection state before
+	// any hold is acknowledged as effective.
+	if err := client.Check(ctx); err != nil {
+		return nil, err
+	}
+	return client, nil
 }

@@ -25,6 +25,11 @@ type RetentionS3 struct {
 	Endpoint, Region, Bucket, Deployment, AccessKey                 string
 	SecretFile, SignerSeedFile, CommitKey                           string
 	QualificationFile, QualificationKey, MinSeconds, SyntheticOptIn string
+	// RecordsAccessKey/RecordsSecretFile hold the records-scoped storage
+	// credential (C07): it may set and clear legal holds and delete exact
+	// versions, which the runtime credential deliberately cannot. The
+	// qualification statement binds its access key hash.
+	RecordsAccessKey, RecordsSecretFile string
 }
 
 // OIDC settings. Entra mode needs the designated test tenant's id; nothing
@@ -78,6 +83,7 @@ func Load() Config {
 			SignerSeedFile: os.Getenv("CHARTER_S3_COMMIT_SEED_FILE"), CommitKey: os.Getenv("CHARTER_S3_COMMIT_PUBLIC_KEY"),
 			QualificationFile: os.Getenv("CHARTER_S3_QUALIFICATION_FILE"), QualificationKey: os.Getenv("CHARTER_S3_QUALIFICATION_PUBLIC_KEY"),
 			MinSeconds: os.Getenv("CHARTER_S3_RETENTION_SECONDS"), SyntheticOptIn: os.Getenv("CHARTER_S3_SYNTHETIC_OPT_IN"),
+			RecordsAccessKey: os.Getenv("CHARTER_S3_RECORDS_ACCESS_KEY"), RecordsSecretFile: os.Getenv("CHARTER_S3_RECORDS_SECRET_FILE"),
 		},
 		OIDC: OIDC{
 			Issuer:   os.Getenv("CHARTER_OIDC_ISSUER"),
