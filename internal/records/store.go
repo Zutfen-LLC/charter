@@ -1532,13 +1532,55 @@ func actorID(p *store.Principal) *string {
 	return &p.UserID
 }
 
-// MarkReleaseCleanup records which version cleanups remain pending after a
-// release (conservative: pending means over-protection).
-func (s *Store) MarkReleaseCleanup(ctx context.Context, holdID string, pending []VersionRef) error {
+// RecordCleanupState converges the hold's release-cleanup report to the
+// committed ownership ledger (round-4 finding 3, round-5 review lanes 2 and
+// 4): the hold row and the outstanding claim rows are locked and read INSIDE
+// the single transaction that publishes the report, so the publication is
+// atomic with the ledger snapshot it projects - a concurrent release or
+// recovery reconciliation cannot delete claims between the snapshot and the
+// publication, and the report can never publish a stale non-empty list that
+// the committed ledger has already superseded. The report is written
+// whenever there is anything to converge: outstanding claims to record, or
+// a stale non-empty pending list to clear (verified clearance). Distinguished
+// states: an empty report with zero ledger claims is VERIFIED clearance; a
+// non-empty report is STILL-REQUIRED protection or an unresolved failure
+// (retryable, conservative: pending means over-protection, never
+// under-protection). The write is idempotent, so an interruption between the
+// native mutation, the ledger commit and this publication converges on the
+// next release retry or recovery pass. Lock order: holds row then claim rows
+// (every other path takes claim rows last as well), so no new deadlock is
+// possible.
+func (s *Store) RecordCleanupState(ctx context.Context, holdID string) error {
 	return s.writeHoldState(ctx, holdID, func(tx pgx.Tx) error {
+		var holdTenant string
+		if err := tx.QueryRow(ctx, `SELECT tenant_id::text FROM holds WHERE id=$1 FOR UPDATE`, holdID).Scan(&holdTenant); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
 		h, err := loadHold(ctx, tx, holdID)
 		if err != nil {
 			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT key, version FROM hold_version_claims WHERE hold_id=$1 ORDER BY key, version FOR UPDATE`, holdID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var pending []VersionRef
+		for rows.Next() {
+			var v VersionRef
+			if err := rows.Scan(&v.Key, &v.Version); err != nil {
+				return err
+			}
+			pending = append(pending, v)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(pending) == 0 && len(h.Report.ReleaseCleanupPending) == 0 {
+			return nil // nothing to converge
 		}
 		h.Report.ReleaseCleanupPending = pending
 		b, err := json.Marshal(h.Report)
@@ -1810,12 +1852,23 @@ func (s *Store) SetRepairState(ctx context.Context, tenantID, holdID string, pen
 		return false, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	var id string
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM holds WHERE id=$1 AND epoch=$2 FOR UPDATE`, holdID, wantEpoch).Scan(&id); err != nil {
+	// The locked hold is resolved by id, then bound to the SUPPLIED tenant
+	// and scope revision before any write: a foreign tenant identifier never
+	// authorizes another tenant's report mutation or audit attribution
+	// (round-5 review lane 4).
+	var holdTenant string
+	var holdEpoch int64
+	if err := tx.QueryRow(ctx, `SELECT tenant_id::text, epoch FROM holds WHERE id=$1 FOR UPDATE`, holdID).Scan(&holdTenant, &holdEpoch); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("%w: repair state for hold %s is bound to a superseded scope revision", ErrStaleEstablishment, holdID)
+			return false, ErrNotFound
 		}
 		return false, err
+	}
+	if holdTenant != tenantID {
+		return false, ErrForbidden
+	}
+	if holdEpoch != wantEpoch {
+		return false, fmt.Errorf("%w: repair state for hold %s is bound to a superseded scope revision", ErrStaleEstablishment, holdID)
 	}
 	h, err := loadHold(ctx, tx, holdID)
 	if err != nil {

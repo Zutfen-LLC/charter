@@ -228,7 +228,15 @@ func (s *Service) sharedReferences(ctx context.Context, tx pgx.Tx, it Item) (map
 	// durable plan knows: a truncated live enumeration must never override
 	// known durable references.
 	mine, enumErr := s.disposalRefs(ctx, it.TenantID, it.TurnID)
-	if plan, perr := s.Store.planOf(ctx, tx, it.TenantID, it.TurnID); perr == nil && len(plan) > 0 {
+	plan, perr := s.Store.planOf(ctx, tx, it.TenantID, it.TurnID)
+	if perr != nil {
+		// Round-5 review lane 1: an unreadable durable plan is an UNKNOWN
+		// version set. The deleter's own plan load guards the delete phase
+		// first; this check keeps the shared-reference evaluation
+		// self-sufficient and fail-closed (never "no plan exists").
+		return nil, fmt.Errorf("records: shared-reference scan: disposal plan load of %s: %w", it.TurnID, perr)
+	}
+	if len(plan) > 0 {
 		outstanding := planOutstanding(plan)
 		switch {
 		case enumErr != nil && len(outstanding) > 0:

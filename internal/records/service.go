@@ -236,7 +236,17 @@ const (
 // deadlock - C07 round-3 CI follow-up).
 func (s *Service) turnReferenceSet(ctx context.Context, q queryRunner, tenantID, turnID string) ([]evidence.VersionRef, refSetResolution, error) {
 	refs, err := s.disposalRefs(ctx, tenantID, turnID)
-	if plan, perr := s.Store.planOf(ctx, q, tenantID, turnID); perr == nil && len(plan) > 0 {
+	plan, perr := s.Store.planOf(ctx, q, tenantID, turnID)
+	if perr != nil {
+		// Round-5 review lane 1: an unreadable durable plan is an UNKNOWN
+		// reference set, never an empty one. A SUCCEEDED live enumeration
+		// can be truncated (a deleted suffix), so ignoring the plan-read
+		// error would let the truncated result silently override durable
+		// references the caller is about to authorize an irreversible
+		// operation over. Fail closed.
+		return nil, refSetUnknown, fmt.Errorf("records: turn %s: disposal plan load: %w", turnID, perr)
+	}
+	if len(plan) > 0 {
 		outstanding := planOutstanding(plan)
 		switch {
 		case err == nil && len(outstanding) > 0:
@@ -295,7 +305,12 @@ func unionRefs(a, b []evidence.VersionRef) []evidence.VersionRef {
 			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Key != out[j].Key {
+			return out[i].Key < out[j].Key
+		}
+		return out[i].Version < out[j].Version
+	})
 	return out
 }
 
@@ -983,39 +998,13 @@ func (s *Service) Release(ctx context.Context, p store.Principal, holdID, reason
 }
 
 // recordCleanupState converges the hold's release-cleanup report to the
-// committed ownership ledger (round-4 finding 3): the report is written
-// whenever there is anything to converge - outstanding claims to record, or
-// a stale non-empty pending list to clear (verified clearance). Distinguished
-// states: an empty report with zero ledger claims is VERIFIED clearance; a
-// non-empty report is STILL-REQUIRED protection or an unresolved failure
-// (retryable, conservative: pending means over-protection, never
-// under-protection). The write is a single transaction on the hold row and
-// is idempotent, so an interruption between the native mutation, the ledger
-// commit and this report publication converges on the next release retry or
-// recovery pass.
+// committed ownership ledger (round-4 finding 3, round-5 review lanes 2 and
+// 4): the report is written whenever there is anything to converge -
+// outstanding claims to record, or a stale non-empty pending list to clear
+// (verified clearance) - atomically with the claims-ledger snapshot (see
+// Store.RecordCleanupState).
 func (s *Service) recordCleanupState(ctx context.Context, h *Hold) error {
-	pending, err := s.claimsPending(ctx, h.ID)
-	if err != nil {
-		return err
-	}
-	if len(pending) > 0 || len(h.Report.ReleaseCleanupPending) > 0 {
-		return s.Store.MarkReleaseCleanup(ctx, h.ID, pending)
-	}
-	return nil
-}
-
-// claimsPending projects the hold's outstanding claims as the legacy report
-// field.
-func (s *Service) claimsPending(ctx context.Context, holdID string) ([]VersionRef, error) {
-	claims, err := s.Store.ClaimsOfHold(ctx, holdID)
-	if err != nil {
-		return nil, err
-	}
-	var out []VersionRef
-	for _, c := range claims {
-		out = append(out, VersionRef{Key: c.Key, Version: c.Version})
-	}
-	return out, nil
+	return s.Store.RecordCleanupState(ctx, h.ID)
 }
 
 // reconcileClaims clears the legal hold of every claimed version that no

@@ -223,3 +223,37 @@ class Round4Corrections(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class Round5ReviewParity(unittest.TestCase):
+    """Round-5 adversarial-review parity pins (the partial-report exception
+    path and the fail-closed plan read)."""
+
+    def test_failed_repair_publishes_the_pass_partial_coverage(self):
+        # Go's establish returns the PARTIAL report with the error: the
+        # items left uncovered BEFORE the abort are the failed repair's
+        # pending list, never the PRIOR pass's stale list. The model's
+        # exception carries the partial report (round-5 review lane 4).
+        s = guarded(ITEMS, [H1])
+        h = s.place_hold_verified(H1, now=0)
+        self.assertEqual(h["state"], HOLD_EFFECTIVE)
+        # An outstanding prior repair condition...
+        s.holds["H1"]["report"]["repair_pending"] = ["old"]
+        # ...and a new pass that uncovers a NEW record (processed FIRST:
+        # insertion order) before the storage fails on the live record.
+        s.items["N"] = dict(id="N", matter_id="m-0001", custodian_id="c1",
+                            recorded_at="2026-02-01", retention_expires_at=100,
+                            state="active", root_gone=True)
+        items = dict(s.items)
+        s.items.clear()
+        s.items.update({"N": items["N"], "A": items["A"]})
+        s.storage_down = True
+        s.recover(now=10)
+        s.storage_down = False
+        report = s.holds["H1"]["report"]
+        self.assertEqual(report.get("repair_pending"), ["N"],
+                         "the failed repair must publish the pass's partial "
+                         "coverage (the uncovered record processed before "
+                         "the abort), not the prior stale list")
+        self.assertEqual(report.get("repair_error"), "storage unavailable")
+        actions = [a["action"] for a in s.reverify_audit if a["hold_id"] == "H1"]
+        self.assertIn("hold.protection_repair_failed", actions)

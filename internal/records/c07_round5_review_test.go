@@ -81,10 +81,11 @@ func TestUnreadableSiblingPlanRefusesSharedDeletion(t *testing.T) {
 	}
 }
 
-// The same fail-closed rule governs native legal-hold removal: releasing a
-// hold must not clear the protection of a version that a partially disposed
-// sibling's UNREADABLE durable plan may still reference. At the defective
-// head the release cleared it.
+// The same fail-closed rule governs native legal-hold removal: while a
+// partially disposed sibling is HELD (its reference set must be resolved to
+// decide what the release may clear), an UNREADABLE durable plan must refuse
+// the removal. At the defective head the release cleared the shared
+// version's protection although the held sibling's plan still referenced it.
 func TestUnreadableSiblingPlanRefusesProtectionRemoval(t *testing.T) {
 	f := newRfx(t)
 	b2 := seedTurn4Commit(f, "T-R5B2", f.p2, f.m2, f.u["bob"], "r5rel")
@@ -99,45 +100,63 @@ func TestUnreadableSiblingPlanRefusesProtectionRemoval(t *testing.T) {
 	}
 	protectVersion(f, refByKey(f, b2Refs, "ns/"+b2+"/admissions/x"), false)
 	protectVersion(f, refByKey(f, b2Refs, "ns/"+b2+"/data/events/e0"), false)
-	// A hold over the live referencing record claims and protects the shared
-	// version.
-	h := f.placeHold("carol", f.m1, "round5 hold over the live referencing record")
-	if h.State != records.HoldEffective {
-		t.Fatalf("setup: hold not effective: %s", h.State)
+	// Overlapping holds: one over the interrupted (held) sibling, one over
+	// the live referencing record - both protect the shared version.
+	hb := f.placeHold("erin", f.m2, "round5 hold over the interrupted record")
+	if hb.State != records.HoldEffective {
+		t.Fatalf("setup: hold over the interrupted record not effective: %s", hb.State)
+	}
+	ha := f.placeHold("carol", f.m1, "round5 hold over the live referencing record")
+	if ha.State != records.HoldEffective {
+		t.Fatalf("setup: hold over the live record not effective: %s", ha.State)
 	}
 	if state := f.fs.holdState(shared.Key, shared.Version); state != "ON" {
 		t.Fatalf("setup: the shared version is not protected (state %q)", state)
 	}
 	// The sibling's durable plan becomes unreadable.
 	corruptPlanRow(f, b2, shared.Key)
-	// The release must refuse to clear the shared version's protection.
-	if _, err := f.svc.Release(f.ctx(), f.principal("carol"), h.ID, "release with an unreadable sibling plan"); err != nil {
+	// The release of the live record's hold must refuse to clear the shared
+	// version's protection: the HELD sibling's reference set is unknown.
+	if _, err := f.svc.Release(f.ctx(), f.principal("carol"), ha.ID, "release with an unreadable sibling plan"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	if state := f.fs.holdState(shared.Key, shared.Version); state != "ON" {
-		t.Fatalf("FINDING: the protection of the shared version was cleared while a partially disposed sibling's durable plan was unreadable (state %q)", state)
+		t.Fatalf("FINDING: the protection of the shared version was cleared while the held sibling's durable plan was unreadable (state %q)", state)
 	}
-	// The report durably records the outstanding cleanup (conservative:
-	// pending means over-protection).
-	stored, err := f.rs.GetHold(f.ctx(), f.principal("carol"), h.ID)
+	// The refused cleanup is recorded conservatively.
+	stored, err := f.rs.GetHold(f.ctx(), f.principal("carol"), ha.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(stored.Report.ReleaseCleanupPending) == 0 {
 		t.Fatalf("FINDING: the refused cleanup was not recorded as pending: %+v", stored.Report)
 	}
-	// Storage recovers: the release retry converges (the sibling is not held
-	// and the live record's hold is released, so the version's protection is
-	// no longer required).
+	// Storage recovers: the release retry keeps the shared version protected
+	// (the held sibling's plan still references it).
 	restorePlanRow(f, b2, shared.Key)
-	if _, err := f.svc.Release(f.ctx(), f.principal("carol"), h.ID, "retry after recovery"); err != nil {
+	if _, err := f.svc.Release(f.ctx(), f.principal("carol"), ha.ID, "retry after recovery"); err != nil {
+		t.Fatal(err)
+	}
+	if state := f.fs.holdState(shared.Key, shared.Version); state != "ON" {
+		t.Fatalf("retry: the shared version's protection was lost although the held sibling still requires it (state %q)", state)
+	}
+	// Releasing the sibling's hold too converges the protection (no owner
+	// remains) and the claims ledger empties.
+	if _, err := f.svc.Release(f.ctx(), f.principal("erin"), hb.ID, "release the interrupted record"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.svc.Recover(f.ctx()); err != nil {
 		t.Fatal(err)
 	}
 	if state := f.fs.holdState(shared.Key, shared.Version); state == "ON" {
-		t.Fatalf("retry: the shared version's protection did not converge (state %q)", state)
+		t.Fatalf("convergence: the shared version's protection did not clear after both releases (state %q)", state)
+	}
+	var claims int
+	if err := f.pool.QueryRow(f.ctx(), `SELECT count(*) FROM hold_version_claims WHERE hold_id = ANY($1)`, []string{ha.ID, hb.ID}).Scan(&claims); err != nil {
+		t.Fatal(err)
+	}
+	if claims != 0 {
+		t.Fatalf("convergence: %d claims remain after both releases and recovery", claims)
 	}
 }
 

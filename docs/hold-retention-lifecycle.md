@@ -317,6 +317,29 @@ and scope change is also fixed).
   write: a hold released after recovery's listing never receives stale
   effective-hold repair results.
 
+## Round-5 review corrections (the adversarial lanes over the round-4 fixes)
+
+- **An unreadable disposal plan is an UNKNOWN version set** (lane 1): the
+  plan read inside the shared-reference scan and the sibling reference
+  resolution (`turnReferenceSet`) FAILS CLOSED - a plan-read error is never
+  treated as "no plan exists". A SUCCEEDED live enumeration can be
+  truncated, so ignoring the error would let the truncated result silently
+  override durable references while an irreversible deletion or a native
+  legal-hold removal proceeds; the operation is refused and the condition
+  is retryable (converging once the plan read recovers).
+- **Cleanup reports are published ATOMICALLY with the claims-ledger
+  snapshot** (lanes 2 and 4): `RecordCleanupState` locks the hold row and
+  the outstanding claim rows inside the single transaction that writes the
+  report, so a concurrent release or recovery reconciliation can never
+  leave a published cleanup list that the committed ledger has already
+  superseded. Lock order (holds row, then claim rows) preserves the
+  declared global order.
+- **Repair-state writes bind to the owning tenant** (lane 4):
+  `SetRepairState` resolves the locked hold by id, then verifies the
+  supplied tenant and the scope revision before any write: a foreign
+  tenant identifier never authorizes another tenant's report mutation or
+  its audit attribution.
+
 ## Concurrency and recovery
 
 - Placement, release and scope change serialize on the per-matter epoch row;

@@ -979,7 +979,11 @@ class GuardedStore(Store):
             report = self._establish(placed, now)
         except StorageUnavailable as e:
             placed["state"] = HOLD_FAILED
-            self.reports[hold["id"]] = {"error": str(e)}
+            partial = getattr(e, "partial", None)
+            if partial is None:
+                partial = {}
+            partial["error"] = str(e)
+            self.reports[hold["id"]] = partial
             raise EstablishmentError(str(e))
         if report["uncovered"]:
             placed["state"] = HOLD_FAILED
@@ -1101,18 +1105,27 @@ class GuardedStore(Store):
                 continue
             refs = self.versions_of(it["id"])
             live_refs = []
-            for key, version in refs:
-                if (key, version) in self.deleted:
-                    # An unplanned live record with a deleted version is
-                    # unverifiable (planned records are covered from their
-                    # durable plans above).
-                    report["uncovered"].append(it["id"])
-                    break
-                live_refs.append((key, version))
-                self.set_legal_hold(key, version, True)
-                if self.legal_hold_state(key, version) != "ON":
-                    report["uncovered"].append(it["id"])
-                    break
+            try:
+                for key, version in refs:
+                    if (key, version) in self.deleted:
+                        # An unplanned live record with a deleted version is
+                        # unverifiable (planned records are covered from their
+                        # durable plans above).
+                        report["uncovered"].append(it["id"])
+                        break
+                    live_refs.append((key, version))
+                    self.set_legal_hold(key, version, True)
+                    if self.legal_hold_state(key, version) != "ON":
+                        report["uncovered"].append(it["id"])
+                        break
+            except StorageUnavailable as e:
+                # Go's establish returns the PARTIAL report together with the
+                # error (the items verified before the abort; the failing
+                # item is not claimed as covered). The exception carries it
+                # so failed placement and failed repair publish the same
+                # partial coverage Go publishes (round-5 review lane 4).
+                e.partial = report
+                raise
             else:
                 report["protected_versions"].extend(live_refs)
                 self.claims.setdefault(hold["id"], set()).update(live_refs)
@@ -1400,11 +1413,15 @@ class GuardedStore(Store):
                     report = self._establish(h, now)
                 except StorageUnavailable as e:
                     # FAILED repair: the error detail is the transition
-                    # signal; the pending list carries the pass's
-                    # partial coverage (preserved here - the model's
-                    # raise-style establish exposes no partial report).
+                    # signal; the pending list carries the pass's PARTIAL
+                    # coverage (the items left uncovered before the abort -
+                    # the exception carries the partial report, mirroring
+                    # Go's establish which returns it with the error).
+                    partial = getattr(e, "partial", None)
+                    pending = list(partial["uncovered"]) if partial else \
+                        list(h["report"].get("repair_pending") or [])
                     _transition_detail = {"detail": str(e) or "storage unavailable"}
-                    _transition(list(h["report"].get("repair_pending") or []),
+                    _transition(pending,
                                 str(e) or "storage unavailable",
                                 "hold.protection_repair_failed")
                     continue  # retried by the next recovery; claims record progress
