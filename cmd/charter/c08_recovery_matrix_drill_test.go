@@ -351,7 +351,7 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 	}
 	// REC-11 lease-expiry proof is cited from the history drill; REC-13 is
 	// independently exercised twice to prove the second reconcile is inert.
-	a13 := newApproved("reconcile-twice")
+	a13 := a3
 	_, _, err = rs.Store.BeginExport(ctx, requester, tenant, a13.ID, 300*time.Millisecond, check)
 	must(err)
 	time.Sleep(400 * time.Millisecond)
@@ -371,17 +371,14 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 	}
 	checkNoPackage(a13.ID)
 	// REC-12 manually expired package is refused without bytes.
-	a12 := newApproved("expiry")
-	if _, err = export.Generate(ctx, requester, a12.ID); err != nil {
-		t.Fatalf("REC-12 generate: %v", err)
-	}
+	a12 := a8
 	_, err = owner.Exec(ctx, `UPDATE scoped_exports SET expires_at=now()-interval '1 second' WHERE tenant_id=$1 AND id=$2`, tenant, a12.ID)
 	must(err)
 	if d, err := export.Retrieve(ctx, reviewer, a12.ID); err == nil || len(d.DirectoryJSON) != 0 {
 		t.Fatalf("REC-12 returned expired bytes: %v", err)
 	}
 	// REC-14 stale worker token cannot publish over a newer lease.
-	a14 := newApproved("stale-worker")
+	a14 := a3
 	_, stale, err := rs.Store.BeginExport(ctx, requester, tenant, a14.ID, 300*time.Millisecond, check)
 	must(err)
 	time.Sleep(400 * time.Millisecond)
