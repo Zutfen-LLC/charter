@@ -1,0 +1,102 @@
+package exportbundle
+
+import (
+	"testing"
+
+	"github.com/Zutfen-LLC/charter/internal/evidence"
+)
+
+func TestAuthenticatedHistoricalGapNeverReturnsComplete(t *testing.T) {
+	const hold = "123e4567-e89b-42d3-a456-426614174001"
+	const uid = "123e4567-e89b-42d3-a456-426614174002"
+	planHash := evidence.SHA256([]byte("frozen historical plan"))
+	snap := evidence.SHA256([]byte("gap snapshot"))
+	const admitted = "2026-01-02T00:00:00Z"
+	m := map[string]any{
+		"schema_version": SchemaVersion, "profile": evidence.RetentionProfile, "export_id": fixtureTurn,
+		"snapshot": map[string]any{"id": snap, "revision": "19", "captured_at": "2026-02-01T00:00:00Z", "hold_ids": []any{hold}},
+		"scope":    map[string]any{"tenant_id": "tenant", "project_id": "project", "matter_id": "matter", "custodian_ids": []any{uid}, "window_start": "2026-01-01T00:00:00Z", "window_end": "2026-02-01T00:00:00Z"},
+		"custody":  map[string]any{"requester_id": "requester", "approver_id": "reviewer", "requested_at": "2026-02-01T00:00:00Z", "approved_at": "2026-02-01T00:01:00Z", "snapshot_id": snap},
+		"turns":    []any{}, "objects": []any{},
+	}
+	auditRow := func(id, at, action, actor string) map[string]any {
+		return map[string]any{"id": id, "at": at, "action": action, "actor_id": actor, "tenant_id": "tenant", "export_id": fixtureTurn, "snapshot_id": snap, "intent_digest": planHash}
+	}
+	request := auditRow("7", "2026-02-01T00:00:00Z", "export.request", "requester")
+	approval := auditRow("8", "2026-02-01T00:01:00Z", "export.approve", "reviewer")
+	m["custody_audit"] = map[string]any{"version": "scoped_projection_v1", "rows": []any{request, approval}}
+	missing := map[string]any{"key": "charter/v1/lab/tenant/admissions/" + planHash, "version": "v1", "plan_epoch": 7, "disposition": "absent"}
+	gap := map[string]any{"turn_id": fixtureTurn, "kind": "complete_loss", "custodian_id": uid, "recorded_at": admitted, "hold_ids": []any{hold}, "missing_versions": []any{missing}}
+	m["gaps"] = []any{gap}
+	verify := func() (Result, error) {
+		raw, err := evidence.Canonical(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return VerifyMembers(map[string][]byte{"manifest.json": raw}, evidence.RetentionProfile, evidence.SHA256(raw))
+	}
+	got, err := verify()
+	if err != nil || got.Status != DeclaredGap || got.Turns != 0 || len(got.Gaps) != 1 {
+		t.Fatalf("authentic declared historical loss = %#v %v", got, err)
+	}
+	shared := map[string]any{"key": "charter/v1/lab/tenant/data/objects/" + planHash, "version": "shared-v1", "plan_epoch": 7, "disposition": "retained_shared"}
+	gap["kind"] = "disposed"
+	gap["retained_shared_versions"] = []any{shared}
+	if got, err := verify(); err != nil || got.Status != DeclaredGap || got.Turns != 0 || len(got.Gaps) != 1 {
+		t.Errorf("authentic disposed shared attribution = %#v %v", got, err)
+	}
+	for _, invalid := range []struct {
+		field string
+		value any
+	}{
+		{"disposition", "deleted"}, {"key", "charter/v1/lab/other/data/objects/" + planHash}, {"key", missing["key"]}, {"version", "null"}, {"plan_epoch", -1},
+	} {
+		previous := shared[invalid.field]
+		shared[invalid.field] = invalid.value
+		if _, err := verify(); err == nil {
+			t.Errorf("accepted malformed shared attribution %s", invalid.field)
+		}
+		shared[invalid.field] = previous
+	}
+	gap["retained_shared_versions"] = []any{shared, shared}
+	if _, err := verify(); err == nil {
+		t.Error("accepted duplicate shared attribution")
+	}
+	gap["retained_shared_versions"] = []any{shared}
+	missing["key"], missing["version"] = shared["key"], shared["version"]
+	if _, err := verify(); err == nil {
+		t.Error("accepted shared exact version also declared missing")
+	}
+	missing["key"], missing["version"] = "charter/v1/lab/tenant/admissions/"+planHash, "v1"
+	gap["kind"] = "complete_loss"
+	if _, err := verify(); err == nil {
+		t.Error("accepted shared attribution on a non-disposed gap")
+	}
+	delete(gap, "retained_shared_versions")
+
+	projection := m["custody_audit"]
+	delete(m, "custody_audit")
+	if _, err = verify(); err == nil {
+		t.Fatal("retained bundle missing scoped custody audit was accepted")
+	}
+	m["custody_audit"] = projection
+	for field, wrong := range map[string]string{"actor_id": "requester", "tenant_id": "other-tenant", "id": "7", "at": "yesterday", "snapshot_id": planHash, "intent_digest": snap, "action": "export.retrieve"} {
+		previous := approval[field]
+		approval[field] = wrong
+		if _, err = verify(); err == nil {
+			t.Fatalf("unscoped or inconsistent custody audit %s was accepted", field)
+		}
+		approval[field] = previous
+	}
+	for _, disposition := range []string{"planned", "unknown", "protected"} {
+		missing["disposition"] = disposition
+		if _, err = verify(); err == nil {
+			t.Fatalf("accepted unverified loss %q", disposition)
+		}
+	}
+	missing["disposition"] = "deleted"
+	gap["kind"] = "partial_loss"
+	if _, err = verify(); err == nil {
+		t.Fatal("partial loss without surviving evidence was accepted")
+	}
+}

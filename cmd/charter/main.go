@@ -276,6 +276,9 @@ func serveWithSharePoint(ctx context.Context, cfg config.Config, connector *shar
 			return err
 		}
 		auth := &server.Auth{Verifier: v, Store: &store.Store{DB: deps.Workspace}, Evidence: rec, Budget: ledger.Summary, SharePoint: connector, Records: recordsService}
+		if retained, ok := backend.(*evidence.RetentionBackend); ok && recordsService.Storage != nil {
+			auth.Exports = &server.RetainedExports{Records: recordsService, Backend: retained}
+		}
 		opts = append(opts, server.WithAuth(auth))
 		log.Printf("OIDC enabled: issuer=%s tenant=%s", o.Issuer, o.TenantID)
 		if o.AllowInsecureLoopback {
@@ -286,6 +289,27 @@ func serveWithSharePoint(ctx context.Context, cfg config.Config, connector *shar
 	}
 
 	handler := server.New(depsReady, info, opts...)
+	if recordsService.Retained {
+		maintenance, stop := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			tick := time.NewTicker(time.Minute)
+			defer tick.Stop()
+			for maintenance.Err() == nil {
+				pass, cancel := context.WithTimeout(maintenance, 10*time.Second)
+				if err := recordsService.Store.ReconcileDueExports(pass); err != nil && maintenance.Err() == nil {
+					log.Print("export custody maintenance: reconciliation unavailable")
+				}
+				cancel()
+				select {
+				case <-maintenance.Done():
+				case <-tick.C:
+				}
+			}
+		}()
+		defer func() { stop(); <-done }()
+	}
 	log.Printf("charter evidence backend: kind=%s retention_enforced=%t scope=%s", info.Kind, info.RetentionEnforced, info.RetentionStatus)
 	return serveFencedHTTP(ctx, cfg.Addr, fence, handler)
 }

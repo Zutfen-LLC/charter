@@ -167,11 +167,15 @@ func (b *RetentionBackend) eventSlot(tenant, turn string, seq uint64) string {
 	return b.prefix + tenant + "/events/" + turn + "/" + strconv.FormatUint(seq, 10)
 }
 func (b *RetentionBackend) eventData(ctx context.Context, ent *retainedEntry) error {
+	return b.eventDataWithReader(ctx, ent, b.retainedBytes)
+}
+
+func (b *RetentionBackend) eventDataWithReader(ctx context.Context, ent *retainedEntry, read func(context.Context, retainedObjectReceipt) ([]byte, error)) error {
 	c := ent.commit
 	if c.Event.Key != b.eventKey(c.Tenant, c.Turn, c.EventHash) || c.Event.EvidenceID != c.EventHash || c.Event.Tenant != c.Tenant {
 		return ErrConflict
 	}
-	raw, err := b.retainedBytes(ctx, c.Event)
+	raw, err := read(ctx, c.Event)
 	if err != nil {
 		return err
 	}
@@ -201,7 +205,7 @@ func (b *RetentionBackend) eventData(ctx context.Context, ent *retainedEntry) er
 		if !ok || n < 0 || uint64(n) != r.Length || r.Tenant != c.Tenant || r.EvidenceID != r.SHA256 || r.Key != b.objectKey(c.Tenant, r.SHA256) || r.EventHash != "" || r.Seq != 0 {
 			return ErrConflict
 		}
-		data, err := b.retainedBytes(ctx, r)
+		data, err := read(ctx, r)
 		if err != nil {
 			return err
 		}
