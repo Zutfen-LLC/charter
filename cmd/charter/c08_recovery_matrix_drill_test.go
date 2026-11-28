@@ -340,15 +340,36 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 	// REC-10 cancellation is idempotent and blocks generation/retrieval.
 	a10 := newApproved("cancel")
 	must(export.Cancel(ctx, requester, a10.ID))
-	must(export.Cancel(ctx, requester, a10.ID))
+	if err := export.Cancel(ctx, requester, a10.ID); err != nil {
+		t.Errorf("REC-10 repeated cancellation was not idempotent: %v", err)
+	}
 	if _, err = export.Generate(ctx, requester, a10.ID); err == nil {
 		t.Fatal("REC-10 generated cancelled export")
 	}
 	if d, err := export.Retrieve(ctx, reviewer, a10.ID); err == nil || len(d.DirectoryJSON) != 0 {
 		t.Fatalf("REC-10 returned bytes: %v", err)
 	}
-	// REC-11/13 reuse the existing drill's direct abandoned-lease and
-	// reconcile assertions (lines 215-234), without duplicating that scenario.
+	// REC-11 lease-expiry proof is cited from the history drill; REC-13 is
+	// independently exercised twice to prove the second reconcile is inert.
+	a13 := newApproved("reconcile-twice")
+	_, _, err = rs.Store.BeginExport(ctx, requester, tenant, a13.ID, 300*time.Millisecond, check)
+	must(err)
+	time.Sleep(400 * time.Millisecond)
+	must(rs.Store.ReconcileDueExports(ctx))
+	var state13 string
+	var attempt13 pgtype.Text
+	must(ws.QueryRow(ctx, `SELECT state,attempt_token::text FROM scoped_exports WHERE tenant_id=$1 AND id=$2`, tenant, a13.ID).Scan(&state13, &attempt13))
+	if state13 != records.ExportApproved || attempt13.Valid {
+		t.Errorf("REC-13 first reconcile state=%q token_valid=%v", state13, attempt13.Valid)
+	}
+	must(rs.Store.ReconcileDueExports(ctx))
+	var state13Again string
+	var attempt13Again pgtype.Text
+	must(ws.QueryRow(ctx, `SELECT state,attempt_token::text FROM scoped_exports WHERE tenant_id=$1 AND id=$2`, tenant, a13.ID).Scan(&state13Again, &attempt13Again))
+	if state13Again != state13 || attempt13Again.Valid != attempt13.Valid {
+		t.Errorf("REC-13 second reconcile changed terminal recovery state")
+	}
+	checkNoPackage(a13.ID)
 	// REC-12 manually expired package is refused without bytes.
 	a12 := newApproved("expiry")
 	if _, err = export.Generate(ctx, requester, a12.ID); err != nil {
