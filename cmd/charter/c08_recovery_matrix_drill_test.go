@@ -90,7 +90,7 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 	must(err)
 	defer ws.Close()
 	auth := store.Store{DB: owner}
-	tenant, err := auth.CreateTenant(ctx, "urn:charter:synthetic:c08-history", "seed", "synthetic C08 historical loss")
+	tenant, err := auth.CreateTenant(ctx, "urn:charter:synthetic:c08-recovery", "seed", "synthetic C08 recovery matrix")
 	must(err)
 	mkUser := func(subject, role string) store.Principal {
 		id, err := auth.CreateUser(ctx, tenant, subject, "synthetic "+subject)
