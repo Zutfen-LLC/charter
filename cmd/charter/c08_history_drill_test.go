@@ -8,10 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -166,6 +168,35 @@ func runC08NativeHistory(t *testing.T, ctx context.Context, c config.Config, own
 		if label == "full" {
 			if err != nil || outcome != "disposed" {
 				t.Fatalf("real full disposition: %s %v", outcome, err)
+			}
+			// Repeat the authenticated lifecycle finish concurrently after
+			// terminal disposal. The HTTP purge-finish handler delegates to
+			// this same service method with its authenticated records officer.
+			const retries = 4
+			var retryWG sync.WaitGroup
+			retryErrs := make(chan error, retries)
+			for n := 0; n < retries; n++ {
+				retryWG.Add(1)
+				go func() {
+					defer retryWG.Done()
+					actor := disposer
+					got, _, retryErr := rs.FinishPurge(ctx, &actor, id)
+					if retryErr != nil {
+						retryErrs <- retryErr
+					} else if got != "not_purging" {
+						retryErrs <- fmt.Errorf("retry outcome %q", got)
+					}
+				}()
+			}
+			retryWG.Wait()
+			close(retryErrs)
+			for retryErr := range retryErrs {
+				t.Errorf("concurrent native finish retry: %v", retryErr)
+			}
+			var planRows int
+			must(ws.QueryRow(ctx, `SELECT count(*) FROM disposal_plans WHERE tenant_id=$1 AND turn_id=$2`, tenant, id).Scan(&planRows))
+			if planRows == 0 {
+				t.Fatal("native idempotent retry erased completed plan required by historical export")
 			}
 		} else if !errors.Is(err, records.ErrBlockedStorage) {
 			t.Fatalf("expected selective native interruption %s: %s %v", label, outcome, err)

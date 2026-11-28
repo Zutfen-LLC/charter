@@ -1305,16 +1305,10 @@ func (s *Store) FinishPurgeTx(ctx context.Context, actor *store.Principal, tenan
 		}
 		if it.State != ItemPurging {
 			*outcome = "not_purging"
-			// The plan is destroyed only for a turn whose disposal COMPLETED
-			// (every planned version has a verified disposition). A restored
-			// or still-pending item KEEPS its durable exact-version
-			// identity: a partial physical deletion must never lose the
-			// only remaining inventory (C07 round-2 finding 4).
-			if it.State == ItemDisposed {
-				if err := DeletePlan(ctx, tx, it.TenantID, it.TurnID); err != nil {
-					return err
-				}
-			}
+			// Completed plans are the authoritative exact-version ledger for
+			// historical C08 loss exports. A retry of an already disposed item
+			// must never erase those verified dispositions; intact restoration
+			// still clears its plan in restoreActive above.
 			return nil
 		}
 		epoch, err := lockEpoch(ctx, tx, it.TenantID, it.MatterID, false)

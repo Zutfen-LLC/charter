@@ -145,6 +145,13 @@ and scope change is also fixed).
   and every planned version receives a verified disposition (`deleted`,
   `absent`, `retained_shared`, `protected`) in the same transaction that
   marks the item disposed.
+- A completed `disposal_plans` ledger is historical authority, not active
+  intent: an authorized or concurrent `finish_purge` retry against an already
+  disposed item returns `not_purging` without deleting the plan or adding a
+  second completion audit. C08 historical exports continue to use those exact
+  verified dispositions to distinguish physical loss from retained shared
+  survivors. A plan is cleared only when a hold-driven restoration has
+  verified every planned version intact; partial loss keeps the plan.
 - Scope revision binding: a scope change moves `holds.epoch` to the new
   matter epoch, and the effective transition (MarkEffective) is bound to
   the exact scope revision the establishment verified. A stale
