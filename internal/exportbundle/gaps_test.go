@@ -39,6 +39,41 @@ func TestAuthenticatedHistoricalGapNeverReturnsComplete(t *testing.T) {
 	if err != nil || got.Status != DeclaredGap || got.Turns != 0 || len(got.Gaps) != 1 {
 		t.Fatalf("authentic declared historical loss = %#v %v", got, err)
 	}
+	shared := map[string]any{"key": "charter/v1/lab/tenant/data/objects/" + planHash, "version": "shared-v1", "plan_epoch": 7, "disposition": "retained_shared"}
+	gap["kind"] = "disposed"
+	gap["retained_shared_versions"] = []any{shared}
+	if got, err := verify(); err != nil || got.Status != DeclaredGap || got.Turns != 0 || len(got.Gaps) != 1 {
+		t.Errorf("authentic disposed shared attribution = %#v %v", got, err)
+	}
+	for _, invalid := range []struct {
+		field string
+		value any
+	}{
+		{"disposition", "deleted"}, {"key", "charter/v1/lab/other/data/objects/" + planHash}, {"key", missing["key"]}, {"version", "null"}, {"plan_epoch", -1},
+	} {
+		previous := shared[invalid.field]
+		shared[invalid.field] = invalid.value
+		if _, err := verify(); err == nil {
+			t.Errorf("accepted malformed shared attribution %s", invalid.field)
+		}
+		shared[invalid.field] = previous
+	}
+	gap["retained_shared_versions"] = []any{shared, shared}
+	if _, err := verify(); err == nil {
+		t.Error("accepted duplicate shared attribution")
+	}
+	gap["retained_shared_versions"] = []any{shared}
+	missing["key"], missing["version"] = shared["key"], shared["version"]
+	if _, err := verify(); err == nil {
+		t.Error("accepted shared exact version also declared missing")
+	}
+	missing["key"], missing["version"] = "charter/v1/lab/tenant/admissions/"+planHash, "v1"
+	gap["kind"] = "complete_loss"
+	if _, err := verify(); err == nil {
+		t.Error("accepted shared attribution on a non-disposed gap")
+	}
+	delete(gap, "retained_shared_versions")
+
 	projection := m["custody_audit"]
 	delete(m, "custody_audit")
 	if _, err = verify(); err == nil {
