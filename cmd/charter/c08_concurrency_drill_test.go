@@ -297,6 +297,186 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		}
 		assertNoPackage(r.ID)
 	})
+	// Concurrent boundary series: the sequential subtests above prove the
+	// stale-state side of each boundary (the mutation committed first).
+	// Each subtest below races the mutation against the generation's or the
+	// export transaction's durable window deterministically: the
+	// barrier-based subtests pause the OPEN export transaction at the
+	// Hooks.AtEpochLock seam (which fires inside the snapshot or
+	// revalidation transaction while it holds the protection fence, the
+	// scoped item rows and the matter epoch row, so the racing release or
+	// scope change blocks on the epoch row until the transaction commits);
+	// the phase-gap subtests commit the mutation between the two durable
+	// generation phases (lease acquired, publication not yet attempted) -
+	// the exact window a concurrent mutation can win. The interleaving and
+	// the linearization winner are forced, never observed by chance.
+	t.Run("CONC-02-release-vs-snapshot-concurrent", func(t *testing.T) {
+		f := fresh("02c")
+		hold := place(f, "conc-02c-hold")
+		entered, proceed := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		rs.Store.Hooks.AtEpochLock = func(stage, _, matter string) {
+			if stage == "export_snapshot" && matter == f.matter {
+				once.Do(func() { close(entered) })
+				<-proceed
+			}
+		}
+		defer func() { rs.Store.Hooks.AtEpochLock = nil }()
+		reqDone, reqErrC := make(chan records.ExportSummary, 1), make(chan error, 1)
+		go func() {
+			r, e := h.ex.Request(ctx, requester, records.NewExportRequest{RequestID: "conc-02c-export", Intent: records.ExportIntent{ProjectID: f.project, MatterID: f.matter, CustodianIDs: []string{custodian.UserID}, WindowStart: started.UTC().Add(-time.Second), WindowEnd: time.Now().UTC(), Reason: "release concurrent with snapshot"}})
+			reqDone <- r
+			reqErrC <- e
+		}()
+		<-entered
+		relDone := make(chan error, 1)
+		go func() {
+			_, e := h.rs.Release(ctx, requester, hold.ID, "synthetic concurrent release")
+			relDone <- e
+		}()
+		close(proceed)
+		r := <-reqDone
+		if e := <-reqErrC; e != nil {
+			t.Fatalf("capture linearizing before the release must succeed: %v", e)
+		}
+		if e := <-relDone; e != nil {
+			t.Fatalf("release after the capture committed: %v", e)
+		}
+		var snap records.ExportSnapshot
+		if json.Unmarshal(r.Snapshot, &snap) != nil || len(snap.HoldIDs) != 1 || snap.HoldIDs[0] != hold.ID {
+			t.Fatalf("pre-release snapshot must freeze the effective hold: %+v", snap.HoldIDs)
+		}
+		if _, e := h.ex.Approve(ctx, reviewer, r.ID, r.SnapshotDigest); e == nil {
+			t.Fatal("approval accepted a hold released after the snapshot")
+		}
+		assertNoPackage("conc-02c-export")
+	})
+	t.Run("CONC-03-release-vs-generation-concurrent", func(t *testing.T) {
+		f := fresh("03c")
+		hold := place(f, "conc-03c-hold")
+		r := request(f, "conc-03c-export")
+		approved(r)
+		// The release commits in the exact mid-generation window: after the
+		// durable generation lease is acquired, before publication is
+		// attempted (the window in which a real concurrent release can
+		// commit, because no locks are held during readback). The
+		// publication revalidation must then refuse: no bytes, ever.
+		_, check := h.rs.ExportSnapshotCallbacks(requester.TenantID, requester.UserID)
+		_, token, e := h.rs.Store.BeginExport(ctx, requester, requester.TenantID, r.ID, time.Minute, check)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e := h.rs.Release(ctx, requester, hold.ID, "synthetic release between generation phases"); e != nil {
+			t.Fatal(e)
+		}
+		accept := func([]byte, string, string) error { return nil }
+		if _, e := h.rs.Store.PublishExport(ctx, requester, requester.TenantID, r.ID, token, r.SnapshotDigest, strings.Repeat("a", 64), []byte("synthetic staged package"), accept, check); e == nil {
+			t.Fatal("generation published content whose hold was released mid-generation")
+		}
+		assertNoPackage(r.ID)
+	})
+	t.Run("CONC-05-release-vs-retrieval-concurrent", func(t *testing.T) {
+		f := fresh("05c")
+		hold := place(f, "conc-05c-hold")
+		r := request(f, "conc-05c-export")
+		approved(r)
+		if _, e := h.ex.Generate(ctx, requester, r.ID); e != nil {
+			t.Fatal(e)
+		}
+		entered, proceed := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		rs.Store.Hooks.AtEpochLock = func(stage, _, matter string) {
+			if stage == "export_revalidate" && matter == f.matter {
+				once.Do(func() { close(entered) })
+				<-proceed
+			}
+		}
+		defer func() { rs.Store.Hooks.AtEpochLock = nil }()
+		got := make(chan []byte, 1)
+		getErr := make(chan error, 1)
+		go func() {
+			p, e := h.ex.Retrieve(ctx, reviewer, r.ID)
+			got <- p.DirectoryJSON
+			getErr <- e
+		}()
+		<-entered
+		relDone := make(chan error, 1)
+		go func() {
+			_, e := h.rs.Release(ctx, requester, hold.ID, "synthetic release concurrent with retrieval")
+			relDone <- e
+		}()
+		close(proceed)
+		if e := <-getErr; e != nil {
+			t.Fatalf("retrieval linearizing before the release must deliver: %v", e)
+		}
+		if len(<-got) == 0 {
+			t.Fatal("retrieval linearizing before the release delivered no bytes")
+		}
+		if e := <-relDone; e != nil {
+			t.Fatalf("release after the retrieval committed: %v", e)
+		}
+		if p, e := h.ex.Retrieve(ctx, reviewer, r.ID); e == nil || len(p.DirectoryJSON) != 0 {
+			t.Fatal("post-release retrieval delivered bytes")
+		}
+	})
+	t.Run("CONC-06-scope-change-vs-approval-concurrent", func(t *testing.T) {
+		f := fresh("06c")
+		hold := place(f, "conc-06c-hold")
+		r := request(f, "conc-06c-export")
+		entered, proceed := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		rs.Store.Hooks.AtEpochLock = func(stage, _, matter string) {
+			if stage == "export_revalidate" && matter == f.matter {
+				once.Do(func() { close(entered) })
+				<-proceed
+			}
+		}
+		defer func() { rs.Store.Hooks.AtEpochLock = nil }()
+		approveDone := make(chan error, 1)
+		go func() {
+			_, e := h.ex.Approve(ctx, reviewer, r.ID, r.SnapshotDigest)
+			approveDone <- e
+		}()
+		<-entered
+		scopeDone := make(chan error, 1)
+		go func() {
+			_, e := rs.Store.ChangeScope(ctx, requester, hold.ID, records.Scope{MatterID: f.matter, CustodianIDs: []string{}}, "synthetic concurrent scope revision")
+			scopeDone <- e
+		}()
+		close(proceed)
+		if e := <-approveDone; e != nil {
+			t.Fatalf("approval linearizing before the scope change must succeed: %v", e)
+		}
+		if e := <-scopeDone; e != nil {
+			t.Fatalf("scope change after the approval committed: %v", e)
+		}
+		if _, e := h.ex.Generate(ctx, requester, r.ID); e == nil {
+			t.Fatal("generation accepted a scope revised after approval")
+		}
+		assertNoPackage(r.ID)
+	})
+	t.Run("CONC-07-scope-change-vs-generation-concurrent", func(t *testing.T) {
+		f := fresh("07c")
+		hold := place(f, "conc-07c-hold")
+		r := request(f, "conc-07c-export")
+		approved(r)
+		// The scope revision commits in the exact mid-generation window
+		// (durable lease acquired, publication not attempted): the
+		// publication revalidation must then refuse on the moved epoch.
+		_, check := h.rs.ExportSnapshotCallbacks(requester.TenantID, requester.UserID)
+		_, token, e := h.rs.Store.BeginExport(ctx, requester, requester.TenantID, r.ID, time.Minute, check)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e := rs.Store.ChangeScope(ctx, requester, hold.ID, records.Scope{MatterID: f.matter, CustodianIDs: []string{}}, "synthetic scope revision between generation phases"); e != nil {
+			t.Fatal(e)
+		}
+		accept := func([]byte, string, string) error { return nil }
+		if _, e := h.rs.Store.PublishExport(ctx, requester, requester.TenantID, r.ID, token, r.SnapshotDigest, strings.Repeat("b", 64), []byte("synthetic staged package"), accept, check); e == nil {
+			t.Fatal("generation published content whose scope was revised mid-generation")
+		}
+		assertNoPackage(r.ID)
+	})
 	t.Run("CONC-08-capture-vs-snapshot", func(t *testing.T) {
 		f := fresh("08")
 		place(f, "conc-08-hold")

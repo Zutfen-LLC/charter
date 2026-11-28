@@ -229,6 +229,11 @@ func (s *Service) captureExportSnapshot(ctx context.Context, tx pgx.Tx, tenantID
 	if err != nil {
 		return nil, err
 	}
+	// Deterministic interleave point for concurrency qualification: the
+	// capture transaction holds the protection fence, the scoped item rows
+	// and the matter epoch row at this point, so a concurrent hold release
+	// or scope change blocks on the epoch row until the capture commits.
+	s.Store.hookEpoch("export_snapshot", tenantID, i.MatterID)
 	holds, err := ActiveHolds(ctx, tx, tenantID, i.MatterID)
 	if err != nil {
 		return nil, err

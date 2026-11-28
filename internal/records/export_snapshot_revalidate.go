@@ -42,6 +42,12 @@ func (s *Service) revalidateFrozenExport(ctx context.Context, tx pgx.Tx, frozen 
 	if err != nil {
 		return err
 	}
+	// Deterministic interleave point for concurrency qualification: the
+	// revalidating transaction holds the protection fence, the frozen
+	// records' rows and the matter epoch row at this point, so a concurrent
+	// hold release or scope change blocks on the epoch row until the
+	// revalidation commits.
+	s.Store.hookEpoch("export_revalidate", frozen.TenantID, i.MatterID)
 	if epoch != frozen.Epoch {
 		return ErrExportConflict
 	}
