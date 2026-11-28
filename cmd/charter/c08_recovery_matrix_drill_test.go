@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,9 +63,9 @@ func TestC08NativeRecoveryMatrixDrill(t *testing.T) {
 func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Config, owner *pgxpool.Pool, root string) {
 	t.Helper()
 	must := func(err error) {
-		t.Helper()
 		if err != nil {
-			t.Fatal(err)
+			_, file, line, _ := runtime.Caller(1)
+			t.Fatalf("%s:%d: %v", filepath.Base(file), line, err)
 		}
 	}
 	sc := c.RetentionS3
