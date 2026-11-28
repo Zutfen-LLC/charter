@@ -18,10 +18,12 @@ import (
 // identities, roles, role grants and the scoped_exports lifecycle row remain
 // PostgreSQL-backed through newEnv and records.Store.
 type c08LifecycleProbe struct {
-	e       *env
-	calls   map[string]int
-	denials int
-	deny    bool
+	e              *env
+	calls          map[string]int
+	denials        int
+	deny           bool
+	requester      string
+	requesterGrant time.Time
 }
 
 func (p *c08LifecycleProbe) AuditDenial(context.Context, store.Principal, string, string, int) error {
@@ -33,12 +35,22 @@ func (p *c08LifecycleProbe) Request(_ context.Context, actor store.Principal, re
 	if p.deny || req.Intent.ProjectID != p.e.p1 || req.Intent.MatterID == "foreign-matter" || containsID(req.Intent.CustodianIDs, p.e.users["bob"]) || !req.Intent.WindowStart.Before(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)) {
 		return records.ExportSummary{}, store.ErrNotFound
 	}
+	if p.requester == "" {
+		p.requester = actor.UserID
+		if err := p.e.st.DB.QueryRow(context.Background(), `SELECT granted_at FROM tenant_roles WHERE tenant_id=$1 AND user_id=$2 AND role=$3`, actor.TenantID, actor.UserID, store.RoleRecordsOfficer).Scan(&p.requesterGrant); err != nil {
+			return records.ExportSummary{}, err
+		}
+	}
 	return records.ExportSummary{ID: "11111111-1111-4111-8111-111111111111", State: records.ExportRequested, SnapshotDigest: strings.Repeat("a", 64)}, nil
 }
 func (p *c08LifecycleProbe) Approve(_ context.Context, actor store.Principal, id, digest string) (records.ExportSummary, error) {
 	p.calls["approve"]++
-	if p.deny || actor.UserID == p.e.users["dave"] { // requester's combined role cannot self-approve
+	if p.deny || actor.UserID == p.e.users["dave"] {
 		return records.ExportSummary{}, records.ErrExportConflict
+	}
+	var activeGrant time.Time
+	if err := p.e.st.DB.QueryRow(context.Background(), `SELECT granted_at FROM tenant_roles WHERE tenant_id=$1 AND user_id=$2 AND role=$3`, actor.TenantID, p.requester, store.RoleRecordsOfficer).Scan(&activeGrant); err != nil || !activeGrant.Equal(p.requesterGrant) {
+		return records.ExportSummary{}, store.ErrForbidden
 	}
 	return records.ExportSummary{ID: id, State: records.ExportApproved, SnapshotDigest: digest}, nil
 }
@@ -145,6 +157,23 @@ func TestC08HTTPExportLifecycleAuthorizationMatrix(t *testing.T) {
 	if !strings.Contains(selfRec.Body.String(), `"error":"export conflict"`) {
 		t.Fatalf("unexpected self-approval refusal: %q", selfRec.Body.String())
 	}
+	approval := func() *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/exports/"+id+"/approve", strings.NewReader(`{"snapshot_digest":"`+strings.Repeat("a", 64)+`"}`))
+		req.Header.Set("Authorization", "Bearer "+e.idp.Token("sub-erin"))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		e.h.ServeHTTP(rec, req)
+		return rec
+	}
+	if _, err := e.st.DB.Exec(ctx, `DELETE FROM tenant_roles WHERE tenant_id=$1 AND user_id=$2 AND role=$3`, e.tenant, e.users["dave"], store.RoleRecordsOfficer); err != nil {
+		t.Fatal(err)
+	}
+	denyNoLeak(approval(), http.StatusForbidden)
+	if err := e.st.SeedRole(ctx, e.tenant, e.users["dave"], store.RoleRecordsOfficer); err != nil {
+		t.Fatal(err)
+	}
+	denyNoLeak(approval(), http.StatusForbidden) // stale request remains stale after regrant
 
 	// Other-tenant reviewer reaches the production route but cannot discover an
 	// export ID; response is 404 without package or manifest metadata.
