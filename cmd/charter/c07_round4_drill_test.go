@@ -231,13 +231,13 @@ func TestC07Round4ReviewDrill(t *testing.T) {
 		t.Fatal("no admission marker in refs")
 		return evidence.VersionRef{}
 	}
-	// slotMarkerOf returns the event-slot marker (key events/<seq>) for the
-	// given sequence.
+	// slotMarkerOf returns the event-slot marker (key events/<turn>/<seq>)
+	// for the given sequence.
 	slotMarkerOf := func(refs []evidence.VersionRef, seq int) evidence.VersionRef {
 		t.Helper()
-		want := "/events/" + strconv.Itoa(seq)
+		want := strconv.Itoa(seq)
 		for _, r := range refs {
-			if strings.HasSuffix(r.Key, want) {
+			if slotSeqOf(r.Key) == want {
 				return r
 			}
 		}
