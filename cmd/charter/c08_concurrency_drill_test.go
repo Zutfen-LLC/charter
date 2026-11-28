@@ -190,25 +190,28 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		cancelExport(id)
 	}
 	place := h.place
-	// waitBlockedOnEpochRow fails the subtest unless a backend running an
-	// epoch-row statement is observed waiting on a database lock: this
-	// proves the racing hold mutation (release or scope change, whose
-	// epoch bump UPDATE targets matter_hold_epochs) reached and blocked
-	// on the epoch row held by the still-open export transaction. The
-	// interleaving is therefore observed, not merely consistent with
-	// the outcome; a mutation that never blocks fails the drill.
-	waitBlockedOnEpochRow := func(t *testing.T) {
+	// waitBlockedOnExportLock fails the subtest unless a backend of the
+	// racing hold mutation is observed waiting on a row lock while running
+	// one of the statements its lifecycle transaction executes: beginTx
+	// locks the tenant row FOR NO KEY UPDATE before every other lock, so a
+	// mutation racing an open export transaction blocks there first (or,
+	// when the tenant row is free, on the matter epoch row the export
+	// transaction holds). This proves the mutation entered its production
+	// transaction and is blocked by the open export transaction's locks:
+	// the interleaving is observed, not merely consistent with the
+	// outcome; a mutation that never blocks fails the drill.
+	waitBlockedOnExportLock := func(t *testing.T) {
 		deadline := time.Now().Add(15 * time.Second)
 		for {
 			var blocked int
-			if err := ws.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query ILIKE '%matter_hold_epochs%' AND pid <> pg_backend_pid()`).Scan(&blocked); err != nil {
-				t.Fatalf("epoch-row block observation: %v", err)
+			if err := ws.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND (query ILIKE '%matter_hold_epochs%' OR query ILIKE '%FROM tenants WHERE id=$1 FOR NO KEY UPDATE%') AND pid <> pg_backend_pid()`).Scan(&blocked); err != nil {
+				t.Fatalf("export-lock block observation: %v", err)
 			}
 			if blocked > 0 {
 				return
 			}
 			if time.Now().After(deadline) {
-				t.Fatal("racing mutation never blocked on the epoch row held by the open export transaction")
+				t.Fatal("racing mutation never blocked on a row lock held by the open export transaction")
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
@@ -352,22 +355,26 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 	// export transaction's durable window deterministically: the
 	// barrier-based subtests pause the OPEN export transaction at the
 	// Hooks.AtEpochLock seam (which fires inside the snapshot or
-	// revalidation transaction while it holds the protection fence, the
-	// scoped item rows and the matter epoch row) and only release it after
-	// pg_stat_activity shows the racing mutation blocked on the epoch row,
-	// so the interleaving is observed, not merely consistent with the
-	// outcome; the phase-gap subtests commit the mutation between the two
-	// durable generation phases (lease acquired, publication not yet
-	// attempted) - the exact window a concurrent mutation can win. The
-	// linearization winner is forced, never observed by chance.
+	// revalidation transaction while it holds the tenant row, the
+	// protection fence, the scoped item rows and the matter epoch row) and
+	// only release it after pg_stat_activity shows the racing mutation
+	// blocked on a row lock that transaction holds, so the interleaving is
+	// observed, not merely consistent with the outcome; the phase-gap
+	// subtests commit the mutation between the two durable generation
+	// phases (lease acquired, publication not yet attempted) - the exact
+	// window a concurrent mutation can win. The linearization winner is
+	// forced, never observed by chance.
 	t.Run("CONC-02-release-vs-snapshot-concurrent", func(t *testing.T) {
 		f := fresh("02c")
 		hold := place(f, "conc-02c-hold")
 		entered, proceed := make(chan struct{}), make(chan struct{})
-		var once sync.Once
+		var enteredOnce sync.Once
+		var finishOnce sync.Once
+		finish := func() { finishOnce.Do(func() { close(proceed) }) }
+		defer finish() // never leak the paused capture transaction, even on failure
 		rs.Store.Hooks.AtEpochLock = func(stage, _, matter string) {
 			if stage == "export_snapshot" && matter == f.matter {
-				once.Do(func() { close(entered) })
+				enteredOnce.Do(func() { close(entered) })
 				<-proceed
 			}
 		}
@@ -384,8 +391,8 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 			_, e := h.rs.Release(ctx, requester, hold.ID, "synthetic concurrent release")
 			relDone <- e
 		}()
-		waitBlockedOnEpochRow(t)
-		close(proceed)
+		waitBlockedOnExportLock(t)
+		finish()
 		r := <-reqDone
 		if e := <-reqErrC; e != nil {
 			t.Fatalf("capture linearizing before the release must succeed: %v", e)
@@ -435,10 +442,13 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 			t.Fatal(e)
 		}
 		entered, proceed := make(chan struct{}), make(chan struct{})
-		var once sync.Once
+		var enteredOnce sync.Once
+		var finishOnce sync.Once
+		finish := func() { finishOnce.Do(func() { close(proceed) }) }
+		defer finish() // never leak the paused retrieval transaction, even on failure
 		rs.Store.Hooks.AtEpochLock = func(stage, _, matter string) {
 			if stage == "export_revalidate" && matter == f.matter {
-				once.Do(func() { close(entered) })
+				enteredOnce.Do(func() { close(entered) })
 				<-proceed
 			}
 		}
@@ -456,8 +466,8 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 			_, e := h.rs.Release(ctx, requester, hold.ID, "synthetic release concurrent with retrieval")
 			relDone <- e
 		}()
-		waitBlockedOnEpochRow(t)
-		close(proceed)
+		waitBlockedOnExportLock(t)
+		finish()
 		if e := <-getErr; e != nil {
 			t.Fatalf("retrieval linearizing before the release must deliver: %v", e)
 		}
@@ -476,10 +486,13 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		hold := place(f, "conc-06c-hold")
 		r := request(f, "conc-06c-export")
 		entered, proceed := make(chan struct{}), make(chan struct{})
-		var once sync.Once
+		var enteredOnce sync.Once
+		var finishOnce sync.Once
+		finish := func() { finishOnce.Do(func() { close(proceed) }) }
+		defer finish() // never leak the paused approval transaction, even on failure
 		rs.Store.Hooks.AtEpochLock = func(stage, _, matter string) {
 			if stage == "export_revalidate" && matter == f.matter {
-				once.Do(func() { close(entered) })
+				enteredOnce.Do(func() { close(entered) })
 				<-proceed
 			}
 		}
@@ -495,8 +508,8 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 			_, e := rs.Store.ChangeScope(ctx, requester, hold.ID, records.Scope{MatterID: f.matter, CustodianIDs: []string{}}, "synthetic concurrent scope revision")
 			scopeDone <- e
 		}()
-		waitBlockedOnEpochRow(t)
-		close(proceed)
+		waitBlockedOnExportLock(t)
+		finish()
 		if e := <-approveDone; e != nil {
 			t.Fatalf("approval linearizing before the scope change must succeed: %v", e)
 		}
