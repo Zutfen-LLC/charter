@@ -23,6 +23,7 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/server"
 	"github.com/Zutfen-LLC/charter/internal/store"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -263,10 +264,11 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 	_, token4, err := rs.Store.BeginExport(ctx, requester, tenant, a4.ID, time.Minute, check)
 	must(err)
 	must(rs.Store.RecordExportAttemptFailure(ctx, requester, a4.ID, token4, "readback"))
-	var state4, persistedToken string
-	must(ws.QueryRow(ctx, `SELECT state,attempt_token FROM scoped_exports WHERE tenant_id=$1 AND id=$2`, tenant, a4.ID).Scan(&state4, &persistedToken))
-	if state4 != records.ExportGenerating || persistedToken != token4 {
-		t.Fatalf("REC-04 failure not durable: %s %q", state4, persistedToken)
+	var state4 string
+	var persistedToken pgtype.Text
+	must(ws.QueryRow(ctx, `SELECT state,attempt_token::text FROM scoped_exports WHERE tenant_id=$1 AND id=$2`, tenant, a4.ID).Scan(&state4, &persistedToken))
+	if state4 != records.ExportGenerating || !persistedToken.Valid || persistedToken.String != token4 {
+		t.Errorf("REC-04 required generating state with attempt token; got state=%q token_valid=%v", state4, persistedToken.Valid)
 	}
 	if _, err = export.Generate(ctx, requester, a4.ID); err != nil {
 		t.Fatalf("REC-04 retry: %v", err)
@@ -280,6 +282,7 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 	if _, err = rs.Store.PublishExport(ctx, requester, tenant, a5.ID, token5, a5.SnapshotDigest, strings.Repeat("a", 64), []byte("synthetic staged bytes"), badVerify, check); err == nil {
 		t.Fatal("REC-05 verifier failure published")
 	}
+	must(rs.Store.RecordExportAttemptFailure(ctx, requester, a5.ID, token5, "publish"))
 	checkNoPackage(a5.ID)
 	if _, err = export.Generate(ctx, requester, a5.ID); err != nil {
 		t.Fatalf("REC-05 retry: %v", err)
