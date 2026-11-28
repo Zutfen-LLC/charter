@@ -167,6 +167,15 @@ func TestC08HTTPExportLifecycleAuthorizationMatrix(t *testing.T) {
 	if _, err := e.st.DB.Exec(ctx, `DELETE FROM tenant_roles WHERE tenant_id=$1 AND user_id=$2 AND role=$3`, e.tenant, e.users["dave"], store.RoleRecordsOfficer); err != nil {
 		t.Fatal(err)
 	}
+	generateRevoked := httptest.NewRequest(http.MethodPost, "/v1/exports/"+id+"/generate", nil)
+	generateRevoked.Header.Set("Authorization", "Bearer "+e.idp.Token("sub-dave"))
+	beforeGenerate := probe.calls["generate"]
+	generateRevokedRec := httptest.NewRecorder()
+	e.h.ServeHTTP(generateRevokedRec, generateRevoked)
+	denyNoLeak(generateRevokedRec, http.StatusForbidden)
+	if probe.calls["generate"] != beforeGenerate {
+		t.Fatal("revoked requester reached generation backend")
+	}
 	denyNoLeak(approval(), http.StatusForbidden)
 	if err := e.st.SeedRole(ctx, e.tenant, e.users["dave"], store.RoleRecordsOfficer); err != nil {
 		t.Fatal(err)
@@ -254,6 +263,18 @@ func TestC08HTTPExportLifecycleAuthorizationMatrix(t *testing.T) {
 		}
 		rec := get("erin", id)
 		denyNoLeak(rec, http.StatusNotFound)
+	}
+
+	// Revocation immediately before HTTP retrieval is checked by middleware and
+	// does not reach the package backend.
+	if _, err := e.st.DB.Exec(ctx, `DELETE FROM tenant_roles WHERE tenant_id=$1 AND user_id=$2 AND role=$3`, e.tenant, e.users["erin"], store.RoleExportReviewer); err != nil {
+		t.Fatal(err)
+	}
+	beforeRetrieve := probe.calls["retrieve"]
+	revokedDelivery := get("erin", "44444444-4444-4444-8444-444444444444")
+	denyNoLeak(revokedDelivery, http.StatusForbidden)
+	if probe.calls["retrieve"] != beforeRetrieve {
+		t.Fatal("revoked reviewer reached retrieval backend")
 	}
 
 	// A closed PostgreSQL pool makes principal resolution fail in production
