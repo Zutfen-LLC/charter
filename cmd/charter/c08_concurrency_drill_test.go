@@ -157,7 +157,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 	}
 	approved := func(r records.ExportSummary) { _, e := h.ex.Approve(ctx, reviewer, r.ID, r.SnapshotDigest); must(e) }
 	cancelExport := func(id string) { _ = rs.Store.CancelExport(ctx, requester, requester.TenantID, id) }
-	assertNoPackage := func(id string) {
+	assertNoPackage := func(t *testing.T, id string) {
 		p, e := h.ex.Retrieve(ctx, reviewer, id)
 		if e == nil || len(p.DirectoryJSON) != 0 {
 			t.Fatalf("unauthorized package delivered after refusal (%d bytes, err=%v)", len(p.DirectoryJSON), e)
@@ -166,20 +166,22 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		// exist, and package bytes must be absent or empty unless the
 		// export was legitimately published (state 'ready') before the
 		// racing mutation — a published-then-released package is sealed
-		// and undeliverable, and only its delivery is forbidden.
-		var state string
+		// and undeliverable, and only its delivery is forbidden. Callers
+		// pass the request key when the request itself was refused (no
+		// row exists at all) or the export's UUID afterwards.
+		var exportID, state string
 		var packageBytes *string
-		if err := ws.QueryRow(ctx, `SELECT state, package_bytes::text FROM scoped_exports WHERE tenant_id=$1 AND id=$2`, requester.TenantID, id).Scan(&state, &packageBytes); err != nil {
+		if err := ws.QueryRow(ctx, `SELECT id::text, state, package_bytes::text FROM scoped_exports WHERE tenant_id=$1 AND (id::text=$2 OR request_key=$2)`, requester.TenantID, id).Scan(&exportID, &state, &packageBytes); err != nil {
 			if !errors.Is(err, pgx.ErrNoRows) {
 				t.Fatalf("export row readback: %v", err)
 			}
-			state, packageBytes = "absent", nil
+			exportID, state, packageBytes = id, "absent", nil
 		}
 		if state != records.ExportReady && packageBytes != nil && *packageBytes != "" {
 			t.Fatalf("refusal left durable package bytes (state=%s)", state)
 		}
 		var deliveries int
-		if err := ws.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id=$1 AND action='export.retrieve' AND detail->>'export_id'=$2`, requester.TenantID, id).Scan(&deliveries); err != nil {
+		if err := ws.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id=$1 AND action='export.retrieve' AND detail->>'export_id'=$2`, requester.TenantID, exportID).Scan(&deliveries); err != nil {
 			t.Fatalf("delivery audit readback: %v", err)
 		}
 		if deliveries != 0 {
@@ -188,6 +190,29 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		cancelExport(id)
 	}
 	place := h.place
+	// waitBlockedOnEpochRow fails the subtest unless a backend running an
+	// epoch-row statement is observed waiting on a database lock: this
+	// proves the racing hold mutation (release or scope change, whose
+	// epoch bump UPDATE targets matter_hold_epochs) reached and blocked
+	// on the epoch row held by the still-open export transaction. The
+	// interleaving is therefore observed, not merely consistent with
+	// the outcome; a mutation that never blocks fails the drill.
+	waitBlockedOnEpochRow := func(t *testing.T) {
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			var blocked int
+			if err := ws.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query ILIKE '%matter_hold_epochs%' AND pid <> pg_backend_pid()`).Scan(&blocked); err != nil {
+				t.Fatalf("epoch-row block observation: %v", err)
+			}
+			if blocked > 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("racing mutation never blocked on the epoch row held by the open export transaction")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 
 	t.Run("CONC-01-placement-vs-snapshot", func(t *testing.T) {
 		f := fresh("01")
@@ -228,7 +253,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 			}
 			cancelExport("conc-01-export")
 		} else {
-			assertNoPackage("conc-01-export")
+			assertNoPackage(t, "conc-01-export")
 		}
 	})
 	t.Run("CONC-02-release-vs-snapshot", func(t *testing.T) {
@@ -241,7 +266,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if e == nil {
 			t.Fatalf("snapshot unexpectedly succeeded after release: %+v", r)
 		}
-		assertNoPackage("conc-02-export")
+		assertNoPackage(t, "conc-02-export")
 	})
 	t.Run("CONC-03-release-vs-generation", func(t *testing.T) {
 		f := fresh("03")
@@ -254,7 +279,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.ex.Generate(ctx, requester, r.ID); e == nil {
 			t.Fatal("generation succeeded after release")
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 	})
 	t.Run("CONC-04-release-vs-publication", func(t *testing.T) {
 		f := fresh("04")
@@ -281,7 +306,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if e := <-done; e == nil {
 			t.Fatal("publication accepted stale hold snapshot")
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 	})
 	t.Run("CONC-05-release-vs-retrieval", func(t *testing.T) {
 		f := fresh("05")
@@ -294,7 +319,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.rs.Release(ctx, requester, hold.ID, "synthetic release before retrieval"); e != nil {
 			t.Fatal(e)
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 	})
 	t.Run("CONC-06-scope-change-vs-approval", func(t *testing.T) {
 		f := fresh("06")
@@ -306,7 +331,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.ex.Approve(ctx, reviewer, r.ID, r.SnapshotDigest); e == nil {
 			t.Fatal("approval accepted stale scope epoch")
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 	})
 	t.Run("CONC-07-scope-change-vs-generation", func(t *testing.T) {
 		f := fresh("07")
@@ -319,7 +344,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.ex.Generate(ctx, requester, r.ID); e == nil {
 			t.Fatal("generation accepted stale scope epoch")
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 	})
 	// Concurrent boundary series: the sequential subtests above prove the
 	// stale-state side of each boundary (the mutation committed first).
@@ -328,12 +353,13 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 	// barrier-based subtests pause the OPEN export transaction at the
 	// Hooks.AtEpochLock seam (which fires inside the snapshot or
 	// revalidation transaction while it holds the protection fence, the
-	// scoped item rows and the matter epoch row, so the racing release or
-	// scope change blocks on the epoch row until the transaction commits);
-	// the phase-gap subtests commit the mutation between the two durable
-	// generation phases (lease acquired, publication not yet attempted) -
-	// the exact window a concurrent mutation can win. The interleaving and
-	// the linearization winner are forced, never observed by chance.
+	// scoped item rows and the matter epoch row) and only release it after
+	// pg_stat_activity shows the racing mutation blocked on the epoch row,
+	// so the interleaving is observed, not merely consistent with the
+	// outcome; the phase-gap subtests commit the mutation between the two
+	// durable generation phases (lease acquired, publication not yet
+	// attempted) - the exact window a concurrent mutation can win. The
+	// linearization winner is forced, never observed by chance.
 	t.Run("CONC-02-release-vs-snapshot-concurrent", func(t *testing.T) {
 		f := fresh("02c")
 		hold := place(f, "conc-02c-hold")
@@ -358,6 +384,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 			_, e := h.rs.Release(ctx, requester, hold.ID, "synthetic concurrent release")
 			relDone <- e
 		}()
+		waitBlockedOnEpochRow(t)
 		close(proceed)
 		r := <-reqDone
 		if e := <-reqErrC; e != nil {
@@ -373,7 +400,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.ex.Approve(ctx, reviewer, r.ID, r.SnapshotDigest); e == nil {
 			t.Fatal("approval accepted a hold released after the snapshot")
 		}
-		assertNoPackage("conc-02c-export")
+		assertNoPackage(t, "conc-02c-export")
 	})
 	t.Run("CONC-03-release-vs-generation-concurrent", func(t *testing.T) {
 		f := fresh("03c")
@@ -397,7 +424,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.rs.Store.PublishExport(ctx, requester, requester.TenantID, r.ID, token, r.SnapshotDigest, strings.Repeat("a", 64), []byte("synthetic staged package"), accept, check); e == nil {
 			t.Fatal("generation published content whose hold was released mid-generation")
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 	})
 	t.Run("CONC-05-release-vs-retrieval-concurrent", func(t *testing.T) {
 		f := fresh("05c")
@@ -429,6 +456,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 			_, e := h.rs.Release(ctx, requester, hold.ID, "synthetic release concurrent with retrieval")
 			relDone <- e
 		}()
+		waitBlockedOnEpochRow(t)
 		close(proceed)
 		if e := <-getErr; e != nil {
 			t.Fatalf("retrieval linearizing before the release must deliver: %v", e)
@@ -467,6 +495,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 			_, e := rs.Store.ChangeScope(ctx, requester, hold.ID, records.Scope{MatterID: f.matter, CustodianIDs: []string{}}, "synthetic concurrent scope revision")
 			scopeDone <- e
 		}()
+		waitBlockedOnEpochRow(t)
 		close(proceed)
 		if e := <-approveDone; e != nil {
 			t.Fatalf("approval linearizing before the scope change must succeed: %v", e)
@@ -477,7 +506,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.ex.Generate(ctx, requester, r.ID); e == nil {
 			t.Fatal("generation accepted a scope revised after approval")
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 	})
 	t.Run("CONC-07-scope-change-vs-generation-concurrent", func(t *testing.T) {
 		f := fresh("07c")
@@ -499,7 +528,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.rs.Store.PublishExport(ctx, requester, requester.TenantID, r.ID, token, r.SnapshotDigest, strings.Repeat("b", 64), []byte("synthetic staged package"), accept, check); e == nil {
 			t.Fatal("generation published content whose scope was revised mid-generation")
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 	})
 	t.Run("CONC-08-capture-vs-snapshot", func(t *testing.T) {
 		f := fresh("08")
@@ -523,7 +552,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if requestErr == nil {
 			t.Fatal("snapshot accepted concurrent unfinished admission")
 		}
-		assertNoPackage("conc-08-export")
+		assertNoPackage(t, "conc-08-export")
 	})
 	t.Run("CONC-09-disposal-vs-snapshot", func(t *testing.T) {
 		f := fresh("09")
@@ -596,7 +625,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		} else {
 			t.Logf("request failed closed against concurrent disposal: %v", result.e)
 		}
-		assertNoPackage("conc-09-export")
+		assertNoPackage(t, "conc-09-export")
 	})
 	t.Run("CONC-10-disposal-vs-generation", func(t *testing.T) {
 		f := fresh("10")
@@ -633,7 +662,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.ex.Generate(ctx, requester, r.ID); e == nil {
 			t.Fatal("generation accepted disposal state change")
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 	})
 	t.Run("CONC-11-overlapping-holds", func(t *testing.T) {
 		f := fresh("11")
@@ -658,7 +687,7 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		if _, e := h.ex.Generate(ctx, requester, r.ID); e == nil {
 			t.Fatal("stale overlapping-hold snapshot generated after epoch change")
 		}
-		assertNoPackage(r.ID)
+		assertNoPackage(t, r.ID)
 		r = request(f, "conc-11-export-after-release")
 		approved(r)
 		if _, e := h.ex.Generate(ctx, requester, r.ID); e != nil {
