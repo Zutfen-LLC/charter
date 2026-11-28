@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +68,14 @@ import (
 //	    the temporary protection is removed, and an unrelated intact record
 //	    remaining operational throughout.
 func TestC07Round4ReviewDrill(t *testing.T) {
+	runC07Round4OrPlanCoverageDrill(t, false)
+}
+
+func TestC07PlanCoverageDrill(t *testing.T) {
+	runC07Round4OrPlanCoverageDrill(t, true)
+}
+
+func runC07Round4OrPlanCoverageDrill(t *testing.T, planCoverage bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	must := func(err error) {
@@ -352,6 +361,65 @@ func TestC07Round4ReviewDrill(t *testing.T) {
 		protect(protected...)
 		_, _, err := svcRecords.FinishPurge(ctx, &officer2, turn)
 		return refs, err
+	}
+
+	if planCoverage {
+		turn := seedTurn(pF1A, mF1A, alice, "round5-plan-intact", "classification input")
+		refs := refsOf(turn)
+		time.Sleep(2 * time.Second) // expire the applicable catalog policy, not the native retention
+		_, err := svcRecords.Sweep(ctx, officer1)
+		must(err)
+		if state := itemState(turn); state != records.ItemDisposalPending {
+			t.Fatalf("sweep state: %s", state)
+		}
+		outcome, err := svcRecords.Store.BeginPurge(ctx, officer2, turn, func(ctx context.Context, tx pgx.Tx, id string) (bool, error) {
+			p := svcRecords.PresenceClassifiedIn(ctx, tx, tenant, id)
+			if p != records.PresencePresent {
+				return false, fmt.Errorf("setup presence: %s", p)
+			}
+			return true, nil
+		})
+		must(err)
+		if outcome != "purging" {
+			t.Fatalf("begin purge: %s", outcome)
+		}
+		interrupted := errors.New("test interruption before physical deletion")
+		svcRecords.Hooks.BeforeStorageDelete = func(string, string) { panic(interrupted) }
+		func() {
+			defer func() {
+				if v := recover(); v != interrupted {
+					t.Fatalf("did not reach pre-delete boundary: %v", v)
+				}
+			}()
+			_, _, err := svcRecords.FinishPurge(ctx, &officer2, turn)
+			t.Fatalf("finish returned without reaching pre-delete boundary: %v", err)
+		}()
+		svcRecords.Hooks.BeforeStorageDelete = nil
+		plan, err := svcRecords.Store.PlanOf(ctx, tenant, turn)
+		must(err)
+		if len(plan) == 0 || len(plan) != len(refs) {
+			t.Fatalf("durable plan: %d, want %d", len(plan), len(refs))
+		}
+		for _, r := range plan {
+			must(recordsClient.Head(ctx, r.Key, r.Version))
+		}
+		h, err := svcRecords.Place(ctx, officer1, records.Scope{MatterID: mF1A}, "protect intact plan", "r5-intact-plan")
+		must(err)
+		for _, r := range refs {
+			if !holdOn(r) {
+				t.Fatalf("native legal hold not ON: %v", r)
+			}
+		}
+		stored, err := svcRecords.Store.GetHold(ctx, officer2, h.ID)
+		must(err)
+		dump("c07r4-plan-coverage.json", map[string]any{"before_hold_head_present": len(plan), "native_legal_hold_on": len(refs), "returned": h.Report, "durable": stored.Report})
+		if !reflect.DeepEqual(h.Report, stored.Report) {
+			t.Fatal("durable report mismatch")
+		}
+		if len(h.Report.PartiallyDisposed) != 0 || len(h.Report.Items) != 1 || h.Report.Items[0].PartiallyDisposed || h.Report.Items[0].MissingVersions != 0 || h.Report.Items[0].Versions != len(plan) {
+			t.Fatalf("intact plan reported as loss after %d successful HEAD and %d native legal-hold readbacks: partial=%v items=%+v", len(plan), len(refs), h.Report.PartiallyDisposed, h.Report.Items)
+		}
+		return
 	}
 
 	// ---- Seed the scenario turns (before the retention wait) ----
