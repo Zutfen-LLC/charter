@@ -265,6 +265,58 @@ and scope change is also fixed).
   current scope revision, so a stale recovery result can never overwrite
   a newer scope's coverage information.
 
+## Round-4 review corrections
+
+- **The durable disposal plan is the AUTHORITATIVE reference set
+  throughout interrupted disposal** (finding 1, CRITICAL): the exact
+  version set evaluated for shared-reference protection is the UNION of
+  the live enumeration and the plan's outstanding rows (every
+  disposition except `deleted`/`absent`), so it always covers the
+  deleter's version set. A live enumeration that SUCCEEDS can be
+  TRUNCATED - a deleted suffix shrinks the chain-contiguity horizon, so
+  `TurnDisposalRefs` walks only the surviving prefix - and a truncated
+  result is never allowed to override known durable references. The same
+  union resolves sibling reference sets (`turnReferenceSet`) for the
+  shared-reference scan, the required-version scan (native legal-hold
+  removal parity) and plan-backed coverage: a partially disposed sibling
+  with a surviving admission fences the versions its truncated live
+  enumeration no longer lists, and a rolled-back interrupted deletion's
+  physically deleted-but-undispositioned identities keep fencing until a
+  verified disposition records the loss. The production deletion loop
+  continues after `ErrObjectProtected`, so a surviving admission with
+  deleted subsequent event slots is a REACHABLE interrupted-disposal
+  state (the round-4 drills interrupt the ACTUAL `FinishPurge` with
+  selective native protection; the earlier rounds' admission-first
+  synthetic deletions are only one shape among many).
+- **A surviving admission with verifiably gone event-zero data is a
+  reconcilable gap, never a tenant-wide wedge** (finding 2, HIGH):
+  `InventoryTurnsWithGaps` separates admission gaps (the marker
+  survives, the event-zero data version is verifiably absent) from hard
+  identity failures (corrupt, ambiguous or transient - those still fail
+  the inventory). A gap turn is omitted from the live inventory and
+  reconciled against the durable disposal plan and lifecycle catalog,
+  which must both exist and bind to the exact tenant, turn and project
+  the surviving admission names; unplanned identity loss (no plan, no
+  catalog binding) still fails closed. Plan-backed gap turns keep the
+  full lifecycle operational - hold placement over the interrupted
+  record reports `partially_disposed` with the storage-verified losses
+  counted, hold placement over UNRELATED records is never blocked, and
+  ordinary disposal resumes after release and retention expiry. A LIVE
+  record with a durable disposal plan is covered the same way (from the
+  plan, probing every outstanding version) - a truncated live
+  enumeration is never silently passed as complete coverage. A 404 from
+  any storage read is the canonical `ErrObjectAbsent`, so absence is
+  verifiable wherever it is observed.
+- **Release-cleanup reports converge to the committed ownership ledger**
+  (finding 3, MEDIUM): the report is refreshed whenever there is
+  anything to converge - outstanding claims to record, or a stale
+  non-empty pending list to clear on verified clearance - from both
+  release paths (including the idempotent retry) and from recovery,
+  which refreshes ZERO-claim holds instead of skipping them. Repair-state
+  publications verify the hold's lifecycle state atomically with the
+  write: a hold released after recovery's listing never receives stale
+  effective-hold repair results.
+
 ## Concurrency and recovery
 
 - Placement, release and scope change serialize on the per-matter epoch row;
