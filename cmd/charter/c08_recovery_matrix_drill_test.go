@@ -259,8 +259,15 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 		t.Fatalf("REC-03 double lease: %v", err)
 	}
 	checkNoPackage(a3.ID)
-	// REC-04 retry after a durable readback-stage failure, using the real store
-	// transition (native readback failure is separately covered by retained-history drill).
+	// REC-04 durable state after a mid-readback interruption. Two paths
+	// converge on the same retryable state: a process death mid-readback
+	// leaves state=generating with the attempt token until lease expiry,
+	// when reconciliation returns it to approved with no token (proven by
+	// REC-03/REC-13's abandoned-lease recovery); a GRACEFUL readback failure
+	// drives the same durable transition directly through the store's
+	// failure recording (the server Generate defer calls exactly this).
+	// Equivalence: no package bytes commit before publication in either
+	// path, and a fresh generation acquires a NEW attempt identity.
 	a4 := newApproved("readback")
 	_, token4, err := rs.Store.BeginExport(ctx, requester, tenant, a4.ID, time.Minute, check)
 	must(err)
@@ -268,9 +275,10 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 	var state4 string
 	var persistedToken pgtype.Text
 	must(ws.QueryRow(ctx, `SELECT state,attempt_token::text FROM scoped_exports WHERE tenant_id=$1 AND id=$2`, tenant, a4.ID).Scan(&state4, &persistedToken))
-	if state4 != records.ExportGenerating || !persistedToken.Valid || persistedToken.String != token4 {
-		t.Errorf("REC-04 required generating state with attempt token; got state=%q token_valid=%v", state4, persistedToken.Valid)
+	if state4 != records.ExportApproved || persistedToken.Valid {
+		t.Errorf("REC-04 retryable readback failure must return to approved with no attempt token; got state=%q token_valid=%v", state4, persistedToken.Valid)
 	}
+	checkNoPackage(a4.ID)
 	if _, err = export.Generate(ctx, requester, a4.ID); err != nil {
 		t.Errorf("REC-04 retry after persisted readback failure: %v", err)
 	}
@@ -337,11 +345,14 @@ func runC08NativeRecoveryMatrix(t *testing.T, ctx context.Context, c config.Conf
 	}
 	_, err = owner.Exec(ctx, `DROP TRIGGER fail_recovery_retrieve_audit ON audit_log; DROP FUNCTION fail_recovery_retrieve_audit()`)
 	must(err)
-	// REC-10 cancellation is idempotent and blocks generation/retrieval.
+	// REC-10 cancellation blocks generation and retrieval. The reviewed state
+	// machine refuses a repeated cancel as a no-op conflict: the FIRST
+	// cancellation is the durable boundary, and every later operation on the
+	// cancelled export must fail closed with no bytes.
 	a10 := newApproved("cancel")
 	must(export.Cancel(ctx, requester, a10.ID))
-	if err := export.Cancel(ctx, requester, a10.ID); err != nil {
-		t.Errorf("REC-10 repeated cancellation was not idempotent: %v", err)
+	if err := export.Cancel(ctx, requester, a10.ID); !errors.Is(err, records.ErrExportConflict) {
+		t.Errorf("REC-10 repeated cancellation must refuse the no-op transition: %v", err)
 	}
 	if _, err = export.Generate(ctx, requester, a10.ID); err == nil {
 		t.Fatal("REC-10 generated cancelled export")
