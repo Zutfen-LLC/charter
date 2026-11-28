@@ -43,6 +43,18 @@ type ExportSnapshotMissingVersion struct {
 	PlanEpoch   *int64 `json:"plan_epoch,omitempty"`
 }
 
+// ExportSnapshotSharedVersion attributes an exact version of a completed
+// disposal that physically survived through another record's references
+// (retained_shared). It is attribution, never content: a disposed record
+// cannot regain export authority over bytes another record retains, and the
+// survivor is neither declared deleted nor absent.
+type ExportSnapshotSharedVersion struct {
+	Key         string `json:"key"`
+	Version     string `json:"version"`
+	Disposition string `json:"disposition"`
+	PlanEpoch   *int64 `json:"plan_epoch,omitempty"`
+}
+
 type ExportSnapshotRecord struct {
 	TenantID       string                         `json:"tenant_id"`
 	ProjectID      string                         `json:"project_id"`
@@ -54,6 +66,7 @@ type ExportSnapshotRecord struct {
 	HeldBy         []string                       `json:"held_by"`
 	Versions       []ExportSnapshotVersion        `json:"versions"`
 	Missing        []ExportSnapshotMissingVersion `json:"missing,omitempty"`
+	RetainedShared []ExportSnapshotSharedVersion  `json:"retained_shared_versions,omitempty"`
 	Classification string                         `json:"classification"`
 }
 
@@ -316,7 +329,7 @@ func (s *Service) captureExportSnapshot(ctx context.Context, tx pgx.Tx, tenantID
 			authorityIDs = append(authorityIDs, evidence.TurnIdentity{TenantID: item.TenantID, ProjectID: item.ProjectID, MatterID: item.MatterID, CustodianID: item.CustodianID, TurnID: item.TurnID, RecordedAt: item.RecordedAt})
 		}
 		byTurn[item.TurnID] = frozen
-		totalVersions += len(frozen.survivors) + len(frozen.missing)
+		totalVersions += len(frozen.survivors) + len(frozen.missing) + len(frozen.shared)
 		if totalVersions > maxExportSnapshotVersions {
 			return nil, errInvalidExportSnapshot
 		}
@@ -335,6 +348,7 @@ func (s *Service) captureExportSnapshot(ctx context.Context, tx pgx.Tx, tenantID
 		if f, ok := byTurn[r.TurnID]; ok {
 			r.Classification = f.classification
 			r.Missing = f.missing
+			r.RetainedShared = f.shared
 			for _, ref := range f.survivors {
 				r.Versions = append(r.Versions, ExportSnapshotVersion{Key: ref.Key, Version: ref.Version})
 			}

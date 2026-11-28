@@ -152,6 +152,18 @@ and scope change is also fixed).
   verified dispositions to distinguish physical loss from retained shared
   survivors. A plan is cleared only when a hold-driven restoration has
   verified every planned version intact; partial loss keeps the plan.
+- Logical disposition and physical presence are distinct facts. A disposed
+  record never regains content authority through another record's surviving
+  physical references: its `retained_shared` rows are exported as exact
+  `retained_shared_versions` attribution on the disposed gap (never content,
+  never a missing-version declaration, and never a native-hold requirement of
+  the disposed record - the surviving bytes' protection belongs to the
+  retaining record and its own hold). A physically surviving version of a
+  completed disposal without a durable `retained_shared` disposition refuses
+  the export fail-closed. A disposed record with no attributable plan also
+  refuses fail-closed; where a predecessor C07 database already lost the
+  completed plan to a legitimate retry, the historical attribution cannot be
+  re-established and the export limitation stands.
 - Scope revision binding: a scope change moves `holds.epoch` to the new
   matter epoch, and the effective transition (MarkEffective) is bound to
   the exact scope revision the establishment verified. A stale

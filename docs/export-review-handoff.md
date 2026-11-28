@@ -130,6 +130,18 @@ export authority; it must not be interpreted as verified historical loss.
 Unreadable or otherwise unknown authority/presence is an operational refusal,
 not a gap declaration.
 
+A `disposed` gap may additionally bind `retained_shared_versions`: exact
+content-addressed object versions that physically survived the record's
+completed disposal through another record's references. Each entry identifies
+`key`, `version`, `disposition` (always `retained_shared`) and `plan_epoch`.
+This is attribution, not content: the bytes are not exported through the
+disposed record's identity, the same exact version is never also declared
+missing, and the entry asserts neither presence nor absence today - it records
+the durable disposal ledger's outcome. The surviving version's protection is
+the retaining record's responsibility. No other gap kind may carry
+`retained_shared_versions`; a non-disposed record's shared bytes appear, when
+authorized, as that record's own `retained_versions` content.
+
 ## Service custody and linearization
 
 - The records officer posts `POST /v1/exports` with `Idempotency-Key` and

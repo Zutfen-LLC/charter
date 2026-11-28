@@ -137,6 +137,17 @@ func assembleRetainedDirectory(ctx context.Context, s records.ExportSummary, rea
 			}
 			missing = append(missing, map[string]any{"key": loss.Key, "version": loss.Version, "disposition": loss.Disposition, "plan_epoch": epoch})
 		}
+		shared := make([]any, 0, len(r.RetainedShared))
+		for _, sv := range r.RetainedShared {
+			if sv.Disposition != "retained_shared" {
+				return nil, "", records.ErrExportConflict
+			}
+			var epoch any
+			if sv.PlanEpoch != nil {
+				epoch = *sv.PlanEpoch
+			}
+			shared = append(shared, map[string]any{"key": sv.Key, "version": sv.Version, "disposition": sv.Disposition, "plan_epoch": epoch})
+		}
 		partial := r.Classification == "partial_loss"
 		switch r.Classification {
 		case "complete":
@@ -158,8 +169,18 @@ func assembleRetainedDirectory(ctx context.Context, s records.ExportSummary, rea
 		default:
 			return nil, "", records.ErrExportConflict
 		}
+		if r.Classification != "disposed" && len(r.RetainedShared) != 0 {
+			// Shared survivors of a completed disposal are attributed only on
+			// disposed gaps; a non-disposed record's shared bytes are content
+			// (retained_versions), never a gap attribution.
+			return nil, "", records.ErrExportConflict
+		}
 		if r.Classification != "complete" {
-			gaps = append(gaps, map[string]any{"kind": r.Classification, "turn_id": r.TurnID, "custodian_id": r.CustodianID, "recorded_at": r.RecordedAt.UTC().Format(time.RFC3339Nano), "hold_ids": exportStrings(r.HeldBy), "missing_versions": missing})
+			entry := map[string]any{"kind": r.Classification, "turn_id": r.TurnID, "custodian_id": r.CustodianID, "recorded_at": r.RecordedAt.UTC().Format(time.RFC3339Nano), "hold_ids": exportStrings(r.HeldBy), "missing_versions": missing}
+			if len(shared) > 0 {
+				entry["retained_shared_versions"] = shared
+			}
+			gaps = append(gaps, entry)
 			if !partial {
 				continue
 			}

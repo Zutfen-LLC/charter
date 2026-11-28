@@ -12,6 +12,7 @@ import (
 
 type frozenExportPresence struct {
 	survivors      []evidence.VersionRef
+	shared         []ExportSnapshotSharedVersion
 	missing        []ExportSnapshotMissingVersion
 	classification string
 }
@@ -19,15 +20,27 @@ type frozenExportPresence struct {
 // Freeze the union of plan and verified live references inside the existing
 // protection/epoch fence. A plan records intent, not loss: only its durable
 // dispositions or an exact-version absence can authorize a declared gap.
+//
+// Logical disposition and physical presence are distinct facts. A completed
+// disposal's retained_shared rows are attributed as exact versions that
+// physically survived through OTHER records' references: the durable plan
+// disposition is the authority, so the survivor is neither re-derived from
+// present-day storage state nor declared deleted or absent. A disposed
+// record therefore never regains content authority (no export readback, no
+// native-hold requirement of its own) through bytes another record retains,
+// and its export cannot wedge merely because the retaining record's hold is
+// absent: the surviving bytes' protection is the retaining record's
+// responsibility, established by that record's own hold.
 func (s *Service) freezeExportPresence(ctx context.Context, tx pgx.Tx, item Item, plan []PlanRow) (frozenExportPresence, error) {
 	out := frozenExportPresence{classification: "complete"}
 	if s.Storage == nil {
 		return out, ErrExportConflict
 	}
+	disposed := item.State == ItemDisposed
 	var live []evidence.VersionRef
 	var err error
 	if len(plan) == 0 {
-		if item.State == ItemDisposed {
+		if disposed {
 			return out, errors.New("disposed export has no attributable plan")
 		}
 		var resolution refSetResolution
@@ -57,6 +70,9 @@ func (s *Service) freezeExportPresence(ctx context.Context, tx pgx.Tx, item Item
 		disposition := ""
 		if known && (row.Disposition == OutcomeDeleted || row.Disposition == OutcomeAbsent) {
 			disposition = row.Disposition
+		} else if known && disposed && row.Disposition == OutcomeRetainedShared {
+			out.shared = append(out.shared, ExportSnapshotSharedVersion{Key: r.Key, Version: r.Version, Disposition: OutcomeRetainedShared, PlanEpoch: row.PlanEpoch})
+			continue
 		} else if err := s.Storage.Head(ctx, r.Key, r.Version); err != nil {
 			if !known || !errors.Is(err, s3transport.ErrObjectAbsent) {
 				return out, fmt.Errorf("unverified exact export version presence: %w", err)
@@ -67,19 +83,25 @@ func (s *Service) freezeExportPresence(ctx context.Context, tx pgx.Tx, item Item
 			out.missing = append(out.missing, ExportSnapshotMissingVersion{Key: r.Key, Version: r.Version, Disposition: disposition, PlanEpoch: row.PlanEpoch})
 			continue
 		}
+		if disposed {
+			// A physically present version of a completed disposal without a
+			// durable retained_shared disposition has no attributable
+			// authority. Fail closed: neither content export nor a
+			// fabricated loss declaration is permitted.
+			return out, fmt.Errorf("disposed record has an undispositioned surviving exact version %s: %w", r.Key, ErrExportConflict)
+		}
 		mode, err := s.Storage.LegalHold(ctx, r.Key, r.Version)
 		if err != nil || mode != "ON" {
 			return out, fmt.Errorf("unverified exact export version custody: %w", errors.Join(ErrExportConflict, err))
 		}
 		out.survivors = append(out.survivors, r)
 	}
-	if len(out.missing) > 0 {
+	if disposed {
+		out.classification = "disposed"
+	} else if len(out.missing) > 0 {
 		out.classification = "partial_loss"
 		if len(out.survivors) == 0 {
 			out.classification = "complete_loss"
-			if item.State == ItemDisposed {
-				out.classification = "disposed"
-			}
 		}
 	}
 	return out, nil

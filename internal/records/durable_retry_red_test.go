@@ -119,10 +119,16 @@ func TestDurableFinishRetriesPreserveHistoricalDisposalPlan(t *testing.T) {
 	found := false
 	for _, record := range frozen.Records {
 		if record.TurnID == turn {
-			found = record.Classification == "partial_loss" && len(record.Missing) > 0 && len(record.Versions) == 1
+			// Correction finding 1: a disposed record's shared survivor is
+			// attribution, never content authority. The historical export
+			// stays a disposed gap whose exact loss is declared and whose
+			// shared survivor is attributed retained_shared (previously this
+			// asserted the partial_loss-with-shared-content shape the
+			// correction removed).
+			found = record.State == records.ItemDisposed && record.Classification == "disposed" && len(record.Missing) > 0 && len(record.Versions) == 0 && len(record.RetainedShared) == 1
 		}
 	}
 	if !found {
-		t.Fatalf("historical C08 snapshot did not retain exact loss plus shared survivor: %+v", frozen.Records)
+		t.Fatalf("historical C08 snapshot did not retain exact loss plus shared attribution: %+v", frozen.Records)
 	}
 }
