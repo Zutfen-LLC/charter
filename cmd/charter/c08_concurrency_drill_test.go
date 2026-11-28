@@ -22,6 +22,7 @@ import (
 	"github.com/Zutfen-LLC/charter/internal/records"
 	"github.com/Zutfen-LLC/charter/internal/server"
 	"github.com/Zutfen-LLC/charter/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -160,6 +161,29 @@ func runC08NativeConcurrency(t *testing.T, ctx context.Context, c config.Config,
 		p, e := h.ex.Retrieve(ctx, reviewer, id)
 		if e == nil || len(p.DirectoryJSON) != 0 {
 			t.Fatalf("unauthorized package delivered after refusal (%d bytes, err=%v)", len(p.DirectoryJSON), e)
+		}
+		// The refusal must extend to durable state: no delivery audit may
+		// exist, and package bytes must be absent or empty unless the
+		// export was legitimately published (state 'ready') before the
+		// racing mutation — a published-then-released package is sealed
+		// and undeliverable, and only its delivery is forbidden.
+		var state string
+		var packageBytes *string
+		if err := ws.QueryRow(ctx, `SELECT state, package_bytes::text FROM scoped_exports WHERE tenant_id=$1 AND id=$2`, requester.TenantID, id).Scan(&state, &packageBytes); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("export row readback: %v", err)
+			}
+			state, packageBytes = "absent", nil
+		}
+		if state != records.ExportReady && packageBytes != nil && *packageBytes != "" {
+			t.Fatalf("refusal left durable package bytes (state=%s)", state)
+		}
+		var deliveries int
+		if err := ws.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id=$1 AND action='export.retrieve' AND detail->>'export_id'=$2`, requester.TenantID, id).Scan(&deliveries); err != nil {
+			t.Fatalf("delivery audit readback: %v", err)
+		}
+		if deliveries != 0 {
+			t.Fatalf("refusal left %d delivery audit rows", deliveries)
 		}
 		cancelExport(id)
 	}
